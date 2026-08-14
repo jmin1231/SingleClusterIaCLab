@@ -1719,7 +1719,7 @@ than one that merely works.
 
 ---
 
-Once your build is running, [maturity-roadmap.md](maturity-roadmap.md) is the companion document:
+Once your build is running, the reference lab's `docs/maturity-roadmap.md` is the companion document:
 it prioritises ongoing work on an existing instance of this architecture — what to fix first, what
 can run in parallel, and what a single host can never fake. Much of it will already be done if you
 followed this order, which is a reasonable way to check that you did.

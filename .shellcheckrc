@@ -1,3 +1,9 @@
+# This repo is bash everywhere — scripts, hooks, and Makefile recipes alike
+# (see docs/decisions.md 0.2-2). Setting the dialect here means shellcheck
+# applies bash rules even to a file whose shebang it cannot see, so the decision
+# is enforced rather than merely documented.
+shell=bash
+
 # Accepted idioms and sourced-file noise for this repo's scripts. Real issues
 # (unquoted expansions, etc.) still surface.
 #   SC2155 - local x="$(cmd)": return value intentionally not checked here

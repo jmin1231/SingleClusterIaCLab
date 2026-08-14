@@ -23,20 +23,27 @@ dev/prod overlays make the cost concrete.
 
 ---
 
-## 0.2-2 · Shell dialect — UNRESOLVED
+## 0.2-2 · Bash everywhere — scripts, hooks, and Makefile recipes
 
-**Current state:** `Makefile` sets `SHELL := /bin/sh` (dash on Ubuntu), while
-`.githooks/pre-commit` uses `#!/usr/bin/env bash` with `set -euo pipefail`.
+**Decided:** bash is the shell dialect for this repo. `Makefile` sets
+`SHELL := /bin/bash`; every script and hook uses `#!/usr/bin/env bash`.
 
-**Why it matters:** `pipefail` is a bashism dash does not have, as are `[[ ]]`,
-arrays, and some forms of `local`. Two dialects in one repo means a recipe that
-works in your terminal can fail in make for no visible reason.
+**Rejected:** POSIX `sh` everywhere. More portable and more disciplined, but it
+buys portability this repo does not need — it targets Ubuntu 24.04 on one host,
+not arbitrary systems.
 
-**Still to decide:** bash everywhere (matches the reference's scripts, and the
-`.shellcheckrc` already disables SC2199, a bash array idiom — so bash is half
-assumed already), or POSIX sh everywhere (more portable, forces discipline).
+**Why it matters:** `/bin/sh` on Ubuntu is *dash*, not a smaller bash. It has no
+`pipefail`, no `[[ ]]`, no arrays, and a narrower `local`. Mixed dialects mean a
+recipe that works when pasted into a terminal fails inside make with no useful
+error — a genuinely expensive class of bug to diagnose.
 
-Resolve before writing the first real script in Phase 0.3.
+The repo was already half-committed to bash before this was settled: the
+pre-commit hook used `set -euo pipefail`, and `.shellcheckrc` disables SC2199, a
+bash array idiom. Making it explicit removed the split rather than creating one.
+
+**Enforced, not just documented:** `.shellcheckrc` sets `shell=bash`, so
+shellcheck applies bash rules even to files whose shebang it cannot determine.
+A decision written only in prose is a decision that drifts.
 
 ---
 

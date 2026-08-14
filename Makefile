@@ -14,7 +14,7 @@
 # The file list comes from git, so .gitignore is respected for free and the
 # linters never reach into secrets/ or data/ directories.
 
-SHELL := /bin/sh
+SHELL := /bin/bash
 
 .DEFAULT_GOAL := help
 .PHONY: help lint fmt setup

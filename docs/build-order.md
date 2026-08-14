@@ -1,7 +1,7 @@
 # Build Order
 
 A ground-up build of a single-host infrastructure lab, designed for learning rather than speed.
-Sixteen phases, eighty steps, each scoped to a single working session — ordered so nothing you
+Sixteen phases, eighty-one steps, each scoped to a single working session — ordered so nothing you
 build later forces you to reopen what you built earlier.
 
 **Intended setup:** a fresh Ubuntu 24.04 machine, with this repository present as a *reference* —
@@ -175,11 +175,15 @@ flowchart LR
   end
 ```
 
-> **The installer meets you halfway.** Phase 0 has you create `cloudbr0` yourself rather than
-> letting the installer do it. That is not a fight with the tool: `cloudstack-install.sh` checks
-> whether the bridge exists and skips its own network configuration if it does, logging *"Bridge
-> interface cloudbr0 already exists … skipping network configuration"*. You own your address plan,
-> and the installer adopts it.
+> **On who creates the bridge.** Phase 1's installer creates `cloudbr0` from the host NIC's current
+> address, converting it to a static assignment. An earlier draft of this plan had Phase 0 create it
+> instead, so that DNS could exist before the cloud — but the cloud moved to Phase 1, and that
+> reason expired with it. Creating it yourself is still *possible*:
+> `cloudstack-install.sh` checks whether the bridge exists and skips its own network configuration
+> if it does, logging *"Bridge interface cloudbr0 already exists … skipping network configuration"*.
+> The only thing it buys now is choosing the host's position in the `/24`, and in practice DHCP
+> pools start well above the range the installer scans. Let the installer do it, and verify the
+> result against your Phase 0.4 plan.
 
 > **The reference lab already tried the CA.** `vault-install-all.sh` records that an early phase
 > used to mint a self-signed root CA and that it was removed as dead code — *"nothing ever issued a
@@ -206,7 +210,7 @@ Effort marks: **S** an evening · **M** a weekend · **L** a project, with a sug
 
 ```mermaid
 flowchart BT
-  P0["P0 · Host & network<br/>Ubuntu · KVM · chrony · cloudbr0 · address + resource plan"]
+  P0["P0 · Host & network<br/>Ubuntu · KVM · chrony · address + resource plan"]
   P1["P1 · The cloud<br/>all-in-one installer · zone, pod, cluster, host"]
   P2["P2 · Names & trust<br/>CoreDNS · offline root CA · intermediate · proxy"]
   P3["P3 · Secrets<br/>Vault server · KV · PKI engine · audit · renewal"]
@@ -280,30 +284,38 @@ declarative. Every IaC system has this seam.
 **Done when:** `chronyc tracking` shows a synchronised source, `kvm-ok` reports usable
 acceleration, and a second run of your script produces no changes.
 
-### 0.4 Network layout and the bridge · `L` — split: plan, then build
+### 0.4 The address plan · `M`
 
-Decide and document every range up front, then create `cloudbr0` yourself via netplan with a static
-address.
+Decide and document every range the lab will use, before anything claims one. No configuration —
+this step produces a table, and the table is what later phases are checked against.
 
-The plan must reserve more than you expect, because the installer derives the whole zone from this
-bridge: it takes the bridge's `/24` as its network, scans for free addresses to allocate roughly
-twenty **public IPs** and twenty **pod IPs**, and defaults the guest CIDR to `172.16.1.0/24` with
-VLANs 100–200.
+You are not choosing the bridge subnet: `cloudbr0` inherits whatever network the host sits on, and
+Phase 1's installer creates the bridge from the NIC's current address. What you are doing here is
+writing down what that implies, and choosing the ranges you *do* control.
 
-**Learning:** CIDR planning, and why overlapping ranges are among the hardest bugs to unpick. What
-a **Linux bridge** is and how it differs from NAT. And a specific trap: the installer picks its
-public range by *scanning for addresses that don't answer*, so anything of yours that happens to be
-stopped when it runs can have its address claimed.
+The plan has to reserve more than you might expect, because the installer derives the entire zone
+from the bridge's `/24`: it scans for addresses that do not answer and claims roughly twenty
+**public IPs** (about `.11–.30`) and twenty **pod IPs** (about `.31–.50`), then defaults the guest
+CIDR to `172.16.1.0/24` with VLANs 100–200. Nobody types those ranges anywhere — they are derived,
+which is precisely why they belong in a document.
 
-**One source, many consumers:** the reference lab cannot pick its bridge address — the installer
-creates it, so the value differs per host and `cloudbr0_ip()` (`bootstrap.sh:43`) discovers it at
-runtime, feeding every consumer from that one function: `PROXY_BIND_IP` and `UPSTREAM_HOST`,
-`GITEA_REGISTRY` and the Docker daemon's insecure-registry entry, the `/etc/hosts` block, and
-`gitea_host` for `flux bootstrap`. You are choosing the address instead — but keep the single-source
-discipline anyway.
+The ranges you choose: the VPC and its three tier `/24`s, and two `/24`s for the WireGuard overlay
+(hub-and-spoke needs two links). Check them against three things that allocate automatically —
+k3s defaults to `10.42.0.0/16` for pods and `10.43.0.0/16` for services, and Docker hands itself
+`172.17.0.0/16` through `172.31.0.0/16` as compose stacks are added.
 
-**Done when:** `ip addr show cloudbr0` shows your chosen static address, it survives a reboot, and
-your address plan names which parts of the /24 belong to CloudStack.
+**Learning:** CIDR planning, and why overlapping ranges are among the hardest bugs to unpick — a
+collision with k3s's pod range presents as DNS failure, not as a routing problem. Also the habit of
+documenting *derived* values: a range nothing configures is a range nobody remembers is taken.
+
+**One source, many consumers:** the bridge address differs per host, so it is discovered at runtime
+rather than written down — `cloudbr0_ip()` (`bootstrap.sh:43`) feeds every consumer from one
+function: bind addresses, `GITEA_REGISTRY` and the Docker daemon's insecure-registry entry, the
+hosts file, `VAULT_ADDR`, and `gitea_host` for `flux bootstrap`. Keep that discipline whatever you
+decide about binding.
+
+**Done when:** a committed table names every range, marks which are discovered, chosen, or derived,
+and states which parts of the bridge `/24` belong to CloudStack.
 
 ### 0.5 The resource budget — 32 GB is the ceiling · `M`
 
@@ -356,15 +368,35 @@ written stop-order naming what gets shut down first, second and third when you n
 
 ## Phase 1 · The cloud
 
-You have a vendored, unattended, resumable all-in-one installer — downloaded from
-`get.cloudstack.cloud`, not written here. This phase is about understanding what it does to your
-host, driving it deliberately, and verifying every layer it created.
+One file here is vendored — `cloudstack-install.sh`, downloaded from `get.cloudstack.cloud` and
+carrying a local patch. Everything around it is yours to write. This phase is about understanding
+what the installer does to your host, driving it deliberately, and verifying every layer it created.
 
-### 1.1 Read the installer before you run it · `M`
+### 1.1 Read the installer, and know which parts you own · `M`
 
-Copy the reference's `cloudstack/` directory into your own repo — this is the one place you vendor
-rather than rewrite. Then walk `cloudstack-install-all.sh` and the three scripts it calls, and write
-down every change they make to your host that is *not* CloudStack itself.
+Two different jobs, and confusing them is the mistake:
+
+| File | What it is | What you do |
+|---|---|---|
+| `cloudstack-install.sh` | upstream, ~2,500 lines, plus a local unattended patch | **vendor** — read it, drive it, never maintain it |
+| `cloudstack-install-all.sh` | ~60-line orchestrator | **write** |
+| `prepare-kvm-host.sh` | root password + password SSH | **write** |
+| `cloudmonkey-install.sh` | installs `cmk`, mints API credentials | **write** |
+| `preflight-bridge-netfilter.sh` | fails fast if bridge netfilter is on | **write** |
+
+So four scripts of your own, one inherited. Read all five, then write down every change they make to
+your host that is *not* CloudStack itself.
+
+**On the vendored file, two things worth knowing.** The unattended mode is a *local patch*, not an
+upstream feature — roughly 260 semantic lines that shadow `dialog` with a shell function returning
+success in silent mode, rather than removing ~100 call sites. Elegant, and re-appliable to a future
+upstream. Which is the second thing: **do not reformat it.** Running it through `shfmt` reindents
+every line and makes every future upstream diff unreadable. Exclude it from `make fmt`.
+
+**`cloudmonkey-install.sh` mints the CloudStack API credentials** that Terraform needs in Phase 7 —
+and Vault does not exist until Phase 3. Those credentials therefore live somewhere outside the repo
+for two phases. Decide where before you run it; it is the lab's first real secret, alongside the
+`ROOT_PASSWORD` the installer wants.
 
 **Learning:** "all-in-one installer" means "this script owns your host for the next twenty minutes".
 It will: set a **root password and enable root plus password SSH** (`prepare-kvm-host.sh`), because
@@ -372,15 +404,45 @@ CloudStack adds a KVM host over SSH *even when that host is itself*; install MyS
 export `/export/primary` and `/export/secondary`; add the CloudStack repository and install
 packages; and **disable bridge netfilter** via sysctl, which VPC port forwarding depends on.
 
-Two of those you will act on directly: the SSH change is what Step 1.5 reverses, and the sysctl is
-what Step 1.4 verifies. Note also what this code *is* — upstream, vendored, with a local unattended
+Two of those you will act on directly: the SSH change is what Step 1.6 reverses, and the sysctl is
+what Step 1.5 verifies. Note also what this code *is* — upstream, vendored, with a local unattended
 patch. You read it and drive it; you do not maintain it. Reading an installer you are about to run
 as root is the only moment you get to decide what it is allowed to do.
 
-**Done when:** you have a written list of every host-level change, marked with which you intend to
-keep, reverse, or verify by hand afterwards.
+While reading `deploy_zone`, check the public and pod ranges it derives against what your Phase 0.4
+plan asserts. Those numbers came from a reading of the reference; confirm them rather than inherit
+them.
 
-### 1.2 Run it unattended, and watch the tracker · `M`
+**Done when:** you have a written list of every host-level change, marked with which you intend to
+keep, reverse, or verify by hand afterwards — and your network plan's derived rows are confirmed.
+
+### 1.2 Write the wrappers · `M`
+
+The vendored installer cannot be driven on its own: it needs a root password already set and SSH
+already open before it can add the KVM host, and it needs sequencing around. Four scripts, all
+yours:
+
+| Script | Job |
+|---|---|
+| `prepare-kvm-host.sh` | set the root password, enable root + password SSH. **Runs first** — CloudStack adds the KVM host over SSH even when that host is itself. |
+| `cloudmonkey-install.sh` | install `cmk`, mint the CloudStack API credentials |
+| `preflight-bridge-netfilter.sh` | fail fast if `bridge-nf-call-iptables` is on |
+| `cloudstack-install-all.sh` | orchestrate the three plus the installer, sharing one `ROOT_PASSWORD` |
+
+**Learning:** the same helper conventions you built in Phase 0 — `log`/`warn`/`die`, `require_root`,
+a `main` that reads as a table of contents — now applied to a script whose failure modes are other
+people's. Note that the reference makes the netfilter check its own script rather than a line inside
+the installer: that is what a problem hit hard enough to want checkable independently looks like.
+
+**Two secrets appear here, and Vault does not exist until Phase 3.** `ROOT_PASSWORD` is chosen in
+this step, and `cloudmonkey-install.sh` mints an API key and secret that Terraform will need in
+Phase 7. Both live outside the repo for two phases. Decide where before you run anything — this is
+the lab's first real credential handling, and "somewhere temporary" has a way of becoming permanent.
+
+**Done when:** `cloudstack-install-all.sh` runs the sequence end to end on a host where CloudStack is
+already installed, and is a no-op — proving the ordering and the guards before you rely on them.
+
+### 1.3 Run it unattended, and watch the tracker · `M`
 
 Run with `CLOUDSTACK_UNATTENDED=1` and a `ROOT_PASSWORD` you chose rather than the default. Watch
 the tracker file fill in: `nfs_installed`, `mysql_configured`, `db_deployed`, `agent_configured`,
@@ -393,7 +455,7 @@ failure — the same property your own `ensure` scripts will need.
 **Done when:** the tracker shows `zone_deployment=yes` and the management UI answers on the bridge
 address.
 
-### 1.3 Read back what it built, layer by layer · `L` — split: networking, then storage + host
+### 1.4 Read back what it built, layer by layer · `L` — split: networking, then storage + host
 
 Account for every object in the UI and via `cmk`: zone, physical network and VLAN range, pod,
 cluster, host, primary and secondary storage, the allocated public IP range, guest CIDR. Compare
@@ -407,7 +469,7 @@ lesson: you are learning to audit infrastructure you did not create by hand.
 **Done when:** you can name every object the installer created and point to where its address range
 came from.
 
-### 1.4 System VMs, a test guest, and a port forward · `M`
+### 1.5 System VMs, a test guest, and a port forward · `M`
 
 Wait for the secondary storage VM and console proxy. Launch a throwaway VM, give it a public IP and
 a port forward, reach it from your workstation.
@@ -420,7 +482,7 @@ that sysctl is the first place to look.
 
 **Done when:** you reach a service on the test VM through its public IP, from your workstation.
 
-### 1.5 Close the SSH hole you opened · `S`
+### 1.6 Close the SSH hole you opened · `S`
 
 Remove `/etc/ssh/sshd_config.d/01-cloudstack.conf`, restart sshd, confirm the cloud keeps working —
 including creating and destroying a VM.
@@ -940,7 +1002,7 @@ where they belong.
 
 **Learning:** NAT and port forwarding, and the distinction between a private address inside the VPC
 and a public one that is a translation. If a forward is configured but nothing arrives, check
-`net.bridge.bridge-nf-call-iptables` first — you verified it in Phase 1.4 for exactly this reason.
+`net.bridge.bridge-nf-call-iptables` first — you verified it in Phase 1.5 for exactly this reason.
 
 **And the lesson that catches everyone:** `terraform apply` returns once CloudStack marks each VM
 *Running*, which is **before the guest has finished booting and before the virtual router has
@@ -1589,7 +1651,7 @@ that didn't.
 
 | Phases | Steps | Character of the work |
 |---|---|---|
-| 0–1 · Host and cloud | 10 | Planning, then driving an installer you have read. Less building than you expect; the reading is the point. |
+| 0–1 · Host and cloud | 11 | Planning, then driving an installer you have read. Less building than you expect; the reading is the point. |
 | 2–4 · Foundations | 18 | Slow and conceptual. Certificates, DNS, policy, CI. The payoff is invisible until Phase 7. |
 | 5–6 · Artifacts and images | 8 | Short and mechanical, but the first place your own automation runs unattended. |
 | 7–8 · Provisioning | 10 | The heart of IaC. Expect to destroy and rebuild repeatedly — that is the point. |

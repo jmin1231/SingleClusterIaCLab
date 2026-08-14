@@ -270,3 +270,74 @@ bugs this phase — a hook that never fired, a wait loop that could not fail, a
 `STRICT` branch that never ran, and a `gettext-base` typo — were all invisible
 because the failing branch was never executed. Breaking a check on purpose costs
 ten seconds.
+
+---
+
+## 0.4-1 · Services bind to `0.0.0.0`; the bridge address is still discovered
+
+**Decided:** container services publish on `0.0.0.0` rather than on the cloudbr0
+address. A `cloudbr0_ip()`-style discovery function is still written, because
+most uses of that address are not bind addresses.
+
+**Rejected:** the reference's approach of pinning every service to the bridge IP
+via `PROXY_BIND_IP` / `GITEA_BIND_IP` / `MINIO_BIND_IP` / `VAULT_BIND_IP`.
+
+**Why:** binding is only one of the address's jobs, and the smaller one. Of
+roughly ten consumers, four are bind addresses and the rest are *reference*
+values — things that must be told the address rather than listen on it:
+
+- `ROOT_URL`, so Gitea's generated links and cookies match how a browser arrives
+- the registry string in `daemon.json`, k3s `registries.yaml`, and Vault
+- `VAULT_ADDR` for CI and for the cluster's ClusterSecretStore
+- the git URL `flux bootstrap` bakes into `gotk-sync.yaml`
+- DNS records, from Phase 2
+- `cloudstack-setup-databases -i <ip>`, and the zone's public/pod range, which
+  CloudStack derives from the bridge's own `/24`
+
+So `0.0.0.0` simplifies the compose files without removing the need to know the
+address. Concluding "I never need the bridge IP" is the version that fails in
+Phase 1, where CloudStack asks for it directly.
+
+**What it costs:** services answer on every interface — eight on the reference
+host, including four Docker bridges and `cloud0`. On an isolated single-host lab
+that is acceptable. It does mean a port is claimed globally rather than per
+address, and it slightly widens the surface the tier ACLs are compensating for.
+
+**Note the reference is already inconsistent here:** Gitea, MinIO and the proxy
+bind to the bridge address, while Vault listens on `0.0.0.0:8200` and
+CloudStack's Tomcat on `*:8080`. This decision picks one side of a split the
+reference never resolved.
+
+---
+
+## 0.4-2 · CloudStack creates the bridge; we verify rather than configure
+
+**Decided:** let the Phase 1 installer create `cloudbr0`. Phase 0.4 produces an
+address plan only. The bridge address is checked against that plan in Phase 1.3,
+after the fact.
+
+**Rejected:** creating the bridge ourselves in Phase 0 via netplan, so we could
+choose the host's position in the `/24`.
+
+**Why:** the original argument for building it ourselves was that DNS and the CA
+had to exist before the cloud — and that argument expired when the cloud moved to
+Phase 1. What remained was control over the host's address, which matters because
+the installer derives the zone from the bridge's own subnet, scanning for
+addresses that do not answer and claiming roughly `.11–.30` for public IPs and
+`.31–.50` for pod IPs.
+
+That turned out to be a theoretical concern. **Verified empirically:** the
+reference stack was run on a fresh VM with no address collision. DHCP pools
+conventionally start well above `.50`, so the host lands clear of the scanned
+range without anyone arranging it. The installer also converts the NIC's current
+DHCP address into a **static** assignment on the bridge — `dhcp4: false` on the
+NIC, a fixed address on `cloudbr0` — so staying static is handled too.
+
+**Residual risk, accepted:** the DHCP server does not know that address became
+static, so it could hand the same lease to another device later. A reservation on
+the router closes this where the network is ours to configure. On an isolated lab
+network it is unlikely enough to accept.
+
+**What this means in practice:** Phase 0.4 is a documentation step. The check
+that the host address sits outside `.11–.50`, and that the derived ranges match
+the plan, happens in Phase 1.3 when reading back what the installer built.

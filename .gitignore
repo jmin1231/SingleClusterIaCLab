@@ -1,0 +1,44 @@
+# THE RULE THIS FILE FOLLOWS
+#
+# Every path in this repo falls into exactly one of three categories. Deciding
+# which, before adding a service, is the point — the entries below are just the
+# consequence.
+#
+#   1. COMMITTED CONFIG — non-secret settings that make the stack portable.
+#      A .env holding ports, hostnames and image tags belongs in git: clone the
+#      repo on another machine and it stands up the same way. Say so explicitly
+#      in a comment when it is not obvious, because "a committed .env" looks
+#      like a mistake to anyone reading quickly.
+#
+#   2. MACHINE-LOCAL STATE — real but not portable. Container data directories,
+#      per-machine registrations, build artifacts. Ignored, and never a thing
+#      another clone needs.
+#
+#   3. SECRETS — never committed, on any branch, ever. Unseal keys, service
+#      account credentials, private keys, tokens. If one lands in history,
+#      rotating the secret is the fix; deleting the file is not.
+#
+# Add each new entry under the heading it belongs to, with a reason if the
+# reason is not obvious from the path.
+
+# --- 2. Machine-local state -------------------------------------------------
+
+# Python tooling
+.venv/
+__pycache__/
+.ruff_cache/
+.pytest_cache/
+
+# Editor and OS noise
+.DS_Store
+*.swp
+
+# --- 3. Secrets -------------------------------------------------------------
+
+# Belt and braces: catch common secret-shaped names anywhere in the tree, so a
+# new service directory is protected before its specific rule is written.
+secrets/
+*.pem
+*.key
+*_rsa
+*.tfvars

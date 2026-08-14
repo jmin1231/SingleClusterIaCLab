@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+#
+# pre-commit — git runs this before writing a commit object; a non-zero exit
+# aborts the commit. That is the whole contract.
+#
+# Runs `make lint` over the working tree. If make is absent (a fresh host has
+# none of the toolchain until host prep runs) it warns and lets the commit
+# through rather than blocking work that cannot yet be checked.
+#
+# Requires two things git cannot carry in a commit — the executable bit and
+# core.hooksPath pointing here. `make setup` does both; without them this file
+# is silently ignored.
+#
+# Advisory only: `git commit --no-verify` skips it. The authoritative version
+# of these checks belongs in CI, where nothing can bypass them.
+
+set -euo pipefail
+
+log() { printf '\033[1;32m[+]\033[0m %s\n' "$*" >&2; }
+die() {
+	printf '\033[1;31m[x]\033[0m %s\n' "$*" >&2
+	exit 1
+}
+
+log "pre-commit: running checks"
+
+if ! command -v make >/dev/null 2>&1; then
+	log "make not found - skipping lint. Install it or run: git commit --no-verify"
+	exit 0
+fi
+
+make lint

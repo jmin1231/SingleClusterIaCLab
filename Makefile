@@ -22,8 +22,15 @@ SHELL := /bin/bash
 STRICT ?= 0
 
 FILES := $(shell git ls-files --cached --others --exclude-standard)
-SH    := $(wildcard $(filter %.sh,$(FILES)))
-YAML  := $(wildcard $(filter %.yml %.yaml,$(FILES)))
+
+# Upstream code we vendor but do not maintain. Excluded from lint AND fmt to keep
+# it byte-comparable with upstream: reformatting turns a 260-line patch diff into
+# a 4,000-line one, and fixing its shellcheck findings only widens the gap. This
+# is per-file on purpose — the other scripts alongside it are ours and are linted.
+VENDORED := cloudstack/cloudstack-install.sh
+
+SH    := $(filter-out $(VENDORED),$(wildcard $(filter %.sh,$(FILES))))
+YAML  := $(filter-out $(VENDORED),$(wildcard $(filter %.yml %.yaml,$(FILES))))
 
 # ---------------------------------------------------------------------------
 

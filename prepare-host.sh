@@ -60,13 +60,22 @@ check_kvm() {
   log "KVM available: $(grep -Eom1 '(vmx|svm)' /proc/cpuinfo) flag present, /dev/kvm ready"
 }
 
-# Install CLI tools the component rely on:
+# Install the tooling later phases assume: curl and ca-certificates to fetch over
+# TLS (Docker's repository key, immediately below), jq for JSON, envsubst for
+# rendering ${VAR} templates, openssl for credentials and the Phase 2 CA.
+# ca-certificates ships no binary, so its presence is asked of dpkg rather than
+# the shell — everything else is tested by whether the command resolves.
 install_cli_tools() {
   local missing=()
   command -v curl >/dev/null 2>&1 || missing+=(curl)
   command -v jq >/dev/null 2>&1 || missing+=(jq)
   command -v envsubst >/dev/null 2>&1 || missing+=(gettext-base)
   command -v openssl >/dev/null 2>&1 || missing+=(openssl)
+
+  if ! dpkg -s ca-certificates >/dev/null 2>&1; then
+    missing+=(ca-certificates)
+  fi
+
   if [[ ${#missing[@]} -eq 0 ]]; then
     log "CLI tools are installed"
     return
@@ -78,19 +87,59 @@ install_cli_tools() {
   log "CLI tools ready"
 }
 
-# Install Docker
-# install_docker() {
-#     if command -v docker >/dev/null 2>&1; then
-#       log "Docker is already installed: $(docker --version)"
-#     else
-#       if !
-# }
+# Install Docker Engine and the Compose v2 plugin from Docker's own apt
+# repository rather than the get.docker.com convenience script: the key and repo
+# are pinned, every package is signed, and the result is auditable. Verifies the
+# daemon responds, not merely that a binary exists.
+install_docker() {
+  if command -v docker >/dev/null 2>&1; then
+    log "Docker already installed: $(docker --version)"
+    return
+  fi
+
+  log "Installing Docker..."
+
+  local codename
+  codename="$(. /etc/os-release && echo "${UBUNTU_CODENAME:-$VERSION_CODENAME}")"
+
+  install -m 0755 -d /etc/apt/keyrings
+  curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+    -o /etc/apt/keyrings/docker.asc
+  chmod a+r /etc/apt/keyrings/docker.asc
+
+  tee /etc/apt/sources.list.d/docker.sources >/dev/null <<EOF
+Types: deb
+URIs: https://download.docker.com/linux/ubuntu
+Suites: ${codename}
+Components: stable
+Architectures: $(dpkg --print-architecture)
+Signed-By: /etc/apt/keyrings/docker.asc
+EOF
+
+  apt-get update
+  apt-get install -y \
+    docker-ce \
+    docker-ce-cli \
+    containerd.io \
+    docker-buildx-plugin \
+    docker-compose-plugin
+
+  systemctl enable --now docker
+
+  docker info >/dev/null 2>&1 ||
+    die "Docker installed but the daemon is not responding — check 'systemctl status docker'."
+  docker compose version >/dev/null 2>&1 ||
+    die "Docker installed but the compose plugin is missing."
+
+  log "Docker ready: $(docker --version)"
+}
 
 main() {
   require_root
   sync_clock
   check_kvm
   install_cli_tools
+  install_docker
 }
 
 main "$@"

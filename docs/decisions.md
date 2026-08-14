@@ -123,3 +123,150 @@ the linter trying to open it. `$(wildcard)` drops anything not present on disk.
 
 Found the hard way: `make lint` broke immediately after the hook's own test file
 was deleted but left staged.
+
+---
+
+## 0.3-1 · `prepare-host.sh` lives at the repository root
+
+**Decided:** the day-0 script sits at the root, not under `host/`.
+
+**Rejected:** `host/prepare-host.sh`, which groups it with the netplan config
+Phase 0.4 will add.
+
+**Why:** it is the single entry point a human runs on a bare machine, and the
+reference puts its equivalent at the root for the same reason. Revisit at 0.4 —
+if the bridge config and this script end up sharing more than a phase number,
+a `host/` directory earns its place.
+
+---
+
+## 0.3-2 · No NTP daemon is installed; the clock is asserted, not the mechanism
+
+**Decided:** `sync_clock` enables systemd's NTP best-effort, then waits for
+`timedatectl show -p NTPSynchronized --value` to report `yes`. It installs no
+NTP daemon and dies if the clock never synchronises.
+
+**Rejected:** installing chrony, which is what the reference does.
+
+**Why:** the reference's comment — *"CloudStack expects it as the NTP daemon"* —
+is contradicted by CloudStack's own installer, whose package list includes
+**openntpd**. Both packages `Provides: time-daemon` and `Conflicts: time-daemon`,
+so installing chrony now means apt removes it during Phase 1. Verified on the
+reference host: chrony inactive, openntpd active.
+
+**The principle worth keeping:** assert on the *outcome* (is the clock correct?)
+not the *mechanism* (is a particular daemon enabled?). A host where openntpd owns
+time reports `NTP=no` and `NTPSynchronized=yes` and is perfectly healthy —
+checking the mechanism would fail a working machine.
+
+The clock is corrected before any apt or TLS work because both validate against
+system time and both report skew as something else entirely: a broken mirror, an
+untrusted certificate.
+
+---
+
+## 0.3-3 · `check_kvm` verifies only, and its failures are fatal
+
+**Decided:** check for a `vmx`/`svm` CPU flag and a `/dev/kvm` character device.
+Both fatal. Nothing is installed.
+
+**Rejected:** using `kvm-ok`, which gives a friendlier verdict but ships in the
+`cpu-checker` package — installing something inside a verification function,
+which breaks the verify/install split the rest of the script keeps.
+
+**Why fatal:** every phase from 1 onward boots VMs. Continuing past this produces
+a QEMU failure twenty minutes later that does not mention KVM.
+
+**Why two checks:** they fail independently. The CPU flag can be present while
+the device node is missing, if `kvm_intel`/`kvm_amd` did not load.
+
+---
+
+## 0.3-4 · Docker comes from its own apt repository, in deb822 format
+
+**Decided:** add Docker's signing key to `/etc/apt/keyrings/`, write
+`/etc/apt/sources.list.d/docker.sources`, and install `docker-ce`,
+`docker-ce-cli`, `containerd.io`, `docker-buildx-plugin` and
+`docker-compose-plugin`.
+
+**Rejected:** `curl -fsSL https://get.docker.com | sh`, which the reference uses.
+One line, always current, officially supported — and a remote script piped into a
+root shell, which is the thing this repo's lint and hook gates exist to make us
+think twice about.
+
+**Also rejected:** Ubuntu's `docker.io` package. No third-party repo, but the
+version lags and Compose v2 packaging varies.
+
+**Why:** the key and repository are pinned and every package is signed
+thereafter, so the trust decision is made once, explicitly, and is auditable in
+the diff. Adding a third-party signing key is still a trust decision — it is
+simply a legible one.
+
+**Format:** deb822 (`Types:`/`URIs:`/`Suites:`) rather than the older one-line
+`deb [signed-by=…]`. Both work; deb822 is what the current docs show and it
+avoids the quoting awkwardness of building a repo line inside a shell string.
+
+**Verified by daemon, not binary:** `docker info` and `docker compose version`,
+because `command -v docker` passes even when the daemon failed to start, and
+`docker compose` is a subcommand the shell cannot see at all.
+
+---
+
+## 0.3-5 · "Installed" means the command resolves on PATH
+
+**Decided:** `install_cli_tools` tests `command -v` for curl, jq, envsubst and
+openssl — with one deliberate exception. `ca-certificates` ships no binary, so
+its presence is asked of `dpkg -s` instead.
+
+**Why:** later phases need a *usable command*, not a database entry. The two
+notions diverge, and when they do this script will loop rather than converge.
+
+Found the hard way while testing: renaming `/usr/bin/jq` made `command -v jq`
+fail while dpkg still reported the package installed, so `apt-get install jq`
+did nothing and every run repeated *"Installing CLI tools: jq"*. `mv` is not an
+uninstall. The signature of that divergence is a script that claims to install
+something which never appears; `apt-get install --reinstall` is the repair.
+
+Note also that command name and package name are not the same thing: `envsubst`
+comes from `gettext-base`. That entry is the only one where a name had to be
+typed rather than repeated, and it is the one that was mistyped.
+
+---
+
+## 0.3-6 · `DEBIAN_FRONTEND=noninteractive` is exported once, at script scope
+
+**Decided:** exported next to `set -euo pipefail` rather than prefixed per
+command or per function.
+
+**Why:** it suppresses maintainer-script prompts that would hang an unattended
+run, and two separate functions call `apt-get`. Exporting once means no call site
+can forget it.
+
+**Note the reasoning changed.** The original argument was that Docker's
+convenience script runs apt in a child process that cannot be prefixed. Choosing
+the apt-repository route (0.3-4) removed that constraint, so the decision now
+rests only on having multiple call sites. Recorded because a justification that
+has quietly expired is worse than none.
+
+It does **not** resolve config-file conflicts — that needs
+`-o Dpkg::Options::="--force-confold"` and will matter the first time a package
+ships a new default for a file we have edited.
+
+---
+
+## 0.3-7 · Failure messages name the likely cause, not the symptom
+
+**Decided:** every `die` states what to do next, not merely what went wrong.
+
+Compare `"/dev/kvm does not exist"` with *"/dev/kvm is missing — the
+kvm_intel/kvm_amd module did not load. Check `lsmod | grep kvm`."* The first
+starts a search; the second ends one.
+
+**Why:** these messages are read on a fresh machine, by someone with no context,
+at the moment nothing works yet. That is the worst possible time to be terse.
+
+**Related working practice:** prove the failure path before believing it. Four
+bugs this phase — a hook that never fired, a wait loop that could not fail, a
+`STRICT` branch that never ran, and a `gettext-base` typo — were all invisible
+because the failing branch was never executed. Breaking a check on purpose costs
+ten seconds.

@@ -1,0 +1,7 @@
+# Accepted idioms and sourced-file noise for this repo's scripts. Real issues
+# (unquoted expansions, etc.) still surface.
+#   SC2155 - local x="$(cmd)": return value intentionally not checked here
+#   SC2199 - [[ " ${arr[@]} " =~ ... ]]: deliberate array-membership idiom
+#   SC1091 - cannot follow a sourced file that is not present at lint time
+#   SC2034 - vars that look unused are consumed by sourced scripts
+disable=SC2155,SC2199,SC1091,SC2034

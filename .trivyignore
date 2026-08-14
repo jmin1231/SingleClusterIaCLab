@@ -1,0 +1,7 @@
+# Vulnerabilities the docker-ci Trivy gate accepts. Read from the repo root, which
+# is where the scan step runs. One CVE ID per line, each with a reason.
+#
+# --ignore-unfixed already drops CVEs with no fix available, so nothing belongs here
+# solely because upstream has not patched it.
+#
+#   CVE-YYYY-NNNNN  # why accepted / when to revisit

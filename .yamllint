@@ -1,0 +1,11 @@
+# yamllint config. Long lines are expected in k8s/ansible manifests, so line-length
+# is off; everything else follows yamllint's relaxed preset.
+extends: relaxed
+
+rules:
+  line-length: disable
+
+ignore: |
+  **/.terraform/
+  docker/**/data/
+  docker/**/secrets/

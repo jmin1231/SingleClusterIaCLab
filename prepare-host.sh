@@ -8,13 +8,9 @@
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 
-# --- Helpers ----------------------------------------------------------------
-log() { printf '\033[1;32m[+]\033[0m %s\n' "$*"; }
-warn() { printf '\033[1;33m[!]\033[0m %s\n' "$*" >&2; }
-die() {
-  printf '\033[1;31m[x]\033[0m %s\n' "$*" >&2
-  exit 1
-}
+SOURCE_SCRIPT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=/dev/null
+source "${SOURCE_SCRIPT}/../../lib/common.sh"
 
 # Refuse to run as anyone but root, before doing any work.
 require_root() {

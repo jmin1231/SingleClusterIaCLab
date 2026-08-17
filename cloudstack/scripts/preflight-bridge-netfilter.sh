@@ -14,11 +14,9 @@
 
 set -euo pipefail
 
-log() { printf '\033[1;32m[+]\033[0m %s\n' "$*"; }
-die() {
-  printf '\033[1;31m[x]\033[0m %s\n' "$*" >&2
-  exit 1
-}
+SOURCE_SCRIPT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=/dev/null
+source "${SOURCE_SCRIPT}/../../lib/common.sh"
 
 CHECK_BRIDGE_NETFILTER="${CHECK_BRIDGE_NETFILTER:-true}"
 case "${CHECK_BRIDGE_NETFILTER}" in

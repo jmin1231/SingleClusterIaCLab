@@ -434,10 +434,15 @@ a `main` that reads as a table of contents — now applied to a script whose fai
 people's. Note that the reference makes the netfilter check its own script rather than a line inside
 the installer: that is what a problem hit hard enough to want checkable independently looks like.
 
-**Two secrets appear here, and Vault does not exist until Phase 3.** `ROOT_PASSWORD` is chosen in
-this step, and `cloudmonkey-install.sh` mints an API key and secret that Terraform will need in
-Phase 7. Both live outside the repo for two phases. Decide where before you run anything — this is
-the lab's first real credential handling, and "somewhere temporary" has a way of becoming permanent.
+**One secret appears here, and Vault does not exist until Phase 3.** `ROOT_PASSWORD` is chosen in
+this step and has nowhere secure to live yet. Decide where before you run anything.
+
+**The CloudStack API keys are not that secret**, despite appearances. `cloudmonkey-install.sh`
+installs the `cmk` binary in this phase but does not mint anything — key generation is a *function*
+it defines, called much later by the Vault seeding script, which sources this file and writes the
+result straight into Vault. That is why the file guards its action with
+`[[ "${BASH_SOURCE[0]}" == "${0}" ]]`: executed it installs, sourced it only defines. One file,
+two consumers, two phases apart, and no credential ever touches disk.
 
 **Done when:** `cloudstack-install-all.sh` runs the sequence end to end on a host where CloudStack is
 already installed, and is a no-op — proving the ordering and the guards before you rely on them.

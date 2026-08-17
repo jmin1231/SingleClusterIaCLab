@@ -12,11 +12,6 @@ SOURCE_SCRIPT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=/dev/null
 source "${SOURCE_SCRIPT}/lib/common.sh"
 
-# Refuse to run as anyone but root, before doing any work.
-require_root() {
-  [[ ${EUID} -eq 0 ]] || die "prepare-host.sh must be run as root:  sudo ./prepare-host.sh"
-}
-
 # --- Steps ------------------------------------------------------------------
 
 # Correct the system clock before any apt or TLS work, both of which report a

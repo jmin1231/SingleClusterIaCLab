@@ -341,3 +341,24 @@ network it is unlikely enough to accept.
 **What this means in practice:** Phase 0.4 is a documentation step. The check
 that the host address sits outside `.11–.50`, and that the derived ranges match
 the plan, happens in Phase 1.3 when reading back what the installer built.
+
+---
+
+## 1.2-1 · Everything that runs `cmk` runs as root
+
+**Decided:** the `cmk` profile lives at `/root/.cmk/config` and has one owner.
+Both callers — the Phase 1.2 orchestrator and the Phase 3.6 Vault seeding script
+— already run as root, so this is a constraint to preserve rather than a change
+to make.
+
+**Rejected:** running `generate_cloudstack_api_keys` under `sudo -u` so the
+profile lands in the invoking user's `~/.cmk/`, usable without `sudo`.
+
+**Why:** `cmk` resolves its config from `$HOME` and offers no way to override it
+per-invocation. Split the users and the seeding script writes its URL and
+credentials to a profile nothing else reads — `cmk` reports no error, it simply
+behaves as though never configured.
+
+**Accepted:** the profile stores the CloudStack admin password in cleartext,
+mode `0600` (set by `cmk`). Fine for a lab whose admin password is `password` by
+design, and the reason this file is never copied, committed, or templated.

@@ -27,7 +27,15 @@ FILES := $(shell git ls-files --cached --others --exclude-standard)
 # it byte-comparable with upstream: reformatting turns a 260-line patch diff into
 # a 4,000-line one, and fixing its shellcheck findings only widens the gap. This
 # is per-file on purpose — the other scripts alongside it are ours and are linted.
-VENDORED := cloudstack/cloudstack-install.sh
+#
+# Verified against disk below: filter-out is a literal path match, so a moved or
+# renamed file leaves an exclusion that quietly matches nothing and looks exactly
+# like no exclusion at all.
+VENDORED := cloudstack/scripts/cloudstack-install.sh
+
+ifeq ($(wildcard $(VENDORED)),)
+$(error VENDORED names a path that does not exist: $(VENDORED). It moved — update this)
+endif
 
 SH    := $(filter-out $(VENDORED),$(wildcard $(filter %.sh,$(FILES))))
 YAML  := $(filter-out $(VENDORED),$(wildcard $(filter %.yml %.yaml,$(FILES))))

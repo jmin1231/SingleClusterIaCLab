@@ -362,3 +362,34 @@ behaves as though never configured.
 **Accepted:** the profile stores the CloudStack admin password in cleartext,
 mode `0600` (set by `cmk`). Fine for a lab whose admin password is `password` by
 design, and the reason this file is never copied, committed, or templated.
+
+---
+
+## 2.1-1 · `prepare-host.sh` is renamed `bootstrap.sh` and becomes all-in-one
+
+**Decided:** one script at the repository root takes a bare host to a running
+lab — host preparation, CloudStack, then services in dependency order. Supersedes
+[0.3-1](#03-1--prepare-hostsh-lives-at-the-repository-root), which named the same
+file `prepare-host.sh` throughout Phases 0 and 1.
+
+**Rejected:** keeping `prepare-host.sh` and adding a separate `bootstrap.sh` that
+calls it. Three independently runnable scripts plus a `make` target would have
+kept host preparation and service deployment in separate failure domains.
+
+**Why:** one command on a fresh VM was worth more than the separation. The
+reference lab is built this way and it works; splitting it was a refinement that
+had not earned its cost.
+
+**The constraint the merge has to respect:** `cloudbr0` does not exist until
+CloudStack creates it, so every step that calls `bridge_ip` or `gateway_ip` must
+come after `install_cloudstack`. This is why the merge only works with CloudStack
+*inside* the script — a bootstrap that assumed a prepared host and started at the
+services would die on the first `bridge_ip`.
+
+**The cost, and the mitigation:** the four host-preparation steps now run on every
+invocation, and `sync_clock` waits up to 60s for NTP. `SKIP_HOST_PREP=1` skips
+them, which matters from Phase 3 on when the service layer is re-run often.
+
+**Not renamed:** `cloudstack/scripts/prepare-kvm-host.sh`, which is a different
+thing — it prepares the host *for CloudStack to add as a KVM host*, and is called
+by `cloudstack-install-all.sh`.

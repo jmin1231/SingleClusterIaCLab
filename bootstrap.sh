@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 #
-# prepare-host.sh — day-0 preparation for a bare Ubuntu 24.04 host: correct the
-# clock, verify hardware virtualization, and install the tooling every later
-# phase assumes. Imperative and run once by hand; everything after this point is
-# declarative. Root-only, and safe to re-run.
+# bootstrap.sh — bare Ubuntu 24.04 to a running lab, in one command. Prepares the
+# host, installs CloudStack, then brings up the services in dependency order.
+#
+# Usage: sudo ./bootstrap.sh
+#
+# Imperative and root-only; everything after this point is declarative. Safe to
+# re-run — every step is a no-op once its work is done.
 
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
@@ -125,12 +128,35 @@ EOF
   log "Docker ready: $(docker --version)"
 }
 
+# ---- Services --------------------------------------------------------------
+#
+# CoreDNS comes first among the services, so friendly names resolve for every
+# installer below it. Vault, Gitea, MinIO and the proxy slot in after it from
+# Phase 3.
+
+# Hand off to the CloudStack all-in-one installer, which owns ROOT_PASSWORD, the
+# executable guards on its four child scripts, and the step ordering — kept there
+# rather than duplicated here.
+#
+# Load-bearing position: cloudbr0 does not exist until this returns, so every
+# later step calling bridge_ip or gateway_ip depends on it. That ordering is why
+# host preparation and service deployment share one script.
+install_cloudstack() {
+  local installer="${SOURCE_SCRIPT}/cloudstack/cloudstack-install-all.sh"
+  [[ -x "${installer}" ]] || die "Missing or not executable: ${installer}"
+
+  log "Running the CloudStack all-in-one installer (this takes a while)..."
+  "${installer}"
+  log "CloudStack installed; cloudbr0 is up."
+}
+
 main() {
   require_root
   sync_clock
   check_kvm
   install_cli_tools
   install_docker
+  install_cloudstack
 }
 
 main "$@"

@@ -10,7 +10,7 @@ export DEBIAN_FRONTEND=noninteractive
 
 SOURCE_SCRIPT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=/dev/null
-source "${SOURCE_SCRIPT}/../../lib/common.sh"
+source "${SOURCE_SCRIPT}/lib/common.sh"
 
 # Refuse to run as anyone but root, before doing any work.
 require_root() {

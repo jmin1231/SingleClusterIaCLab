@@ -1,0 +1,32 @@
+# CoreDNS — authoritative for lab.test, forwarder for everything else.
+#
+# Binds the bridge address explicitly. A bare "53:53" would bind 0.0.0.0 and
+# collide with systemd-resolved on 127.0.0.53, and would default to TCP only —
+# so both protocols are listed.
+#
+# CLOUDBR0_IP comes from .env, which bootstrap generates from bridge_ip(). Both
+# .env and the rendered zone file are machine-local and gitignored, so
+# `docker compose up` is never the first command run on a fresh host.
+
+name: coredns
+
+services:
+  coredns:
+    image: coredns/coredns:${VERSION:-1.14.6}
+    container_name: coredns
+    restart: unless-stopped
+    command: -conf /etc/coredns/Corefile
+    environment:
+      # Read by {$GATEWAY_IP} in the Corefile — CoreDNS's own substitution, not
+      # a render step. Sourced from .env, which bootstrap generates.
+      - GATEWAY_IP=${GATEWAY_IP}
+    ports:
+      - "${CLOUDBR0_IP}:53:53/udp"
+      - "${CLOUDBR0_IP}:53:53/tcp"
+    volumes:
+      # Read-only: nothing in the container may rewrite the zone data. These
+      # container paths are what the Corefile refers to — if they disagree,
+      # CoreDNS logs the failure and keeps serving the forward block, which
+      # looks like a zone problem rather than a mount problem.
+      - ./Corefile:/etc/coredns/Corefile:ro
+      - ./zones:/etc/coredns/zones:ro

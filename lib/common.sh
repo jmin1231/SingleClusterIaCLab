@@ -36,3 +36,18 @@ bridge_ip() {
   [[ -n "${ip}" ]] || die "${bridge} has no IPv4 address; is it up?"
   printf '%s' "${ip}"
 }
+
+# Print the default gateway reached via a bridge. Usage: gw="$(gateway_ip)"
+#
+# Discovered for the same reason as bridge_ip, and consumed as CoreDNS's upstream
+# forwarder — so a wrong answer here costs the lab all external name resolution.
+# Asked of the kernel as JSON rather than parsed from text: a link-scope default
+# route has no `via` field, and positional parsing would return the interface
+# name where an address belongs.
+gateway_ip() {
+  local bridge="${1:-cloudbr0}" gw
+  gw="$(ip -j -4 route show default dev "${bridge}" 2>/dev/null | jq -r '.[0].gateway // empty')"
+  [[ -n "${gw}" && "${gw}" != "null" ]] ||
+    die "no default gateway on ${bridge}; check 'ip route show default dev ${bridge}'."
+  printf '%s' "${gw}"
+}

@@ -33,6 +33,21 @@ __pycache__/
 .DS_Store
 *.swp
 
+# CloudStack installer checkpoints and logs. These land at the repo root rather
+# than /var/lib because the vendored installer sets CS_STATE_DIR relative to its
+# own location — two levels up from cloudstack/scripts/.
+cloudstack-installer-tracker.conf
+cloudstack-installer.log
+installer.log
+
+# CoreDNS. The zone file is rendered from lab.test.zone.tmpl by bootstrap: a DNS
+# zone file has no variable syntax, so the bridge address has to be substituted
+# before CoreDNS ever reads it. The .env beside it is committed, like every other
+# docker/*/.env here — bootstrap rewrites its two discovered values per host, so
+# it shows as modified on any machine whose bridge address differs. Nothing in
+# either file is secret.
+docker/coredns/zones/*.zone
+
 # --- 3. Secrets -------------------------------------------------------------
 
 # Belt and braces: catch common secret-shaped names anywhere in the tree, so a

@@ -1,0 +1,21 @@
+$ORIGIN lab.test.
+$TTL 300
+
+@   IN  SOA  ns.lab.test. admin.lab.test. (
+        2026081701      ; serial
+        7200            ; refresh period 
+        3600            ; Retry interval
+        1209600         ; Expire timeout
+        300)            ; minimum
+
+; Name Server (NS) records. The target is absolute — without the trailing dot
+; $ORIGIN is appended and it silently becomes ns.lab.test.lab.test.
+@   IN  NS  ns.lab.test.
+
+; A records (IPv4 addresses). ${CLOUDBR0_IP} is substituted by envsubst at
+; render time; the bridge address differs per host and is never written down.
+ns              IN  A   ${CLOUDBR0_IP}
+cloudstack      IN  A   ${CLOUDBR0_IP}
+gitea           IN  A   ${CLOUDBR0_IP}
+minio           IN  A   ${CLOUDBR0_IP}
+vault           IN  A   ${CLOUDBR0_IP} 

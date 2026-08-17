@@ -150,6 +150,31 @@ install_cloudstack() {
   log "CloudStack installed; cloudbr0 is up."
 }
 
+# Write CoreDNS's two generated files — .env and the rendered zone — from this
+# host's addresses. Overwrites, so a re-run corrects stale values.
+render_coredns() {
+  local cloudbr0_ip gateway dir tmpl zone
+  cloudbr0_ip="$(bridge_ip)"
+  gateway="$(gateway_ip)"
+
+  dir="${SOURCE_SCRIPT}/docker/coredns"
+  tmpl="${dir}/zones/lab.test.zone.tmpl"
+  zone="${dir}/zones/lab.test.zone"
+  [[ -f "${tmpl}" ]] || die "Missing zone template: ${tmpl}"
+
+  log "Rendering CoreDNS config for ${cloudbr0_ip} (upstream ${gateway})..."
+
+  # Discovered values only; the image pin lives in docker-compose.yml.
+  printf 'CLOUDBR0_IP=%s\nGATEWAY_IP=%s\n' "${cloudbr0_ip}" "${gateway}" >"${dir}/.env"
+
+  # The allow-list stops envsubst eating $ORIGIN and $TTL, and the value must be
+  # in the environment — envsubst cannot see a shell local.
+  # shellcheck disable=SC2016  # the quotes are intentional: this is the allow-list
+  CLOUDBR0_IP="${cloudbr0_ip}" envsubst '${CLOUDBR0_IP}' <"${tmpl}" >"${zone}"
+
+  log "CoreDNS config rendered: $(basename "${zone}") and .env"
+}
+
 main() {
   require_root
   sync_clock
@@ -157,6 +182,7 @@ main() {
   install_cli_tools
   install_docker
   install_cloudstack
+  render_coredns
 }
 
 main "$@"

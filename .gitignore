@@ -57,3 +57,12 @@ secrets/
 *.key
 *_rsa
 *.tfvars
+
+# The offline root CA (Phase 2.3). Generated once per lab by pki/root-ca-create.sh,
+# and never committed: the key is the lab's trust anchor, and the certificate is
+# generated per host, so a committed one would be stale on every other machine —
+# the same reason the CoreDNS zone above is ignored rather than checked in.
+#
+# The key is named .key.enc to say out loud that it is encrypted, which means the
+# *.key rule above does not match it. This directory entry is what protects it.
+pki/root/

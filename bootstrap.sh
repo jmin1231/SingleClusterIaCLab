@@ -120,6 +120,13 @@ EOF
 
 # ---- Services --------------------------------------------------------------
 
+# Run the root ca installer
+install_root_ca() {
+  local installer="${SOURCE_SCRIPT}/pki/root-ca-create.sh"
+  [[ -x "${installer}" ]] || die "Missing or not executable: ${installer}"
+  "${installer}"
+}
+
 # Run the CloudStack all-in-one installer, which also creates the cloudbr0 bridge.
 install_cloudstack() {
   local installer="${SOURCE_SCRIPT}/cloudstack/cloudstack-install-all.sh"
@@ -145,6 +152,7 @@ main() {
   check_kvm
   install_cli_tools
   install_docker
+  install_root_ca
   install_cloudstack
   install_coredns
 }

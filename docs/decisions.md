@@ -393,3 +393,45 @@ them, which matters from Phase 3 on when the service layer is re-run often.
 **Not renamed:** `cloudstack/scripts/prepare-kvm-host.sh`, which is a different
 thing — it prepares the host *for CloudStack to add as a KVM host*, and is called
 by `cloudstack-install-all.sh`.
+
+---
+
+## 2.1-2 · Verification lives in `make verify`, not in `bootstrap.sh`
+
+**Decided:** `bootstrap.sh` deploys and stops there. Checking that the result
+works is a separate `make verify` target, run by choice.
+
+**Rejected:** a `verify_dns` step at the end of `install_coredns`, and a zone
+parse check inside `render_coredns`.
+
+**Why:** the parse check was re-testing a mostly-static artifact — the template
+is committed and its only variable input, `bridge_ip`, already refuses to return
+an empty value. Once the template is right it cannot become wrong between runs.
+
+It also kept `bootstrap.sh` free of dependencies that `install_cli_tools` does
+not declare. The check needed `python3-dnspython` and the DNS probe needs `dig`
+(`bind9-dnsutils`); neither is in the declared list, and both were present on the
+development host by accident. A deployment script that silently depends on
+undeclared tools fails on the fresh VM it exists to serve.
+
+**Accepted risk:** `docker compose up -d` returns when the container *starts*,
+and CoreDNS answers a failed zone load by logging and carrying on. So a deploy
+where nothing resolves is indistinguishable from a working one until something
+tries to use a name. That is the gap `make verify` closes, and until it exists
+the gap is open.
+
+**What `make verify` should check:**
+
+| Check | Passes when |
+|---|---|
+| `dig @<bridge> gitea.lab.test` | an answer **and** the `aa` flag — `aa` absent means the zone did not load and upstream replied |
+| `dig @<bridge> example.com` | resolves, proving the forward block reaches the gateway |
+| zone parse | `named-checkzone lab.test <zone>` accepts the rendered file |
+| port binding | `:53` is bound on the bridge address, not `0.0.0.0` — a wildcard bind means `CLOUDBR0_IP` was empty |
+
+**Tool policy:** guard `dig` and `named-checkzone` in the Makefile the way
+`shellcheck`, `shfmt` and `yamllint` are guarded — missing warns and skips,
+`STRICT=1` makes it fatal. That is [0.2-4](#02-4--a-missing-linter-warns-a-missing-make-warns)
+applied unchanged, so `make verify` inherits the policy rather than inventing one.
+Both come from the `bind9-*` packages and stay out of `install_cli_tools`, which
+declares what the *lab* needs, not what checking it needs.

@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
 #
-# bootstrap.sh — bare Ubuntu 24.04 to a running lab, in one command. Prepares the
-# host, installs CloudStack, then brings up the services in dependency order.
+# bootstrap.sh — bare Ubuntu 24.04 to a running lab, in one command.
+# Prepares the host, installs CloudStack, then installs the services.
 #
 # Usage: sudo ./bootstrap.sh
 #
-# Imperative and root-only; everything after this point is declarative. Safe to
-# re-run — every step is a no-op once its work is done.
+# Safe to re-run: every step is a no-op once its work is done.
 
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
@@ -17,11 +16,8 @@ source "${SOURCE_SCRIPT}/lib/common.sh"
 
 # --- Steps ------------------------------------------------------------------
 
-# Correct the system clock before any apt or TLS work, both of which report a
-# skewed clock as something else entirely. Asserts that the clock is
-# synchronised, not that any particular daemon is enabled — no NTP daemon is
-# installed here because the CloudStack installer brings openntpd, which
-# conflicts with chrony.
+# Enable NTP and wait up to 60s for the clock to synchronise. Runs first because
+# a skewed clock breaks apt and TLS.
 sync_clock() {
   log "Clock before sync: $(date)"
 
@@ -40,9 +36,7 @@ sync_clock() {
   die "Clock did not synchronise within 60s — apt signature validation will fail."
 }
 
-# Verify the host can run KVM guests. Verify-only: neither failure is something
-# a script can repair, so both messages name the likely cause rather than the
-# symptom. Fatal, because every later phase boots VMs.
+# Check the host can run KVM guests. Verify-only, and fatal: later phases boot VMs.
 check_kvm() {
   log "Checking hardware virtualization..."
 
@@ -54,11 +48,8 @@ check_kvm() {
   log "KVM available: $(grep -Eom1 '(vmx|svm)' /proc/cpuinfo) flag present, /dev/kvm ready"
 }
 
-# Install the tooling later phases assume: curl and ca-certificates to fetch over
-# TLS (Docker's repository key, immediately below), jq for JSON, envsubst for
-# rendering ${VAR} templates, openssl for credentials and the Phase 2 CA.
-# ca-certificates ships no binary, so its presence is asked of dpkg rather than
-# the shell — everything else is tested by whether the command resolves.
+# Install the CLI tools later steps use: curl, jq, envsubst, openssl and
+# ca-certificates. Installs only what is missing.
 install_cli_tools() {
   local missing=()
   command -v curl >/dev/null 2>&1 || missing+=(curl)
@@ -66,6 +57,7 @@ install_cli_tools() {
   command -v envsubst >/dev/null 2>&1 || missing+=(gettext-base)
   command -v openssl >/dev/null 2>&1 || missing+=(openssl)
 
+  # ca-certificates ships no binary, so ask dpkg instead of the shell.
   if ! dpkg -s ca-certificates >/dev/null 2>&1; then
     missing+=(ca-certificates)
   fi
@@ -82,9 +74,7 @@ install_cli_tools() {
 }
 
 # Install Docker Engine and the Compose v2 plugin from Docker's own apt
-# repository rather than the get.docker.com convenience script: the key and repo
-# are pinned, every package is signed, and the result is auditable. Verifies the
-# daemon responds, not merely that a binary exists.
+# repository, then check the daemon actually responds.
 install_docker() {
   if command -v docker >/dev/null 2>&1; then
     log "Docker already installed: $(docker --version)"
@@ -129,18 +119,8 @@ EOF
 }
 
 # ---- Services --------------------------------------------------------------
-#
-# CoreDNS comes first among the services, so friendly names resolve for every
-# installer below it. Vault, Gitea, MinIO and the proxy slot in after it from
-# Phase 3.
 
-# Hand off to the CloudStack all-in-one installer, which owns ROOT_PASSWORD, the
-# executable guards on its four child scripts, and the step ordering — kept there
-# rather than duplicated here.
-#
-# Load-bearing position: cloudbr0 does not exist until this returns, so every
-# later step calling bridge_ip or gateway_ip depends on it. That ordering is why
-# host preparation and service deployment share one script.
+# Run the CloudStack all-in-one installer, which also creates the cloudbr0 bridge.
 install_cloudstack() {
   local installer="${SOURCE_SCRIPT}/cloudstack/cloudstack-install-all.sh"
   [[ -x "${installer}" ]] || die "Missing or not executable: ${installer}"
@@ -150,31 +130,15 @@ install_cloudstack() {
   log "CloudStack installed; cloudbr0 is up."
 }
 
-# Write CoreDNS's two generated files — .env and the rendered zone — from this
-# host's addresses. Overwrites, so a re-run corrects stale values.
-render_coredns() {
-  local cloudbr0_ip gateway dir tmpl zone
-  cloudbr0_ip="$(bridge_ip)"
-  gateway="$(gateway_ip)"
-
-  dir="${SOURCE_SCRIPT}/docker/coredns"
-  tmpl="${dir}/zones/lab.test.zone.tmpl"
-  zone="${dir}/zones/lab.test.zone"
-  [[ -f "${tmpl}" ]] || die "Missing zone template: ${tmpl}"
-
-  log "Rendering CoreDNS config for ${cloudbr0_ip} (upstream ${gateway})..."
-
-  # Discovered values only; the image pin lives in docker-compose.yml.
-  printf 'CLOUDBR0_IP=%s\nGATEWAY_IP=%s\n' "${cloudbr0_ip}" "${gateway}" >"${dir}/.env"
-
-  # The allow-list stops envsubst eating $ORIGIN and $TTL, and the value must be
-  # in the environment — envsubst cannot see a shell local.
-  # shellcheck disable=SC2016  # the quotes are intentional: this is the allow-list
-  CLOUDBR0_IP="${cloudbr0_ip}" envsubst '${CLOUDBR0_IP}' <"${tmpl}" >"${zone}"
-
-  log "CoreDNS config rendered: $(basename "${zone}") and .env"
+# Run the CoreDNS installer: renders its config, starts the container, and points
+# the host resolver at it. After CloudStack, whose bridge it binds to.
+install_coredns() {
+  local installer="${SOURCE_SCRIPT}/docker/coredns/coredns-installer.sh"
+  [[ -x "${installer}" ]] || die "Missing or not executable: ${installer}"
+  "${installer}"
 }
 
+# Run every step, in dependency order.
 main() {
   require_root
   sync_clock
@@ -182,7 +146,7 @@ main() {
   install_cli_tools
   install_docker
   install_cloudstack
-  render_coredns
+  install_coredns
 }
 
 main "$@"

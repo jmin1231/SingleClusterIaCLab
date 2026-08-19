@@ -25,10 +25,10 @@ SSHD_DROPIN="/etc/ssh/sshd_config.d/01-cloudstack.conf"
 # Ensure openssh-server
 if ! dpkg -s openssh-server >/dev/null 2>&1; then
   log "OpenSSH is not installed; installing openssh-server..."
-  apt-get update || die "apt-get update failed."
+  apt_get update || die "apt-get update failed."
   # --force-confnew: take the package's canonical sshd_config.
-  apt-get install -y -o Dpkg::Options::=--force-confnew openssh-server ||
-    die "Failed to install openssh-server."
+  apt_get install -y -o Dpkg::Options::=--force-confnew openssh-server ||
+    die "Failed to install openssh-server. If this reports a dpkg lock, another package manager held it for longer than ${APT_LOCK_TIMEOUT}s — this is common on a host's first boots, when unattended-upgrades is still running. Wait for it to finish and re-run; every step before this one is a no-op the second time."
 fi
 
 # Set the root password

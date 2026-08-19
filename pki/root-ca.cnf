@@ -19,6 +19,32 @@ x509_extensions         = root_ca_ext           # Desired extensions
 organizationName        = "SingleClusterIaCLab"
 commonName              = "lab.test Root CA"
 
+[ ca ]
+default_ca              = root_ca
+
+[ root_ca ]
+dir                     = $ENV::CA_DIR
+certificate             = $dir/root-ca.crt
+private_key             = $dir/root-ca.key.enc
+new_certs_dir           = $dir/newcerts
+database                = $dir/index.txt
+serial                  = $dir/serial
+default_md              = sha256
+default_days            = 3650
+policy                  = intermediate_pol
+x509_extensions         = intermediate_ca_ext
+rand_serial             = yes
+copy_extensions         = none
+unique_subject          = no
+
+# What the root requires of a CSR before it will sign it. The intermediate must
+# live in the same organisation, and must name itself something else.
+[ intermediate_pol ]
+domainComponent         = match
+organizationName        = match
+commonName              = supplied
+
+
 # Certificate extensions define what types of certificates the CA is able to
 # create.
 
@@ -28,5 +54,11 @@ basicConstraints        = critical,CA:true,pathlen:1
 subjectKeyIdentifier    = hash
 authorityKeyIdentifier  = keyid:always
 
+
+[ intermediate_ca_ext ]
+keyUsage                = critical,keyCertSign,cRLSign
+basicConstraints        = critical,CA:true,pathlen:0
+subjectKeyIdentifier    = hash
+authorityKeyIdentifier  = keyid:always
 
 # rand_serial = yes. Put it back when writing ca section later

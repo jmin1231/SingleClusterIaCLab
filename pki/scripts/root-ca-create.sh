@@ -15,12 +15,15 @@ set -euo pipefail
 
 SOURCE_SCRIPT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=/dev/null
-source "${SOURCE_SCRIPT}/../lib/common.sh"
+source "${SOURCE_SCRIPT}/../../lib/common.sh"
 
-CA_DIR="${SOURCE_SCRIPT}/root"
-KEY="${CA_DIR}/root-ca.key.enc"
-CRT="${CA_DIR}/root-ca.crt"
-CNF="${SOURCE_SCRIPT}/root-ca.cnf"
+# The CA and its config sit one level up, beside this scripts/ directory.
+# Normalised with cd/pwd so paths printed by die read cleanly.
+PKI_DIR="$(cd -- "${SOURCE_SCRIPT}/.." && pwd)"
+ROOT_DIR="${PKI_DIR}/root"
+KEY="${ROOT_DIR}/root-ca.key.enc"
+CRT="${ROOT_DIR}/root-ca.crt"
+CNF="${PKI_DIR}/root-ca.cnf"
 PASS_FILE="/root/.root-ca.pass"
 DAYS=7300 # 20 years: the root outlives the lab, so it never expires mid-phase
 
@@ -42,11 +45,11 @@ check_existing() {
   fi
 
   if [[ ${#missing[@]} -gt 0 ]]; then
-    die "Incomplete root CA: missing ${missing[*]} while ${present[*]} exists. A previous run failed part-way, this host was rebuilt, or a backup restored one without the other — the key and its passphrase live in different places by design. Restore the missing file, or move ${CA_DIR} aside and re-run to mint a new root, which invalidates every certificate ever issued under the old one."
+    die "Incomplete root CA: missing ${missing[*]} while ${present[*]} exists. A previous run failed part-way, this host was rebuilt, or a backup restored one without the other — the key and its passphrase live in different places by design. Restore the missing file, or move ${ROOT_DIR} aside and re-run to mint a new root, which invalidates every certificate ever issued under the old one."
   fi
 
   openssl pkey -in "${KEY}" -passin file:"${PASS_FILE}" -noout 2>/dev/null ||
-    die "${PASS_FILE} does not open ${KEY} — they are from different generations of the CA. Restore the passphrase that matches this key, or move ${CA_DIR} aside and re-run to mint a new root, which invalidates every certificate ever issued under the old one."
+    die "${PASS_FILE} does not open ${KEY} — they are from different generations of the CA. Restore the passphrase that matches this key, or move ${ROOT_DIR} aside and re-run to mint a new root, which invalidates every certificate ever issued under the old one."
 
   log "Using the existing root CA ${CRT}"
   exit 0
@@ -66,8 +69,8 @@ create_passphrase() {
 
 # Generate the private key, encrypted with that passphrase.
 create_key() {
-  mkdir -p "${CA_DIR}"
-  chmod 700 "${CA_DIR}"
+  mkdir -p "${ROOT_DIR}"
+  chmod 700 "${ROOT_DIR}"
 
   openssl genpkey -algorithm RSA \
     -pkeyopt rsa_keygen_bits:4096 \
@@ -83,7 +86,10 @@ create_key() {
 
 # Issue the self-signed root certificate from that key.
 self_sign() {
-  openssl req -x509 -new \
+  # CA_DIR is set here rather than exported: openssl expands $ENV::CA_DIR when it
+  # LOADS the config, so req needs it too, and keeping it on the call puts the
+  # directory and the config it belongs to on the same line.
+  CA_DIR="${ROOT_DIR}" openssl req -x509 -new \
     -key "${KEY}" \
     -passin file:"${PASS_FILE}" \
     -config "${CNF}" \

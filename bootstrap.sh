@@ -67,9 +67,9 @@ install_cli_tools() {
     return
   fi
   log "Installing CLI tools: ${missing[*]}..."
-  apt-get update
-  apt-get install -y "${missing[@]}" ||
-    die "Failed to install ${missing[*]}."
+  apt_get update
+  apt_get install -y "${missing[@]}" ||
+    die "Failed to install ${missing[*]}. If this reports a dpkg lock, another package manager held it for longer than ${APT_LOCK_TIMEOUT}s — wait for unattended-upgrades to finish and re-run."
   log "CLI tools ready"
 }
 
@@ -100,8 +100,8 @@ Architectures: $(dpkg --print-architecture)
 Signed-By: /etc/apt/keyrings/docker.asc
 EOF
 
-  apt-get update
-  apt-get install -y \
+  apt_get update
+  apt_get install -y \
     docker-ce \
     docker-ce-cli \
     containerd.io \
@@ -122,7 +122,7 @@ EOF
 
 # Run the root ca installer
 install_root_ca() {
-  local installer="${SOURCE_SCRIPT}/pki/root-ca-create.sh"
+  local installer="${SOURCE_SCRIPT}/pki/scripts/root-ca-create.sh"
   [[ -x "${installer}" ]] || die "Missing or not executable: ${installer}"
   "${installer}"
 }

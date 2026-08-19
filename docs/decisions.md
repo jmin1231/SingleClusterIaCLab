@@ -7,6 +7,28 @@ Format: newest at the bottom, so the file reads as a history.
 
 ---
 
+## Open questions
+
+Noticed but not settled, each tagged with the phase that will settle it. Kept
+above the history so that appending a decision never has to step around them.
+
+- **Does cloud-init fight netplan on the Packer image, and on the zone's VMs?**
+  — Phase 6.2, then again at 7.3. On *this* host the question is closed: subiquity
+  wrote `/etc/cloud/cloud-init.disabled` at install time, so the vendored
+  installer's `rm -f /etc/netplan/50-cloud-init.yaml` sticks. Verified by boot
+  rather than by the marker — the host booted `2026-08-19 09:24:59` while
+  cloud-init's `boot-finished` stamp still reads `2026-08-13 12:38`, so it did not
+  run on that boot.
+
+  Neither later host inherits that. Cloud images ship cloud-init **enabled**,
+  because it is their entire provisioning mechanism, and CloudStack feeds guests
+  network config through its own datasource. `50-` also sorts after `01-`, so
+  cloud-init's netplan wins there by default. On those hosts that is the design,
+  not a bug to work around — the real question is whether the Phase 8.2 base role
+  writes anything that competes with it, and if so which of the two should yield.
+
+---
+
 ## 0.2-1 · Repository layout is organised by tool
 
 **Decided:** top-level directories per tool — `host/`, `docker/`, `packer/`,
@@ -540,3 +562,216 @@ does not start with `require_root`.
 than in 2.4, because `openssl ca` will not sign anything without it. The serial
 is sixteen random bytes rather than `01`: serials are public, and a sequential
 one tells every certificate holder how many others this CA has issued.
+
+---
+
+## 1.3-1 · apt waits for the dpkg lock; it does not race it
+
+**Decided:** every `apt-get` in this repo goes through `apt_get()` in
+`lib/common.sh`, which adds `-o DPkg::Lock::Timeout=${APT_LOCK_TIMEOUT:-300}`.
+
+**Rejected:** polling `fuser /var/lib/dpkg/lock-frontend` in a wait loop, which
+reimplements — worse — something apt has done natively since 2.0.
+
+**Rejected:** `systemctl stop unattended-upgrades` before installing. It
+interrupts a dpkg transaction that is already in flight, and leaves the host in
+the half-configured state this whole script exists to avoid.
+
+**Rejected:** `DPkg::Lock::Timeout=-1` (wait forever). A genuinely stuck lock
+should fail a CI run, not hang it until someone notices.
+
+**Why:** found on the first real run against a fresh VM. `unattended-upgrades`
+starts on a new host's first boots and holds the frontend lock for minutes;
+`prepare-kvm-host.sh` reached `openssh-server` roughly nine seconds after it
+started and lost the race. The failure is pure timing — it says nothing about the
+host, is not reproducible on the second run, and surfaces at the exact moment the
+operator has least context to judge it. Re-running was already the correct fix,
+which is precisely why the script should not have needed a human to work that out.
+
+**The deeper point:** "safe to re-run" is not the same as "does not fail
+spuriously." Idempotence made recovery cheap here, and still cost a confusing
+error on a first install. Both properties are worth having.
+
+**Note for 0.3-7:** the two `die` messages on the apt paths now name the lock as
+the likely cause and say to wait and re-run, rather than reporting only that the
+install failed.
+
+---
+
+## 1.3-2 · A bootstrap resolver floor, because the installer rebuilds the network under itself
+
+**Decided:** `cloudstack-install-all.sh` writes a global `DNS=` drop-in for
+systemd-resolved before invoking the vendored installer, and proves it by
+resolving `download.cloudstack.org` rather than by checking the file exists.
+
+**Why:** the installer reconfigures host networking in the middle of its own run.
+`netplan apply` moves the NIC into `cloudbr0`, sets `dhcp4: false` on it — which
+takes the DHCP-supplied nameserver with it — and puts a static resolver on the
+bridge. `netplan apply` returns when networkd *accepts* the config, not when it
+has converged, and the next thing the installer does is `curl` the CloudStack
+signing key. Measured on a first run: netplan at `09:53:07.975`, curl failing
+inside the same second.
+
+**Two errors, one cause.** The failure prints as `curl (6) Could not resolve
+host` and then `gpg: no valid OpenPGP data found`. The second is not a second
+problem — `curl -fsSL … | gpg --dearmor | tee` handed gpg an empty pipe. Reading
+them as independent sends you looking for a keyserver problem that does not exist.
+
+**Rejected:** pre-creating `cloudbr0` so the installer skips network
+configuration. It is the more complete fix — it protects every later network call,
+not just the key fetch — but it reverses [0.4-2](#04-2) and moves real work back
+into Phase 0.4. Held in reserve: if anything downstream of the bridge shows the
+same flakiness, that is the answer, and 0.4-2 should be rewritten rather than
+worked around twice.
+
+**Rejected:** pre-seeding the repository and key from the wrapper. Smallest
+change, but it shields only this one step, while `apt-get update` and the package
+install that follow run against the same just-rebuilt network.
+
+**Why DNS and not connectivity:** the error is consistently curl 6, never curl 7.
+The bridge carries the existing address across without a DHCP round trip, so
+routing is up almost immediately; it is systemd-resolved's per-link state that
+lags. Fixing the resolver is therefore sufficient, and a `wait-online` loop would
+have been aimed at the wrong layer.
+
+**A near miss worth recording.** The failed run left a **0-byte**
+`/etc/apt/keyrings/cloudstack.gpg` — `set -euo pipefail` tripped `error_exit`, but
+`tee` had already created the file. Re-running was safe only because the key is
+written *before* `cloudstack.list`, so the `.list` never appeared and the
+already-configured branch did not engage. Had those two writes been ordered the
+other way, the silent-mode short-circuit —
+
+```sh
+if [[ -n "$repo_entry" ]]; then
+  if is_silent; then ... return 0
+```
+
+— would have skipped the key fetch on every subsequent run, pairing an empty
+keyring with a live repository and surfacing as apt signature failures many steps
+later. **A failing step that writes a file before it fails is not idempotent, it
+is merely lucky.** Worth checking for wherever this repo pipes into `tee`.
+
+---
+
+## 1.3-3 · Drop-in numbers, and which direction each system reads them
+
+**Decided:** the bootstrap resolver floor is `05-cloudstack-bootstrap.conf`, below
+CoreDNS's `10-lab.conf`, and `coredns-installer.sh` **deletes** it when it takes
+over. The deletion is what retires it; the number only makes the intent legible.
+
+**Rejected:** `99-`, which is what it was first written as. That was backwards.
+systemd parses drop-ins in lexicographic order and later assignments win, so `99-`
+left the temporary floor outranking the resolver meant to replace it.
+
+**Rejected:** relying on sort order alone once renumbered. `DNS=` is a list
+setting, so the realistic failure is not "the wrong one wins" but "both survive" —
+a global `8.8.8.8` still answering everything outside `~lab.test` while CoreDNS
+handles the lab names. Every name resolves, so nothing looks broken; the host has
+simply stopped using its own resolver for most of its traffic.
+
+**The rule worth memorising, because it is not consistent:**
+
+| Directory | Rule | Winner |
+|---|---|---|
+| `/etc/sysctl.d/` | lexicographically latest takes precedence | higher number |
+| `/etc/systemd/*.conf.d/` | later assignment overrides | higher number |
+| `/etc/netplan/` | later file overrides on the same key | higher number |
+| `/etc/ssh/sshd_config.d/` | *"the **first** obtained value will be used"* | **lower number** |
+
+sshd is the odd one out, and `prepare-kvm-host.sh` already accounts for it: it
+asserts on `sshd -T`, the merged effective config, so a lower-numbered file
+outranking `01-cloudstack.conf` is caught rather than assumed away. Ubuntu placing
+`Include` at line 12 of `sshd_config` — near the top, where first-wins makes it
+authoritative — is load-bearing for that, not incidental.
+
+**Observed while checking this, not yet acted on:** `01-bridge-cloudbr0.yaml`
+declares `renderer: networkd`, but `01-network-manager-all.yaml` sorts after it
+(`01-b` < `01-n`) and declares `renderer: NetworkManager`. NetworkManager wins.
+`networkctl status cloudbr0` reports `unmanaged`, `nmcli` shows the bridge on
+`netplan-cloudbr0`, and netplan emitted a `.nmconnection` rather than a `.network`
+file. It works, so it is left alone — but the bridge is governed by a file the
+installer never wrote, and any later reasoning that begins "networkd will…" is
+wrong. Revisit if the renderer ever matters.
+
+---
+
+## 1.3-4 · The CloudStack repo is seeded by us, pinned to 4.21
+
+**Decided:** `cloudstack-install-all.sh` writes `/etc/apt/keyrings/cloudstack.gpg`
+and `/etc/apt/sources.list.d/cloudstack.list` itself, pinned to
+`CS_REPO_VERSION=4.21`, then proves the repository resolves to an installable
+`cloudstack-management` before any other step runs.
+
+**Why, first reason — 4.22 is broken upstream.** The vendored installer hardcodes
+`default_cs_version="4.22"`. The signed `Release` for noble declares
+`4.22/binary-all/Packages.bz2` as 5670 bytes; the CDN serves 6848. apt refuses the
+index and exits **100**. Measured across all three published components:
+
+| Component | `apt-get update` |
+|---|---|
+| 4.22 (installer default) | exit 100 — size mismatch, 6848 != 5670 |
+| 4.21 | **exit 0** |
+| 4.20 | exit 100 — size mismatch, 8365 != 6861 |
+
+4.21 publishes the full set at 4.21.0.0 — management, agent, usage, common, ui.
+Not a transient mirror sync despite apt's suggestion: that `Release` was created
+2026-05-25 and was still inconsistent on 2026-08-19.
+
+**Why, second reason — the failure was silent, and that is the worse bug.**
+`update_system_packages` runs:
+
+```sh
+apt-get update 2>&1 | while IFS= read -r line; do ... done
+...
+if [[ $? -eq 0 ]]; then ... else ... return 1; fi
+```
+
+Under the installer's own `set -euo pipefail`, a non-zero `apt-get update` fails
+the pipeline, and `set -e` terminates the script *before* the `$?` test can run.
+The author's error handling is unreachable. What you see is the installer printing
+"Skipping repository setup", then nothing — no message, no log line, no non-zero
+exit visible to the caller. **An error handler placed after a failing command in a
+`set -e` script is decoration.**
+
+**Rejected:** patching `default_cs_version` in the vendored installer. It is read,
+driven, never maintained — and the installer already offers a supported way to
+choose: its silent-mode path returns early when the list file exists, so writing
+that file is how you pick the version without touching upstream.
+
+**Rejected:** letting the installer's own repo step run and pinning afterwards.
+There is no "afterwards" — it dies in the step that follows.
+
+**Verified before the installer, not during.** The seeding step ends with
+`apt-get update` and an `apt-cache policy` check for a real candidate version.
+A broken component now fails in ten seconds with a message naming the component
+and where to look, instead of twenty minutes in with nothing at all. The `die`
+tells you to try another `CS_REPO_VERSION` and where to read what is published.
+
+**The key is dearmoured to a temp file and installed only once non-empty**, which
+is 1.3-2's near miss turned into a rule. `curl ... | gpg | tee keyring` creates
+the file before curl's failure can stop it; `install`-after-check cannot.
+
+**Two smaller rules the code now follows silently, recorded because the comments
+that explained them were removed.**
+
+*Capture, do not pipe, into `grep -q`.* `cmd | grep -q pattern` lets grep exit on
+its first match; the producer then takes SIGPIPE and `pipefail` reports **141** —
+a successful match read as a failure. Measured, so it is not folklore:
+
+```
+$ bash -c 'set -euo pipefail; seq 1 2000000 | grep -q "^1$"; echo reached'
+   -> exit 141, "reached" never printed
+$ bash -c 'set -euo pipefail; v="$(seq 1 2000000 || true)"; grep -q "^1$" <<<"$v"'
+   -> exit 0
+```
+
+`apt-cache policy` emits four lines and would never have triggered it, which is
+precisely the argument for fixing it: the pattern survives to somewhere it does.
+`coredns-installer.sh` had already been bitten by this with `resolvectl status`.
+
+*A `RETURN` trap does not cover `die`.* `die` calls `exit`, which fires `EXIT`,
+not `RETURN` — so every failure path leaked its `mktemp` file. `trap ... RETURN
+EXIT` covers both. Verified by running the function to a forced `die` under each
+form: the `RETURN`-only version leaked, `RETURN EXIT` cleaned up. Safe here
+because this is the script's only trap, and the surviving `rm -f` is a no-op on a
+file already gone.

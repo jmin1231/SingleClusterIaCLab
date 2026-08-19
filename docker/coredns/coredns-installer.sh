@@ -18,6 +18,8 @@ TMPL="${SOURCE_SCRIPT}/zones/lab.test.zone.tmpl"
 ZONE="${SOURCE_SCRIPT}/zones/lab.test.zone"
 COMPOSE="${SOURCE_SCRIPT}/docker-compose.yml"
 RESOLVED_DROPIN="/etc/systemd/resolved.conf.d/10-lab.conf"
+# Phase 1's bootstrap resolver floor, retired here. See decisions.md 1.3-3.
+BOOTSTRAP_DROPIN="/etc/systemd/resolved.conf.d/05-cloudstack-bootstrap.conf"
 
 # Write the two generated files — .env and the rendered zone — from this host's
 # addresses. Overwrites, so a re-run corrects stale values.
@@ -57,6 +59,13 @@ configure_resolver() {
   bridge="$(bridge_ip)"
 
   log "Pointing systemd-resolved at ${bridge} for lab.test..."
+
+  # Deleted, not left to lose on sort order: `DNS=` accumulates across drop-ins.
+  if [[ -f "${BOOTSTRAP_DROPIN}" ]]; then
+    log "Retiring the bootstrap resolver floor ${BOOTSTRAP_DROPIN}..."
+    rm -f "${BOOTSTRAP_DROPIN}" ||
+      die "Failed to remove ${BOOTSTRAP_DROPIN}; it would keep answering alongside CoreDNS."
+  fi
 
   mkdir -p "$(dirname "${RESOLVED_DROPIN}")"
   # [Resolve] is required. A drop-in does not inherit the section of the file it

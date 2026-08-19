@@ -26,6 +26,13 @@ require_root() {
   [[ ${EUID} -eq 0 ]] || die "${0##*/} must be run as root:  sudo ${0}"
 }
 
+# apt-get, but waiting for the dpkg lock rather than dying on it.
+# See decisions.md 1.3-1.
+APT_LOCK_TIMEOUT="${APT_LOCK_TIMEOUT:-300}"
+apt_get() {
+  apt-get -o DPkg::Lock::Timeout="${APT_LOCK_TIMEOUT}" "$@"
+}
+
 # Print a bridge's IPv4 address. Usage: ip="$(bridge_ip)" or bridge_ip br0
 #
 # The single producer of this value: it differs per host, so it is discovered at

@@ -19,10 +19,10 @@ services:
     environment:
       # Read by {$GATEWAY_IP} in the Corefile — CoreDNS's own substitution, not
       # a render step. Sourced from .env, which bootstrap generates.
-      - GATEWAY_IP=${GATEWAY_IP}
+      - GATEWAY_IP=${GATEWAY_IP:?generated into .env by coredns-installer.sh}
     ports:
-      - "${CLOUDBR0_IP}:53:53/udp"
-      - "${CLOUDBR0_IP}:53:53/tcp"
+      - "${CLOUDBR0_IP:?generated into .env by coredns-installer.sh}:53:53/udp"
+      - "${CLOUDBR0_IP:?generated into .env by coredns-installer.sh}:53:53/tcp"
     volumes:
       # Read-only: nothing in the container may rewrite the zone data. These
       # container paths are what the Corefile refers to — if they disagree,

@@ -1533,7 +1533,19 @@ configure_kvm_agent() {
     update_progress_bar "90" "Update agent.properties!"
     AGENT_PROPERTIES="/etc/cloudstack/agent/agent.properties"
     if [ -f "$AGENT_PROPERTIES" ]; then
-      local agent_guid=$(uuidgen)
+      # Preserve the existing GUID. CloudStack identifies a KVM host by this
+      # value, NOT by hostname or IP: reconnecting with a fresh one registers a
+      # brand-new host and orphans the old record (which then keeps its stale
+      # storage_pool_host_ref rows and any system VMs pinned to it). Only mint a
+      # GUID when the host genuinely has none.
+      local agent_guid
+      agent_guid=$(sed -n 's/^guid=//p' "$AGENT_PROPERTIES" | head -1)
+      if [[ -z "$agent_guid" ]]; then
+        agent_guid=$(uuidgen)
+        log "No agent GUID present; generating a new one ($agent_guid)."
+      else
+        log "Preserving existing agent GUID ($agent_guid) to avoid re-registering this host."
+      fi
       sed -i '/^guid=/d' "$AGENT_PROPERTIES"
       sed -i '/^private\.network\.device=/d' "$AGENT_PROPERTIES"
       {
@@ -2208,8 +2220,23 @@ deploy_zone() {
 
     local host_id=$(get_tracker_field "host_id")
     # Match by ipaddress (.host[0] is unsafe — the zone may hold a stale/disconnected host).
-    [[ -z "$host_id" ]] && host_id=$(cmk list hosts type=Routing zoneid="$zone_id" 2>/dev/null |
-      jq -r --arg ip "$KVM_HOST_IP" 'first(.host[]?|select(.ipaddress==$ip)|.id) // empty' 2>/dev/null || true)
+    #
+    # The list and the filter are kept separate on purpose. Folding them into one
+    # pipeline with `2>/dev/null || true` cannot distinguish "no host matches"
+    # from "the query itself failed" — both yield an empty string, and the caller
+    # then adds a duplicate host. A lookup that fails open is worse than one that
+    # stops, because the duplicate is silent and permanent.
+    if [[ -z "$host_id" ]]; then
+      local hosts_json=""
+      if ! hosts_json=$(cmk -o json list hosts type=Routing zoneid="$zone_id" 2>/dev/null); then
+        cmk_api_fail_dialog_msg "Failed to list hosts; cannot tell whether this host is already registered"
+      fi
+      # Prefer a host that is actually Up: matching a stale Disconnected record
+      # would hand back an id the agent will never reconnect to.
+      host_id=$(printf '%s' "$hosts_json" |
+        jq -r --arg ip "$KVM_HOST_IP" \
+          'first(.host[]? | select(.ipaddress==$ip and .state=="Up") | .id) // empty')
+    fi
     if [[ -n "$host_id" ]]; then
       log "Reusing existing host: $host_id"
     else

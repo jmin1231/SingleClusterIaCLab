@@ -84,6 +84,14 @@ create_key() {
   log "Generated the root CA private key: ${KEY}"
 }
 
+# Initialize CA database
+init_ca_db() {
+  touch "${ROOT_DIR}/index.txt"
+  mkdir -p "${ROOT_DIR}/newcerts"
+
+  log "Initialised the CA Database: ${ROOT_DIR}/index.txt"
+}
+
 # Issue the self-signed root certificate from that key.
 self_sign() {
   # CA_DIR is set here rather than exported: openssl expands $ENV::CA_DIR when it
@@ -121,6 +129,7 @@ main() {
   check_existing
   create_passphrase
   create_key
+  init_ca_db
   self_sign
   verify_root
 }

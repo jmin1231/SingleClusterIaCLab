@@ -70,4 +70,4 @@ secrets/
 # The key is named .key.enc to say out loud that it is encrypted, which means the
 # *.key rule above does not match it. This directory entry is what protects it.
 pki/root/
-pki/intermediate
+pki/intermediate/

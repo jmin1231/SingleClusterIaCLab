@@ -775,3 +775,147 @@ EXIT` covers both. Verified by running the function to a forced `die` under each
 form: the `RETURN`-only version leaked, `RETURN EXIT` cleaned up. Safe here
 because this is the script's only trap, and the surviving `rm -f` is a no-op on a
 file already gone.
+
+---
+
+## 2.3-4 · `bootstrap.sh` creates the root CA when there is none
+
+**Decided:** `install_root_ca` runs `pki/scripts/root-ca-create.sh` on every
+bootstrap. The script creates a CA when nothing exists, leaves an existing one
+untouched, and refuses anything in between. Supersedes
+[2.3-1](#23-1--the-root-ca-is-generated-by-hand-once-and-refuses-to-run-twice),
+which kept CA creation out of `bootstrap.sh` entirely.
+
+**Rejected:** the by-hand-once rule of 2.3-1. It was written for an offline root
+in the real sense — an asset that outlives any host — and this lab wants one
+command to take a bare VM to a working system. Those are not reconcilable, and
+the requirement wins.
+
+**Why the guard moves rather than disappears:** *bootstrap* decides whether to
+call the generator; the *generator* still refuses to clobber. Re-running on a
+working host is a no-op, re-running on a wiped one mints a new root, and neither
+path can silently replace a live trust anchor.
+
+**Where it sits in `main()`, and why exactly there.** Three constraints pin it:
+
+| Constraint | Reason |
+|---|---|
+| after `sync_clock` | `notBefore`/`notAfter` come from the system clock. A skewed clock mints a certificate nothing accepts, and reports it as "certificate is not yet valid" — a certificate problem, apparently, rather than a clock problem |
+| after `install_cli_tools` | that step is what declares `openssl`. Ubuntu ships it, so this would appear to work anywhere — the accident [2.1-2](#21-2--verification-lives-in-make-verify-not-in-bootstrapsh) called out about `dig` |
+| before `install_cloudstack` | not technical. Anything that can fail should fail before forty minutes of installer, not behind it |
+
+**Consequence, unchanged from 2.3-1:** a rebuilt host mints a *new* root, so
+every trust store that trusted the old one is wrong. That is Phase 2.6, and it is
+the strongest argument for backing up `/root/.root-ca.pass` alongside
+`pki/root/` — together they turn a rebuild back into the same lab.
+
+---
+
+## 2.3-5 · The passphrase is generated, not typed, and lives outside the repo
+
+**Decided:** `create_passphrase` writes 32 random bytes, base64-encoded, to
+`/root/.root-ca.pass` at `0400`, and the key is encrypted with it. No prompt, no
+human input, nothing to remember. Supersedes
+[2.3-3](#23-3--offline-is-the-passphrase-not-the-location), which had the script
+prompt for a twelve-character passphrase and confirm it.
+
+**Rejected:** the prompt. It is the strongest option — the passphrase exists only
+in the operator's head — and it is one manual step, which is one more than
+"bootstrap does everything" allows.
+
+**Rejected:** no passphrase at all. Same threat model against a compromised host,
+strictly worse against the realistic leak: a copy of the working tree.
+
+**Rejected:** storing the passphrase beside the key. That is not encryption, it
+is a filename change.
+
+**Why the split is the whole design.** The key sits in `pki/root/`, inside the
+tree; the passphrase sits in `/root`, outside it. A backup, an `rsync`, a VM
+snapshot or a `git add -f` on a bad day carries the tree and not `/root` — an
+encrypted key with no way in. That is the only protection this buys, and it is
+worth stating plainly: **anyone with root on this host can decrypt the key**,
+because `bootstrap.sh` can, unattended, by design.
+
+**Why it cannot be delegated to Vault.** Phase 3 stores secrets, but Vault runs
+behind TLS issued from this CA. The root sits at the bottom of the trust chain
+and has to be self-sufficient — which is why real PKI reaches for hardware or an
+air gap rather than a secret store.
+
+**Reverses 2.3-3 on privilege:** the script now starts with `require_root`, and
+not out of habit. `/root` is `0700`, so an unprivileged run cannot *stat*
+`PASS_FILE` at all — `check_existing` would report a fresh host and try to
+recreate a CA that is sitting right there.
+
+**Four mechanics the code no longer explains**, recorded here because the
+comments that carried them were stripped in favour of one-line function headers:
+
+- **`umask 077` before the redirect, not `chmod` after it.** The redirect creates
+  the file the instant the subshell starts. `chmod` a line later closes a window
+  that was open while 256 bits of secret were written into a `0644` file.
+- **The subshell scopes the mask.** A bare `umask` would apply to everything the
+  script does afterwards.
+- **`-pass file:` and never `pass:` or `env:`.** The first puts a path in the
+  argument list; the others put the secret where `ps` and `/proc/<pid>/environ`
+  show it.
+- **`die` outside the parentheses.** Inside, it exits only the subshell, and the
+  script stops solely because `set -e` saw a non-zero return — a guarantee that
+  evaporates the moment that call lands in a condition.
+
+---
+
+## 2.4-1 · The intermediate is issued with `openssl ca`, not `req -x509`
+
+**Decided:** the intermediate is created as a CSR and signed by the root through
+`openssl ca`, using the `[ root_ca ]` section of `root-ca.cnf`.
+
+**Rejected:** a second `req -x509`, which is how the root itself was made. It
+would produce a working certificate and skip everything that makes an issuance an
+issuance: no database entry, no serial allocation, no policy check.
+
+**Why:** this is the first time the CA signs something that is not itself, and
+`openssl ca` is the subcommand that models that. `intermediate_pol` enforces what
+the root requires of a request — same `domainComponent`, same `organizationName`,
+a `commonName` it supplies itself — so a CSR from the wrong organisation is
+refused rather than certified.
+
+**`copy_extensions = none`**, stated explicitly rather than left to default. A
+CSR is a *request*: the requester chooses the key and the name, the CA chooses
+what the certificate may do. Copying extensions from a CSR is how a leaf asks to
+be a CA and gets told yes.
+
+**`rand_serial = yes`** rather than a counter file. Serials are public, and a
+sequential one tells every holder how many certificates this CA has issued.
+
+**`dir = $ENV::CA_DIR`** rather than a hardcoded path, so the same config serves
+a CA directory that moves. The cost is that `$ENV::` expands when openssl *loads*
+the file — every command reading this config must set `CA_DIR`, including ones
+that never touch the `[ ca ]` section.
+
+**Outstanding:** `openssl ca` needs `index.txt` and `newcerts/` to exist, and
+nothing creates them yet. The database belongs to the CA whose issuances it
+records, so `root-ca-create.sh` is where that goes.
+
+---
+
+## 2.4-2 · What the intermediate is allowed to issue
+
+**Decided:** `intermediate-ca.cnf` issues leaves at `default_days = 397`, with
+`basicConstraints = critical,CA:false`, `keyUsage = digitalSignature,
+keyEncipherment`, `extendedKeyUsage = serverAuth`, and a subjectAltName taken
+from `$ENV::LEAF_SAN`.
+
+**Why 397 days:** the CA/Browser Forum cap is 398, and browsers enforce it on
+publicly-trusted certificates. Nothing here is publicly trusted, so this is a
+habit rather than a requirement — but a lab that issues ten-year leaves teaches
+the wrong instinct, and 3.5 is where renewal gets automated anyway.
+
+**Why the SAN comes from the environment:** a DNS name is per-certificate, and
+a config file is per-CA. The same expansion caveat as `CA_DIR` applies and is
+sharper here — `$ENV::LEAF_SAN` is read when the file loads, so *every* openssl
+command using this config must set it, including the intermediate's own CSR,
+where `LEAF_SAN=""` is the correct value.
+
+**The trap this encodes:** `[ leaf_pol ]` lists `domainComponent` and
+`organizationName` as `match`, so a leaf CSR must carry the full DN, not just a
+CN — and any field not listed in the policy is silently dropped from the issued
+certificate rather than refused.

@@ -281,8 +281,17 @@ except a clock problem — and you will meet it again with certificates, JWTs an
 Second lesson: the distinction between **day-0 imperative setup** and everything after it, which is
 declarative. Every IaC system has this seam.
 
+**Then prove the uplink stays up under load.** Turn off TCP segmentation, generic segmentation and
+generic receive offload on the interface your bridge is built on — `ethtool -K <iface> tso off gso
+off gro off` — and persist it across reboots. Then push a sustained transfer through it while
+watching `journalctl -k` for `Detected Hardware Unit Hang`. A previous build of this lab lost its
+host to exactly that on an onboard `e1000e`: the interface stayed `UP` with carrier while its
+transmit ring was wedged, so bridge-local traffic kept flowing and only egress died. It surfaced
+two layers up as a DNS failure inside the guests — see [`failure-log.md`](failure-log.md).
+
 **Done when:** `chronyc tracking` shows a synchronised source, `kvm-ok` reports usable
-acceleration, and a second run of your script produces no changes.
+acceleration, a second run of your script produces no changes, and the uplink carries a sustained
+transfer with nothing in the kernel log about a hardware unit hang.
 
 ### 0.4 The address plan · `M`
 
@@ -456,6 +465,14 @@ the tracker file fill in: `nfs_installed`, `mysql_configured`, `db_deployed`, `a
 **Learning:** **idempotence by checkpoint**, in a real tool rather than in theory. The tracker is
 how the installer knows what it already did, which makes it safe to re-run and resumable after a
 failure — the same property your own `ensure` scripts will need.
+
+**Two traps in this tracker, both worth reading the code for.** `is_step_tracked` tests whether a
+key has a *non-empty value*, not whether it says `yes` — so editing `db_deployed=yes` into `no`
+reads as *done* and the step is skipped anyway. To genuinely re-run one, delete its line. And the
+database step carries a second guard that queries MySQL directly and re-marks the tracker when the
+`cloud` database exists, which is deliberate: the tracker alone cannot ask for a rebuild, only a
+dropped database can. Both cost real time in the previous build
+([`failure-log.md`](failure-log.md)).
 
 **Done when:** the tracker shows `zone_deployment=yes` and the management UI answers on the bridge
 address.
@@ -699,6 +716,14 @@ service that already exists.
 once at initialisation and never again, so quietly regenerating it desynchronises two systems in a
 way that surfaces much later. The reference lab's `vault-ensure-postgres.sh` documents this at
 length and chooses non-rotation deliberately; the skill is deciding per-secret and writing down why.
+
+**The other half of non-rotation: what happens when the far side is rebuilt.** CloudStack's admin
+account is recreated whenever its database is redeployed, which invalidates the stored key while
+Vault goes on serving it happily — every consumer then fails with a 401 that says nothing about the
+cause. A non-rotating `ensure` script cannot detect this by definition, so give yourself an
+explicit reseed path and understand that it means deleting the secret before re-running. Keep a
+list of which rebuilds invalidate which secrets; that list is the runbook you will want under
+pressure.
 
 **Done when:** running the script twice logs "already present" the second time, and `cmk`
 authenticates using the key read back out of Vault.
@@ -1014,6 +1039,13 @@ and a public one that is a translation. If a forward is configured but nothing a
 programmed the port forward**. A cloud API returning success does not mean the thing is usable. The
 reference handles this in the next phase with `wait_for_connection`; know now that you will need it.
 
+**One constraint the provider does not advertise:** `cloudstack_port_forward` is keyed by
+`ip_address_id`, so the resource's Terraform ID *is* the public IP's ID, and the resource owns
+every rule on that IP. Declare one resource per public IP with a `forward` block per rule. Never
+add a second resource for the `:80` rule on an IP that already carries an SSH forward — two
+Terraform addresses then share one identity, race to own the same rules on refresh, and each tries
+to tear down an IP the other is also tearing down ([`failure-log.md`](failure-log.md)).
+
 **Done when:** you SSH into each VM using its public IP and the key from Vault.
 
 ### 7.4 Outputs, inventory, and DNS records · `M`
@@ -1069,6 +1101,18 @@ later. But the real lesson is the guards. The reference lab's comment says it ex
 state still exits 0 here and matches no hosts later, so every step below would pass having done
 nothing. Fail loudly instead."* A pipeline that succeeds while doing nothing is worse than one that
 fails, because you will believe it.
+
+**Add a third guard, above both:** refuse to start when the platform itself is unhealthy. A single
+`cmk list hosts` check for a hypervisor that is not `Up` costs a second and names the problem
+outright. Without it, a disconnected agent surfaces as whatever the first task needing the network
+happens to be — in the previous build, a name-resolution error thirty tasks deep, which sent the
+diagnosis into the guests' resolver configuration for an hour
+([`failure-log.md`](failure-log.md)).
+
+There is a related trap in your own idempotence. Install tasks guarded by `creates:` skip on every
+re-run, so a re-run never re-proves that the guests can still reach the internet, and the first
+*unguarded* network task becomes the accidental canary — failing alone and looking like its own
+bug. When one task fails on every host at once, suspect what they share before suspecting the task.
 
 **Done when:** an ad-hoc ping succeeds against all three hosts, and the job fails immediately if run
 against empty state.
@@ -1642,6 +1686,13 @@ especially instructive: stopping DNS, because by now almost everything depends o
 the management server, which should *not* affect running VMs — proving the management and data
 planes really are separate. Filling a disk is not hypothetical either: the reference lab prunes
 built images every run precisely because the disk is shared with CloudStack.
+
+**Two of these already happened together, by accident.** In the previous build the host's NIC
+wedged and the machine crashed, which stopped DNS and the management plane at the same moment — and
+demonstrated the lesson above from the other direction: CloudStack went on reporting three
+`Running` VMs for an hour after they had ceased to exist, and both Terraform and Ansible believed
+it. Read [`failure-log.md`](failure-log.md) before this step; an injected failure you have already
+met in the wild is the one whose alerting you will get right.
 
 **Done when:** each injected failure produced an alert you could act on, or you fixed the alerting
 that didn't.

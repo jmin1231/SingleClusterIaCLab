@@ -51,7 +51,7 @@ ls -l /dev/kvm                       # must exist
 Organised by tool. Directories appear as the phase that creates them is reached.
 
 ```
-docs/           build-order.md (the syllabus) and decisions.md
+docs/           build-order.md (the syllabus), decisions.md, failure-log.md
 .githooks/      versioned git hooks; enabled by `make setup`
 ```
 
@@ -65,3 +65,5 @@ docs/           build-order.md (the syllabus) and decisions.md
   `.shellcheckrc` carries a comment explaining itself.
 - **Decisions are written down.** See [`docs/decisions.md`](docs/decisions.md) —
   what was chosen, what was rejected, and why.
+- **So are failures.** See [`docs/failure-log.md`](docs/failure-log.md) — what
+  broke, what it actually was, and where the search should have started.

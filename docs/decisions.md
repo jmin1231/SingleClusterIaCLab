@@ -995,6 +995,24 @@ snapshot belongs in code we own, which is the seam Phase 1.1 is about — and on
 snapshot step covers netplan, libvirt and the `/etc/default` edits together,
 where patching would mean four separate changes to a file we re-vendor.
 
+**Rejected:** storing the snapshot in MinIO (Phase 5.1) rather than a local
+directory. The dependency is circular: the snapshot is taken in Phase 1 before
+the vendored installer runs, and MinIO needs `minio.lab.test` from CoreDNS
+(2.1), which binds the bridge address that the Phase 1 installer creates — plus
+TLS from 2.4 and a root credential from Vault at 3.1. The store would depend,
+four phases down, on the thing the snapshot exists to recover from.
+
+It also buys no durability. This is one host: an object in MinIO sits on the same
+disk as `/etc/netplan`. And the artifact being saved is the *network* config, so
+a host that needs the restore cannot reach a store addressed by name, over TLS,
+through a bridge. **A restore path must not depend on the thing it restores.**
+
+Object storage earns its place where an artifact must outlive the host or be read
+by something that is not the host — Terraform state at 5.2, images at 6.1.
+Netplan fails both tests. The genuine disaster-recovery copy is the VM snapshot
+of T-4; this local one exists so teardown can put netplan back in seconds instead
+of forcing a full rollback.
+
 **Why:** it is the only fix that moves an artifact out of the *unrecoverable*
 bucket (T-2). Without it, undoing the bridge means reconstructing a netplan file
 by parsing the bridge config for an interface, an address and a gateway, and

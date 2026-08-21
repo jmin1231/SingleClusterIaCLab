@@ -63,7 +63,7 @@ require_root_ca() {
   done
 
   [[ ${#missing[@]} -eq 0 ]] ||
-    die "No usable root CA: missing ${missing[*]}. Run pki/scripts/root-ca-create.sh first; bootstrap.sh runs it before this one."
+    die "No usable root CA: missing ${missing[*]}. Run ca/scripts/root-ca-create.sh first; bootstrap.sh runs it before this one."
 
   openssl pkey -in "${ROOT_KEY}" -passin file:"${ROOT_PASS}" -noout 2>/dev/null ||
     die "${ROOT_PASS} does not open ${ROOT_KEY} — the root CA cannot sign. Restore the matching passphrase before issuing an intermediate."

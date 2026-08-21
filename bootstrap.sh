@@ -120,9 +120,11 @@ EOF
 
 # ---- Services --------------------------------------------------------------
 
-# Run the root ca installer
-install_root_ca() {
-  local installer="${SOURCE_SCRIPT}/pki/scripts/root-ca-create.sh"
+# Run the CA installer: the offline root, then the intermediate that signs
+# everything the lab serves over TLS. Before CloudStack — it is seconds of local
+# openssl work, so a bad path fails here rather than after a long install.
+install_ca() {
+  local installer="${SOURCE_SCRIPT}/ca/ca-install-all.sh"
   [[ -x "${installer}" ]] || die "Missing or not executable: ${installer}"
   "${installer}"
 }
@@ -152,7 +154,7 @@ main() {
   check_kvm
   install_cli_tools
   install_docker
-  install_root_ca
+  install_ca
   install_cloudstack
   install_coredns
 }

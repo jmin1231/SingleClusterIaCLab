@@ -901,9 +901,12 @@ a CA directory that moves. The cost is that `$ENV::` expands when openssl *loads
 the file — every command reading this config must set `CA_DIR`, including ones
 that never touch the `[ ca ]` section.
 
-**Outstanding:** `openssl ca` needs `index.txt` and `newcerts/` to exist, and
-nothing creates them yet. The database belongs to the CA whose issuances it
-records, so `root-ca-create.sh` is where that goes.
+**Outstanding, since closed:** `openssl ca` needs `index.txt` and `newcerts/` to
+exist, and nothing created them when this was written. The database belongs to
+the CA whose issuances it records, so `root-ca-create.sh` is where that went —
+`init_ca_db()`, and `intermediate-ca-create.sh` has its own for the leaves it
+will issue. Left in place rather than deleted, because this file is append-only
+and a resolved note still records what the gap was.
 
 ---
 
@@ -1144,3 +1147,230 @@ the loop can be run before the script is finished rather than after.
 
 **Run it as soon as steps 1-4 exist,** before writing step 5 — it will say
 whether step 5 needs to exist at all.
+
+---
+
+## 2.3-6 · The ignore rule follows the key, not the directory
+
+**What happened:** the `pki/` → `ca/` rename carried the tracked files and both
+`.gitignore` entries with them. It did not carry the *generated* CA, which is
+untracked by design — so `pki/root/` kept the encrypted root key while the only
+rule protecting it moved to `ca/root/`. `git check-ignore pki/root` answered *not
+ignored*. Nothing showed in `git status`, because the directory is `0700
+root:root` and git could not read it; every script here runs under `sudo`, and
+one `sudo git add -A` would have staged the lab's trust anchor.
+
+Two deliberate decisions had to line up for that, and both are recorded above:
+
+- `*.key` does not match `root-ca.key.enc`. The suffix exists to say out loud
+  that the key is encrypted ([2.3-3](#23-3--offline-is-the-passphrase-not-the-location)),
+  and the `.gitignore` comment drew the conclusion that made this possible —
+  *"this directory entry is what protects it."*
+- The passphrase is absolute and the key is repo-relative
+  ([2.3-5](#23-5--the-passphrase-is-generated-not-typed-and-lives-outside-the-repo)).
+  The split is the entire design. It also means a rename moves one and not the
+  other, which is the same shape of bug one layer down.
+
+**Decided:** two changes, one per layer.
+
+- `*.key.enc` joins the belt-and-braces list in `.gitignore`. A rule keyed on the
+  filename follows the key wherever a later rename puts it; a rule keyed on the
+  directory is a rule about a path that no longer holds the thing.
+- `make lint` asserts `git check-ignore -q` on every path a CA script writes a
+  key to (`CA_KEYS`). This is the guard the Makefile already applies to
+  `VENDORED`, for a failure mode it had already named in a comment — *"a moved or
+  renamed file leaves an exclusion that quietly matches nothing and looks exactly
+  like no exclusion at all."* That was right, and it was one file short of where
+  it was needed. Verified by breaking both rules and watching lint fail, then by
+  removing only the directory entry and watching it still pass.
+
+**Rejected:** re-adding `pki/` to `.gitignore`. It silences the symptom and
+leaves a rule describing a path that should not exist. The directory is the thing
+to remove.
+
+**Rejected:** renaming the key `root-ca.enc.key` so `*.key` catches it. It works,
+and it trades a filename that states a fact for one that games a glob.
+
+**The other half, and a correction.** `check_existing` compares an absolute
+`PASS_FILE` against a repo-relative `ROOT_DIR`, so after the rename it found the
+passphrase present and the key missing and died *"Incomplete root CA"* — refusing
+correctly, while advising two things that could not be done: restore the missing
+key, which was in `pki/root` and then deleted, and move `ca/root` aside, which
+never existed.
+
+This entry first concluded that the message could stand, because the case that
+misled it was now unreachable. That was wrong, and it was disproved within the
+hour — the very next run hit the same message from the other direction. Deleting
+a CA directory without its passphrase leaves exactly the same state, and
+[2.3-5](#23-5--the-passphrase-is-generated-not-typed-and-lives-outside-the-repo)
+guarantees the two are stored apart and therefore removed apart. A passphrase
+outliving its key is not a rename artifact; it is the ordinary residue of
+removing a CA.
+
+**So `check_existing` now names it.** Passphrase present with both key and
+certificate absent is an *orphaned passphrase*, and the message says to delete
+it. That half-state is the only one with an unambiguous remedy — a passphrase
+with no key protects nothing, so nothing is lost by removing it. Every other
+combination can still destroy something and keeps the conservative generic
+message, which does not presume to know which side is the survivor. All four
+states were driven through the function to confirm which branch each takes, per
+[0.3-7](#03-7--failure-messages-name-the-likely-cause-not-the-symptom).
+
+**Disposition of the orphan:** deleted, not moved into place. The key was minted
+2026-08-19 09:47 by a draft of `root-ca-create.sh` that was not finished until
+2026-08-20 10:26 — and that commit also edited `root-ca.cnf`. It had signed
+nothing, `pki/intermediate/` was empty, and no trust store, leaf or service
+referred to it, so a fresh root cost nothing while a preserved one would have
+been a trust anchor of uncertain provenance. Its passphrase was deleted with it,
+which is what makes the deletion total: an AES-256 key whose only passphrase is
+gone is not recoverable by anyone, including us.
+
+---
+
+## 2.4-3 · An existing intermediate is verified against the root, not counted
+
+**Decided:** `check_existing` in `intermediate-ca-create.sh` no longer exits on
+finding three files. It calls `openssl verify -CAfile` first, and only reports
+*"Using the existing intermediate CA"* if the root **currently on disk** is the
+one that signed it.
+
+**The bug:** the guard tested presence — key, certificate, CSR — and any three
+files with those names satisfied it. Nothing in an intermediate's filenames says
+which root issued it. So after
+[2.3-6](#23-6--the-ignore-rule-follows-the-key-not-the-directory) minted a fresh
+root, a surviving `ca/intermediate/` would have been adopted by it: the script
+reports success, `bootstrap.sh` continues, and every leaf issued afterwards
+chains to a root no client has. The failure surfaces phases later as a TLS error
+on a certificate that looks perfectly well-formed.
+
+**Why it was reachable at all.** This is the same shape as 2.3-6 one directory
+down. There, an ignore rule and the key it protected drifted apart because
+nothing tied them together; here, a root and its intermediate drift apart for
+exactly the same reason. Both were written as checks on *names*. A name is not
+an identity, and the CA already has the primitive that answers properly.
+
+**Rejected:** moving `require_root_ca` above `check_existing`. It looks like the
+tidier fix — establish the root before deciding anything about the intermediate —
+but it does not actually detect this. `require_root_ca` proves the passphrase
+opens the root key; it says nothing about what that root signed. It would also
+decrypt the root key on every bootstrap of a healthy host, which the current
+order avoids by exiting first.
+
+**Rejected:** comparing the intermediate's `authorityKeyIdentifier` to the root's
+`subjectKeyIdentifier`. Cheaper, and correct in the ordinary case, but it
+reimplements path validation by hand. `openssl verify` also checks the signature,
+the validity dates and `pathlen`, and it is the same code a client will run.
+
+**Rejected:** rebuilding the intermediate automatically on mismatch. Silently
+replacing a CA is how a lab loses certificates it still needed. The script says
+what is wrong and what to remove; deleting a CA stays a decision a human makes.
+
+**Reads only `root-ca.crt`,** never the key, so the check needs no passphrase and
+adds no decryption to a re-run.
+
+**Proven** by minting two roots with **identical subject DNs** — both come from
+the same `[ ca_dn ]` block, so only the signature distinguishes them — signing an
+intermediate with the first, then swapping the second into place. Accepted before
+the swap, refused after, and refused again with the root certificate removed.
+A check on names passes that test; this one does not.
+
+**Still open, same function — since closed:** `ca-chain.crt` was not in the
+checked set, so an intermediate whose chain file was deleted still reported as
+complete and Phase 2.5 would have found no chain to serve. Rebuilt rather than
+refused; see [2.4-4](#24-4--a-missing-chain-file-is-rebuilt-not-refused).
+
+---
+
+## 2.4-4 · A missing chain file is rebuilt, not refused
+
+**Decided:** `check_existing` calls `ensure_chain` immediately after
+`verify_chain_to_root`. If `ca-chain.crt` is absent, or does not match
+`intermediate-ca.crt` and `root-ca.crt` concatenated, it is regenerated and the
+operator warned. Closes the gap left open in
+[2.4-3](#24-3--an-existing-intermediate-is-verified-against-the-root-not-counted).
+
+**Why rebuild here, when 2.4-3 refuses.** The chain is *derived*. Both its inputs
+were verified one line above, so exactly one content is correct and the script
+can produce it. A key or a certificate carries information that exists nowhere
+else, and refusing is the only safe answer for those. The rule: **refuse when the
+artifact holds something unrecoverable, rebuild when it does not.**
+
+**Deliberately not added to the present/missing set.** Putting the chain in that
+loop would report a deleted chain as an *"Incomplete intermediate CA"* and send
+the operator to delete a working CA over a file that costs two `cat`s to rebuild.
+
+**Compared, not merely existence-checked.** A chain that exists holding the wrong
+certificates fails exactly like a missing one and is much harder to see. `cmp`
+against the concatenation is the entire test.
+
+**`build_chain` now deletes before it writes.** It leaves the chain `0444`, so
+rewriting in place worked only because the script runs as root and root may
+ignore the mode — a dependency on privilege where none is needed. It stayed
+invisible until a test tried to corrupt the file as an ordinary user and was
+refused by the very permission that was hiding it. Deleting first makes a rebuild
+depend on the logic instead of on who runs it.
+
+**Proven** with the chain absent, correct, and present-but-wrong at `0444` — the
+last as a non-root user, which fails against the old in-place write and passes
+now. The correct case leaves the mtime untouched, so a healthy re-run does not
+churn the file.
+
+---
+
+## 2.4-5 · Issued leaves live with their consumer, not under `ca/`
+
+**Decided:** `issue-leaf.sh` writes to `docker/proxy/certs/` — the directory the
+Phase 2.5 proxy bind-mounts — and never into `ca/`. One flat directory, resolved
+from a normalised `REPO_ROOT`.
+
+**Rejected:** `ca/leaf/`, which is the symmetrical-looking answer and was the
+first thing proposed.
+
+**Why, heaviest reason first:**
+
+1. **It would falsify [2.3-5](#23-5--the-passphrase-is-generated-not-typed-and-lives-outside-the-repo)
+   without editing a word of it.** Everything secret under `ca/` is AES-encrypted
+   with its passphrase in `/root`, and that is the entire basis for *"a backup, an
+   `rsync`, a VM snapshot or a `git add -f` on a bad day carries the tree and not
+   `/root` — an encrypted key with no way in."* A leaf key cannot be encrypted:
+   nginx, Vault and CoreDNS start unattended, and a passphrase makes every
+   restart a manual step. Store one under `ca/` and that sentence becomes false
+   while still sitting there, being read as true.
+2. **Opposite postures as siblings.** `ca/root` and `ca/intermediate` are `0700
+   root`; a leaf directory must be readable by the service serving it. That pair
+   is one `chmod -R` from widening access to the CA itself.
+3. **Leaves are retired wholesale at 3.4,** when Vault's PKI engine takes over
+   issuance. Kept outside `ca/`, that retirement is a directory delete instead of
+   surgery inside the CA — and it keeps teardown's `--keep-ca` unambiguous: keep
+   the CA, drop the leaves, with no argument about whether a leaf is part of
+   "the CA".
+
+**What `ca/leaf/` would not have bought:** the CA's record of what it issued.
+`openssl ca` already archives every certificate into `ca/intermediate/newcerts/`
+by serial, with `index.txt` as the register. What `issue-leaf.sh` writes is a
+*distribution* copy, and distribution copies belong with the consumer.
+
+**Consistent with the script's own frame.** Its header says the key never moves.
+Generated under `ca/` and copied to the proxy, it has moved — and two copies of
+an unencrypted private key then exist, with one of them in nobody's cleanup path.
+
+**Accepted cost:** with more than one consumer, certificates scatter across
+service directories and `index.txt` becomes the only place holding the whole
+picture. That is the correct home for the register, but *"what have I issued?"*
+is now a `cat`, not an `ls`.
+
+**Consequences, already applied:**
+
+- `.gitignore` gains `docker/proxy/certs/`, written **before** the directory
+  exists — 2.3-6's lesson applied rather than repeated.
+- `CA_KEYS` gains a probe path under it, so `make lint` asserts a leaf key cannot
+  be committed. Verified by breaking `*.key` and the directory rule separately —
+  each alone still covers the key — and then together, where lint fails.
+  Redundancy that is tested is redundancy; redundancy that is assumed is one
+  rename away from being nothing.
+- **`REPO_ROOT` exists because `PKI_DIR` is already `ca/`.** Relative arithmetic
+  off it lands back inside `ca/` with one `..` too few, and outside the
+  repository with one too many. Both were written while settling this decision,
+  and both looked correct on the page — which is the argument for a normalised
+  constant over a relative hop, and for `cd`/`pwd` so a path printed by `die`
+  reads cleanly.

@@ -44,12 +44,18 @@ check_existing() {
     return 0
   fi
 
+  # A passphrase with no key opens nothing, so deleting it loses nothing — the
+  # only half-state with a safe answer, and what a deleted CA directory leaves.
+  if [[ ${#present[@]} -eq 1 && "${present[0]}" == "${PASS_FILE}" ]]; then
+    die "Orphaned passphrase: ${PASS_FILE} exists but ${ROOT_DIR} has no key. Delete it and re-run:  sudo rm -f ${PASS_FILE}"
+  fi
+
   if [[ ${#missing[@]} -gt 0 ]]; then
-    die "Incomplete root CA: missing ${missing[*]} while ${present[*]} exists. A previous run failed part-way, this host was rebuilt, or a backup restored one without the other — the key and its passphrase live in different places by design. Restore the missing file, or move ${ROOT_DIR} aside and re-run to mint a new root, which invalidates every certificate ever issued under the old one."
+    die "Incomplete root CA: missing ${missing[*]}. Restore it, or move ${ROOT_DIR} aside and re-run to mint a new root — which invalidates everything issued under the old one."
   fi
 
   openssl pkey -in "${KEY}" -passin file:"${PASS_FILE}" -noout 2>/dev/null ||
-    die "${PASS_FILE} does not open ${KEY} — they are from different generations of the CA. Restore the passphrase that matches this key, or move ${ROOT_DIR} aside and re-run to mint a new root, which invalidates every certificate ever issued under the old one."
+    die "${PASS_FILE} does not open ${KEY} — different generations. Restore the matching passphrase, or move ${ROOT_DIR} aside and re-run to mint a new root."
 
   log "Using the existing root CA ${CRT}"
   exit 0

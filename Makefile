@@ -40,12 +40,30 @@ endif
 SH    := $(filter-out $(VENDORED),$(wildcard $(filter %.sh,$(FILES))))
 YAML  := $(filter-out $(VENDORED),$(wildcard $(filter %.yml %.yaml,$(FILES))))
 
+# Every path a CA script writes a private key to. Asserted ignored by lint rather
+# than trusted, for the same reason VENDORED is verified against disk above: an
+# ignore rule and the path it protects can drift apart silently. They already did
+# once — the pki/ -> ca/ rename carried the .gitignore entries and left the
+# generated root key behind, un-ignored. Checked as file paths, not directories,
+# so the assertion is "this key cannot be committed" whichever rule covers it.
+# The third entry is a probe, not a real file: leaf names are per-certificate,
+# so the assertion is that the docker/proxy/certs/ rule covers anything landing
+# in there. An unencrypted leaf key is the one this matters most for.
+CA_KEYS := ca/root/root-ca.key.enc ca/intermediate/intermediate-ca.key.enc \
+           docker/proxy/certs/any-leaf.key
+
 # ---------------------------------------------------------------------------
 
 help: ## Show the available targets
 	@awk 'BEGIN {FS = ":.*##"} /^[a-zA-Z_-]+:.*##/ {printf "  %-8s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
 lint: ## Check formatting and syntax. Never modifies a file.
+	@for key in $(CA_KEYS); do \
+		git check-ignore -q "$$key" || { \
+			echo "FAIL: $$key is not gitignored — a CA private key is committable"; \
+			exit 1; \
+		}; \
+	done
 	@if command -v shellcheck >/dev/null 2>&1; then \
 		echo "$(SH)" | xargs -r shellcheck; \
 	else \

@@ -51,8 +51,37 @@ check_existing() {
     die "Incomplete intermediate CA: missing ${missing[*]}. Remove ${INT_DIR} and re-run; the root is untouched."
   fi
 
+  # Present is not the same as usable. Minting a new root leaves the old
+  # intermediate sitting here, and nothing about its three files says which root
+  # signed it — so ask the root on disk instead of trusting the filenames.
+  verify_chain_to_root
+  ensure_chain
+
   log "Using the existing intermediate CA ${INT_CRT}"
   exit 0
+}
+
+# Rebuild ca-chain.crt if it is missing or does not match the two certificates
+# it is made of. Unlike a key or a certificate, the chain is derived — both
+# inputs are verified just above — so regenerating it loses nothing, and
+# refusing over a file we can rewrite would strand Phase 2.5 with no chain.
+ensure_chain() {
+  if [[ -f "${CHAIN}" ]] && cmp -s <(cat "${INT_CRT}" "${ROOT_CRT}") "${CHAIN}"; then
+    return 0
+  fi
+
+  warn "${CHAIN} is missing or stale; rebuilding it."
+  build_chain
+}
+
+# Confirm the intermediate on disk was signed by the root on disk. Reads only
+# the root certificate, so it needs no passphrase and leaves the key untouched.
+verify_chain_to_root() {
+  [[ -f "${ROOT_CRT}" ]] ||
+    die "${INT_CRT} exists but ${ROOT_CRT} does not. Remove ${INT_DIR} and re-run."
+
+  openssl verify -CAfile "${ROOT_CRT}" "${INT_CRT}" >/dev/null 2>&1 ||
+    die "${INT_CRT} was not signed by the root now in ${ROOT_DIR} — the root was replaced. Remove ${INT_DIR} and re-run."
 }
 
 # Refuse to start unless the root CA is present and its passphrase opens it.
@@ -133,6 +162,11 @@ sign_csr() {
 
 # build the entire CA chain
 build_chain() {
+  # Removed before rewriting: a previous chain is left 0444, so writing over it
+  # works only because root may ignore that. Deleting first makes a rebuild
+  # depend on the logic rather than on who is running it.
+  rm -f "${CHAIN}"
+
   cat "${INT_CRT}" "${ROOT_CRT}" >"${CHAIN}"
 
   chmod 0444 "${CHAIN}"

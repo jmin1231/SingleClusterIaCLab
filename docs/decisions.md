@@ -1374,3 +1374,329 @@ is now a `cat`, not an `ls`.
   and both looked correct on the page — which is the argument for a normalised
   constant over a relative hop, and for `cd`/`pwd` so a path printed by `die`
   reads cleanly.
+
+---
+
+## 0.2-8 · The lab mimics enterprise practice, and names what it is skipping
+
+**Decided:** where a design has a convenient lab answer and a different
+real-world answer, take the real-world one. Where the single host genuinely
+cannot supply it, build the half that carries the lesson and write down which
+half is missing.
+
+**Rejected:** "simplest thing that works, we can do it properly later." Later is
+a rewrite, and the instinct built in the meantime is the wrong one — which for a
+repository whose stated purpose is learning is the only cost that actually
+matters.
+
+**Why:** the shortcut and the real pattern usually cost the same to *write*. They
+differ in what they teach. Terminating Vault's TLS at the proxy is one fewer
+certificate and one fewer profile; it also makes 3.1's central lesson —
+that `VAULT_ADDR` propagates further than any other address in the lab —
+unlearnable, because the cleartext hop it warns about is exactly the hop the
+shortcut creates.
+
+**What this does not mean.** Not every enterprise mechanism is in scope. A second
+Vault node, an HSM, a real load balancer, SPIFFE — those need hardware or scale
+this lab does not have. The rule is not "build all of it"; it is **build the part
+that carries the lesson, and state plainly which part is missing** rather than
+letting the scaled-down version pass as complete.
+
+**How it shows up in practice — the mapping, kept in one place:**
+
+| Lab does | Enterprise does | What is deferred |
+|---|---|---|
+| profile table in a bash script | Vault PKI role, ADCS template, ACM PCA template | server-side enforcement of what may be issued |
+| one multi-SAN proxy certificate | per-service certificates chosen by SNI | automated issuance, which is 3.4 |
+| `issue-leaf.sh` writes to a bind mount | vault-agent / cert-manager / SPIRE deliver | the delivery agent; key still touches disk |
+| `tls.crt` / `tls.key` | `tls.crt` / `tls.key` | nothing — `kubernetes.io/tls` mandates these |
+| single Vault, TCP passthrough in nginx | NLB in front of a Vault cluster | the balancing half; no second node |
+| passphrase file in `/root` | HSM, KMS, or Shamir across real holders | see 2.3-3 and 3.1's own honesty note |
+
+**Related:** 2.3-3 already worked this way without naming it — "offline" was
+defined as the passphrase rather than pretending an air gap existed. This entry
+makes that the standing rule rather than a one-off.
+
+---
+
+## 2.4-6 · `issue-leaf.sh` takes no arguments
+
+**Decided:** like `root-ca-create.sh` and `intermediate-ca-create.sh`, this
+script takes no arguments. The CN, the SAN list and the destination directory are
+constants at the top of the file.
+
+**Rejected:** `issue-leaf.sh <name> [alt-name ...]`, the original skeleton's
+shape — a free-form name typed by the operator.
+
+**Rejected:** `issue-leaf.sh <profile>`, an enum selecting one of several named
+certificates. This was decided and then reversed within the same session when
+2.5-1 put Vault behind the proxy; the reasoning is kept because it is the shape
+to return to if a second pre-3.4 consumer ever appears.
+
+**Why:** TLS terminates in exactly one place (2.5-1), so there is exactly one
+certificate, carrying every host-tier name as a SAN, read by one consumer. A
+value that has one possible answer is a constant, not an argument.
+
+**What taking no argument deletes.** A free-form name is untrusted input and
+needs a syntax rule, a check against X.509's 64-character CN bound, lowercase
+normalisation so `Test.lab.test` and `test.lab.test` do not become two key files
+for one name, and a policy for IP arguments — `DNS:192.168.122.1` is a
+syntactically valid SAN that no client will ever match against an IP connection,
+so it would pass every check in this script and fail only in a browser. None of
+those checks teach anything about the CSR flow, which is what 2.4 is for. An
+enum deleted them too, by being exhaustively checked by its own `case`; a
+constant deletes the question entirely.
+
+**Enterprise equivalent:** a CA role. Vault PKI roles, AWS Private CA templates
+and Microsoft ADCS certificate templates express server-side and *enforce* what
+this file states as constants — `allowed_domains`, `max_ttl`, permitted key
+usage, whether the requester may specify SANs at all. The client asks for a name;
+the CA decides whether it may have it. Closing that gap is precisely what
+build-order 3.4 does, which is the strongest argument for not over-building here:
+this issuance path is scheduled for deletion.
+
+**The multi-SAN certificate is a deliberate debt.** Enterprise practice is
+per-service certificates selected by SNI, not one certificate carrying six names.
+nginx and Envoy both hold many certs and choose by the hostname in the handshake.
+Multi-SAN is an anti-pattern at scale for two reasons: adding a seventh name
+reissues and redeploys the certificate the other six depend on, and one key
+compromise is a compromise of every name on it. Taken here because per-service
+certificates are only cheap once issuance is automated — which is 3.4 — and six
+certificates by hand is busywork rather than learning. Recorded so it reads as a
+decision rather than an oversight.
+
+**Reversal trigger:** a consumer that arrives *before* 3.4 and genuinely cannot
+sit behind the proxy. There is none now, and after 3.4 there cannot be one. If
+one appears, the shape is the rejected enum, not a free-form name.
+
+**Consequences:**
+
+- Filenames follow `kubernetes.io/tls`: `tls.crt`, `tls.key`, plus a `bundle.crt`
+  for serving. cert-manager writes exactly `tls.crt`/`tls.key`, so the consumer's
+  configuration survives 3.4 unchanged — only the thing writing the files
+  changes.
+- The SAN list and `lab.test.zone.tmpl`'s A records are one decision. A name in a
+  certificate with no A record is a certificate for something unreachable; an A
+  record with no SAN is a padlock warning. `proxy`, `test` and `grafana` are
+  missing from the zone as of this entry.
+- `check_existing` gains a wrinkle the two CA scripts do not have: adding a name
+  to the SAN list *must* reissue, and a refusing `check_existing` will not. With
+  a multi-SAN certificate that is a routine event, not an exceptional one, so the
+  reissue path has to be documented rather than assumed.
+
+---
+
+## 2.5-1 · TLS terminates once, at the proxy — Vault included
+
+**Decided:** one L7 nginx terminates TLS for every host-tier name —
+`cloudstack`, `gitea`, `minio`, `grafana` **and `vault`** — routing by Host
+header. The hop from proxy to each backend is plain HTTP on the host, which is
+the decision build-order 2.5 explicitly asks to be made and written down.
+
+**Rejected:** Vault beside the proxy rather than behind it, holding its own
+certificate, with an nginx `stream` block using `ssl_preread` to route
+`vault.lab.test` past the L7 server as raw TCP. Decided first, then reversed in
+favour of the simpler design.
+
+**Why the simpler design wins here:** it is one certificate, one profile, one
+renewal, one port. `issue-leaf.sh` takes no arguments and stays structurally
+identical to its two siblings (2.4-6). Phase 2.5 gains no second listener and no
+port-ownership shuffle. For a lab whose next milestone is *"`curl --cacert
+root.pem https://test.lab.test` succeeds with no `-k`"*, that is a large amount
+of machinery deferred for a benefit that is real but not yet load-bearing.
+
+**The argument that does NOT justify passthrough, recorded because it is
+tempting and wrong:** that terminating at the proxy puts secrets on the network
+in cleartext. It does not. k3s on the backend VM reaches the host over TLS; the
+plaintext hop is proxy-to-Vault on a bridge inside one kernel. Anyone reaching
+for "otherwise it crosses the VPC in the clear" has the topology wrong.
+
+**Accepted costs, which are real and are being taken knowingly:**
+
+1. **The host is a hypervisor.** That plaintext hop shares a bridge with a
+   machine spawning CloudStack guests, so Vault traffic is readable by anything
+   on the host that can open a raw socket. Mitigated only by the guests being
+   ours.
+2. **The proxy sees every token.** nginx holds `X-Vault-Token` in memory on every
+   request and is one `log_format` change from holding it on disk. A routing
+   component is now also a secret-handling component; its configuration should
+   be reviewed in that light, and its access log format is no longer a cosmetic
+   choice.
+3. **Audit attribution is lost.** 3.3's audit device will name the proxy as the
+   client for every request, so the log answers *what was read* and *when* but
+   not *by whom* — the one thing that matters after an incident. Recoverable
+   later with PROXY protocol or a trusted `X-Forwarded-For`, and 3.3 should
+   revisit it rather than discovering it.
+4. **Vault's TLS certificate auth method becomes unavailable**, not merely
+   unused, for as long as this stands.
+
+**Enterprise equivalent, deferred rather than denied.** A secrets store sits
+behind an L4 load balancer doing TCP passthrough, never an L7 proxy doing
+termination — HashiCorp's own reference architecture is an NLB in front of Vault
+nodes that terminate TLS themselves. Per 0.2-8 the gap is named rather than
+pretended: the mechanism is an nginx `stream` block (a top-level context, sibling
+of `http`, not inside it) with `ssl_preread on`, which reads the SNI out of the
+ClientHello — the one plaintext part of a TLS handshake — and forwards the
+connection without holding a key. The official nginx image already ships
+`--with-stream_ssl_preread_module`, so adopting it later is configuration, not a
+rebuild. The lab could never supply the *balancing* half regardless: one Vault,
+nothing to balance across.
+
+**The same shape appears twice more later**, and recognising it is the point:
+CloudStack's VPC load balancer (HAProxy on the VPC router) does L4 between tiers
+in Phase 4, and Gateway API's `TLSRoute` does SNI-based passthrough to pods that
+terminate their own TLS in the cluster.
+
+**Practical trap this creates, same class as 2.5's Gitea `ROOT_URL` war story:**
+a service behind a terminating proxy must be told how clients actually reach it.
+Vault's `api_addr` has to be `https://vault.lab.test`, not the internal
+`http://127.0.0.1:8200`, or cluster redirects and `VAULT_ADDR`-derived links
+point at an address no client can use. Same failure mode as the Gitea cookie
+loop: not an error, just something that quietly does not work. nginx's default
+`proxy_read_timeout` of 60s is the other one — Vault's blocking queries outlive
+it.
+
+**Revisit at:** 3.1, when Vault is actually installed and cost 3 becomes
+concrete; and 3.3, when the audit device makes the missing attribution visible.
+
+**Open:** how the backend tier reaches the proxy at all. Frontend talks to
+backend only through the tunnel VM via wg0/wg1, and the proxy is on the host,
+outside the VPC. Either the backend reaches the host directly through the VPC
+router — in which case the tunnel is not the only path out, and that should be
+explicit — or that traffic traverses the tunnel and is already inside WireGuard,
+which would retire accepted cost 1 entirely. Settle before 3.4; it decides
+whether `VAULT_ADDR` is routable from the cluster at all.
+
+---
+
+## L-1 · The install transcript is a local file, written by `bootstrap.sh` itself
+
+**Decided:** `bootstrap.sh` redirects its own stdout and stderr through `tee` to
+a timestamped file under `/var/log/`, once, before any step runs. Skeleton and
+open decisions are `TODO L-1.x` in the script.
+
+**Rejected:** teeing each installer call site. It reads more explicit and it
+misses the output that matters — children inherit file descriptors, so one
+`exec` at the top captures `ca-install-all.sh`, `coredns-installer.sh` and the
+2,700-line vendored CloudStack installer for free. Per-call-site teeing captures
+only the scripts we wrote, which are the ones least likely to surprise us.
+
+**Rejected:** `script(1)`. It captures a pty faithfully, including every carriage
+return and progress-bar redraw, which is what you want for a demo recording and
+not what you want for a file that will be grepped after a failure.
+
+**Rejected:** shipping install-time logs anywhere. See L-3.
+
+**Why:** one run is forty minutes of unattended installation of software we did
+not write. Without a transcript the only record is whatever is still in the
+scrollback of a terminal that may have been closed — and 1.3-6 already
+established that this installer rewrites the host's network under itself, so
+"re-run it and watch more carefully" is not always available.
+
+**The traps, all four verified as real before being written down:**
+
+- **ANSI in the file.** `common.sh`'s `log`/`warn`/`die` emit colour. Strip it on
+  the *file* branch only. The obvious fix — making `log()` conditional on
+  `[[ -t 1 ]]` — **is wrong here**: after the `exec`, stdout is a pipe, so the
+  test is false and colour disappears from the terminal as well.
+- **Truncation on failure.** Process substitution can outlive the script, so a
+  `die` can exit before `tee` flushes — losing the log exactly when it is the
+  only thing you have. The `$!` PID must be waited on in an `EXIT` trap.
+- **`sed -u`.** Without unbuffered output the tail is lost on a crash, which is
+  the same bug wearing different clothes.
+- **Unreadable without timestamps.** The vendored installer emits none. `ts`
+  (moreutils) is *not* installed on this host, so this is a dependency decision
+  rather than a formatting one.
+
+**`set -x` is a separate decision, and it has a security cost.** `BASH_XTRACEFD`
+can send trace to the file and never to the terminal, which is genuinely useful
+for a post-mortem. But `cloudstack-install.sh:1148` runs
+`cloudstack-setup-databases cloud:cloud@localhost --deploy-as=root:`, so trace
+puts that credential in a file permanently. The CA scripts are safe — the
+passphrase goes `openssl rand > file` and never through an echoed variable — but
+the vendored installer is not ours and has not been audited for this. If trace is
+enabled, the log file's mode stops being housekeeping and becomes a control.
+
+**Enterprise equivalent:** a configuration-management run produces a structured
+run record — an Ansible callback plugin emitting JSON per task, a Terraform plan
+artifact — keyed by a run ID and shipped to a collector, with secrets redacted by
+the tool rather than by the operator remembering. Per 0.2-8 the gap is named: we
+get an unstructured transcript with human-readable timestamps, and redaction is
+"do not enable `set -x`" rather than a filter. The run ID exists (the filename);
+the structure does not.
+
+---
+
+## L-2 · Runtime logs land in journald, containers included
+
+**Decided:** Docker's log driver is set to `journald` in `/etc/docker/daemon.json`
+so container output and systemd unit output share one store, one query tool and
+one retention policy. Each compose file sets a `CONTAINER_TAG` so services are
+queried by a stable name.
+
+**Rejected:** leaving the default `json-file` driver. It writes to
+`/var/lib/docker/containers/<id>/*-json.log` with **no size limit by default**,
+so every container log grows without bound. On a host already carrying 22 GB
+under `/var/lib/containerd`, that is a disk-fill waiting to happen, and the fix
+would be per-container `log-opts` repeated in every compose file — the same
+copy-paste drift that `exports.d` avoided in 1.3-5.
+
+**Rejected:** a second log directory per service under `/var/log/`. Two stores
+means two retention policies, two rotation configs, and a correlation problem
+every time an incident spans a container and a host unit.
+
+**Why journald specifically:** the split is not optional. CloudStack management,
+MySQL, libvirtd and NFS are systemd units and are *already* in journald; CoreDNS,
+Vault, Gitea and MinIO are containers. Moving the containers is the only way to
+get one store. `docker logs` continues to work — journald is one of the drivers
+that supports read-back — so nothing in the normal workflow changes.
+
+**Host state as of this entry, which changes what needs doing:** `/var/log/journal`
+exists, so the journal is already persistent rather than volatile — 573 MB in
+use. But **no retention limits are set at all**; it is running on defaults. A
+`/etc/systemd/journald.conf.d/` drop-in with `SystemMaxUse` and `MaxRetentionSec`
+follows 1.3-3's numbering convention.
+
+**Vault's audit device is explicitly NOT part of this.** 3.3 turns it on and 13.4
+draws the line: operational logs answer *what happened*, audit logs answer *who
+did what*. Vault stops serving requests if it cannot write its audit log — that is
+deliberate — so pointing it at a shared, rotating sink couples Vault's
+availability to a rotation policy written for CoreDNS. It gets its own path and
+its own retention.
+
+**Sequencing:** the driver change belongs in the next edit of `daemon.json`, and
+must land before Phase 5 — MinIO is the first service that generates log volume
+worth the name. `CONTAINER_TAG` is added per compose file as each is written.
+
+---
+
+## L-3 · Nothing ships anywhere until 13.2, and the transcript never ships itself
+
+**Decided:** no log shipper, no collector, no Loki before Phase 13.2. Everything
+written under L-1 and L-2 is local and stays local.
+
+**Why — the structural reason, not impatience:** `bootstrap.sh` runs on a bare
+host at Phase 0. Loki is Phase 13.2. A transcript that pushed to a collector
+would depend on thirteen phases of infrastructure that do not exist while it is
+being written, and would fail hardest during exactly the installs whose output
+matters most. This is 1.3-6's rule restated: **a record must not depend on the
+thing it records.** It is also why the netplan snapshot is a local copy rather
+than an object in MinIO.
+
+**Why the syllabus already agrees:** 13.2 specifies a host agent that pushes
+*through the cluster Gateway over the WireGuard overlay* — reusing the hop the
+web tier already has rather than opening a new one — and that buffers to a
+**write-ahead log**, "which is what makes it safe to start before Loki exists".
+Both details are load-bearing and neither can be designed now, because the
+overlay is Phase 8.3 and the Gateway is Phase 9.5.
+
+**What this buys the earlier phases:** L-1 writes a plain text file with
+human-readable timestamps and no invented format, and L-2 puts everything else in
+journald. Both are things a Promtail/Alloy-shaped agent ingests as-is. The
+decision to defer costs nothing at 13.2 precisely because neither earlier
+decision invented a format that would then need converting.
+
+**Accepted cost:** between Phase 0 and Phase 13 there is no cross-service
+correlation. Diagnosing something that spans CloudStack and a container means two
+`journalctl` invocations and reading timestamps by eye. That is tolerable on one
+host with one operator, and it is the cost being deferred rather than avoided.

@@ -14,6 +14,74 @@ SOURCE_SCRIPT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=/dev/null
 source "${SOURCE_SCRIPT}/lib/common.sh"
 
+# --- Transcript -------------------------------------------------------------
+#
+# SKELETON. Every TODO is a decision to make, not just code to write. Numbered
+# L-x to match docs/decisions.md L-1.
+#
+# One run of this script is a forty-minute unattended install of software we did
+# not write, and the only record of what it did is whatever scrolled past. The
+# transcript is that record, written to a file so it survives the terminal.
+#
+# THE CONSTRAINT THAT DECIDES THE SHAPE: this cannot push anywhere. Loki is Phase
+# 13.2 and this is Phase 0, so the transcript is a plain local file that a later
+# agent ingests — never a push, never a network dependency. Same rule as the
+# netplan snapshot in 1.3-6: a record must not depend on the thing it records.
+#
+# TODO L-1.1: one `exec` redirect, here, before any step runs — NOT a `tee` on
+#             each call. Children inherit the file descriptors, so this captures
+#             ca-install-all.sh, coredns-installer.sh, and the 2,700-line
+#             vendored CloudStack installer with no change to any of them. That
+#             last one is the whole point: it is the output you most want after a
+#             failed install and the one you cannot get by teeing call sites.
+#
+#               exec > >(tee -a "${LOG_FILE}") 2>&1
+#
+# TODO L-1.2: strip ANSI on the FILE branch only. common.sh's log/warn/die emit
+#             \033[1;32m, which lands in the file as literal escape bytes and
+#             makes it grep-hostile. Do not fix this by removing colour, and do
+#             NOT make log() conditional on [[ -t 1 ]] — after the exec above,
+#             stdout is a pipe, so that test is false and colour would vanish
+#             from the terminal too. Tee into a stripper instead, and use sed -u:
+#             without unbuffered output the tail is lost on a crash.
+#
+# TODO L-1.3: wait for tee before exiting. Process substitution can outlive the
+#             script, so a `die` at the end can truncate the log at exactly the
+#             moment it matters. Capture the substitution PID from $! straight
+#             after the exec and wait on it in an EXIT trap. This is the single
+#             most common way a logging harness works until the day it is needed.
+#             Prove it: make the last step die, and check the file has the
+#             message.
+#
+# TODO L-1.4: the filename. A run identity that cannot overwrite the run before
+#             it — re-running bootstrap must not destroy the log of the run that
+#             failed. Decide the directory, the timestamp format (UTC), and the
+#             mode. 0640 root:adm is the convention; see L-1.6 for why the mode
+#             is a security control here rather than housekeeping.
+#
+# TODO L-1.5: per-line timestamps. Forty minutes of output without them cannot
+#             be read, and the vendored installer emits none of its own. `ts` from
+#             moreutils is the obvious tool and is NOT installed on this host —
+#             so either add it to install_cli_tools or prefix with awk/strftime
+#             and take no new dependency. Whichever, it goes on the file branch
+#             ahead of the ANSI strip.
+#
+# TODO L-1.6: decide `set -x`, deliberately. BASH_XTRACEFD sends trace to a
+#             dedicated fd, so it can go to the file and never to the terminal:
+#
+#               exec 9>>"${LOG_FILE}"; BASH_XTRACEFD=9; set -x
+#
+#             The cost is real. cloudstack-install.sh:1148 runs
+#             `cloudstack-setup-databases cloud:cloud@localhost` — with -x that
+#             credential is in a file, permanently. The CA scripts are safe (the
+#             passphrase goes openssl rand > file and never through an echoed
+#             variable), but the vendored installer is not ours and has not been
+#             audited for this. If -x is on, L-1.4's mode is a control.
+#
+# TODO L-1.7: rotation. One file per run, forever, is a disk leak on a host that
+#             already carries 22 GB of containerd data. logrotate drop-in, or a
+#             retention sweep in this script. Decide which owns it.
+
 # --- Steps ------------------------------------------------------------------
 
 # Enable NTP and wait up to 60s for the clock to synchronise. Runs first because

@@ -10,7 +10,31 @@ depend on them, so nothing has to be retrofitted.
 
 ## Status
 
-Phase 0 — the workbench. Nothing is deployed yet.
+**Phase 2 — names and trust.** CoreDNS is running on the bridge (2.1). The CA
+scripts are written and reviewed but **have never been run on any host**, so
+`ca/root/` is empty and no certificate exists yet.
+
+Two skeletons are in flight. Both are complete as documents and unimplemented as
+code — every decision is written up in [`docs/decisions.md`](docs/decisions.md),
+and each numbered `TODO` in the file points at the entry that settles it.
+
+| File | State | Next |
+|---|---|---|
+| `ca/scripts/issue-leaf.sh` | skeleton, 32 TODOs | TODO 1.1 — name the certificate |
+| `teardown.sh` | skeleton, 43 TODOs | TODO 0.4 — the `try`/`run` helpers |
+| `bootstrap.sh` | working; transcript block is a skeleton | TODO L-1.1 — the `exec` redirect |
+
+Blocking everything in `ca/`: run `sudo ./ca/ca-install-all.sh` once. It creates
+the root and the intermediate, and — less obviously — the `index.txt` and
+`newcerts/` that `openssl ca` needs before a leaf can be signed at all.
+
+### Working on more than one machine
+
+The CA does not travel. Keys are gitignored and the passphrases live in `/root`
+(2.3-5), so running `ca-install-all.sh` on a second machine mints a **different**
+root, and certificates issued under one will not validate against the other.
+That is the intended behaviour, not a gap — but it means a second machine is for
+writing code and docs, and certificates are issued where they will be used.
 
 ## Getting started
 

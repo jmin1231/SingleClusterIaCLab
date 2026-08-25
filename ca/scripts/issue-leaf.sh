@@ -108,6 +108,17 @@ check_existing() {
 # passphrase would make every boot a prompt. This reverses 2.3-5 deliberately;
 # 3.4-3 records what protects the key instead.
 create_key() {
+  # Assert the parent, create only the leaf directory. docker/vault/ is
+  # committed — the compose file and config live in it — so it exists on any
+  # checkout, and `mkdir -p` on the full path would create it too. This script
+  # runs as root, so that side effect leaves a tracked, user-editable directory
+  # owned by root, and every later edit to the compose file needs sudo. Only
+  # certs/ is generated, so only certs/ should be created here.
+  local parent
+  parent="$(dirname "${LEAF_DIR}")"
+  [[ -d "${parent}" ]] ||
+    die "${parent} does not exist, and it is a committed directory — run this from a checkout rather than creating it."
+
   mkdir -p "${LEAF_DIR}"
   chmod 0755 "${LEAF_DIR}"
 

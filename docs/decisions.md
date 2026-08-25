@@ -27,6 +27,17 @@ above the history so that appending a decision never has to step around them.
   not a bug to work around — the real question is whether the Phase 8.2 base role
   writes anything that competes with it, and if so which of the two should yield.
 
+- **Does `bootstrap.sh` disable the host's swap?** — Phase 3.1, and it is the
+  real half of a decision already half-made. `disable_mlock = true` is forced
+  (3.1-1): the image sets `cap_ipc_lock` on the binary only when running as root,
+  and the `user:` pin skips that, so Vault cannot lock its memory and exits at
+  startup unless mlock is disabled. That is not "silencing a warning" — it is
+  accepting that plaintext secrets can reach disk, and moving the control
+  host-side. **This host has 8 GB of swap enabled**, and a fresh Ubuntu VM ships
+  with it on. k3s wants swap off at Phase 9 regardless, so the question is
+  whether `bootstrap.sh` does it now and records it as the mitigation, or Phase 9
+  does it later for an unrelated reason and the gap goes unnamed until then.
+
 - **Which of the installer's in-place edits still cannot be undone once
   `/etc/netplan` is snapshotted?** — settled alongside T-4. The snapshot of
   1.3-6 covers netplan, `libvirtd.conf` and the `/etc/default` files. What it
@@ -1980,3 +1991,391 @@ in `curl` on a clean machine.
 **The CSR is declared with the other paths and deleted by `sign_csr`,** on the
 success path only, so a failed signing leaves the request to be inspected.
 Transience is expressed by the deletion; the declaration only says where it went.
+
+---
+
+## 3.1-1 · A leaf key is written locked; its consumer's installer opens it
+
+**Decided:** `issue-leaf.sh` writes `tls.key` as `0400 root:root` and stops.
+`vault-installer.sh` sets ownership before starting the container, in one step
+covering both the certificate directory and the storage directory. Group, not
+owner: `chown root:<gid>` with `0440`. The UID/GID is pinned in
+`docker-compose.yml` as well, so the number the installer chowns to is one the
+repository controls.
+
+**Rejected:** `chown` in `issue-leaf.sh`. It is the shorter fix and it puts a
+consumer's UID inside a CA script — which would then need a second one for MinIO
+at 5.1, a third for whatever follows, and an edit in `ca/` every time a container
+image changes its user.
+
+**Rejected:** running the container as root. It makes the symptom vanish by
+removing the reason it existed.
+
+**Rejected:** `0444`. World-readable is not a permission model, it is the absence
+of one, and this is the first unencrypted private key in the repository (2.4-5).
+
+**The mechanics, because the failure gives no hint of them.** A bind mount is not
+a copy — the container sees the same inode, same owner, same mode. And Linux
+compares **numbers**, not names: the container's `/etc/passwd` calls uid 100
+"vault" and the host's calls it something else, and the kernel reads neither when
+deciding `open()`. A process at uid 100 opening a `0400` file owned by uid 0
+matches no owner bit, no group bit, and `---` for other. `EACCES`.
+
+**Where it lands, and why that matters:** Vault fails while **loading its
+listener**, not while initialising storage. That is earlier than the
+bind-mount-ownership failure 3.1 warns about, and it means `operator init` never
+runs — so the symptom the syllabus tells you to expect never appears. Meanwhile
+`ls -l` on the host shows a root-owned `0400` private key, which is exactly what
+a private key is supposed to look like. Everything reads as correct.
+
+**Why group rather than owner.** Owner carries the right to `chmod`, so `chown`
+to Vault's UID would let a compromised Vault rewrite its own key and certificate.
+Group-read is the minimum that works. `:ro` on the mount does defend this today,
+but that is a compose-level promise a later edit can drop, and the file mode is
+the layer that does not depend on remembering.
+
+**Amended at implementation — group is the WRONG answer on this host, and the
+reason is the same fact this entry is built on.** Group-read has to be gid 1000,
+because that is the container's group. On this host `getent group 1000` is
+**`user`** — the interactive login account. So widening the group is not a
+smaller grant than widening the owner; it is a much larger one, handing a human
+account Vault's TLS private key.
+
+The correct form is `chown 100:1000` with mode **0400** — uid 100 as owner, no
+group bits at all. The only reader is then `dhcpcd`, a system account with
+`/bin/false` for a shell, and gid 1000 meaning `user` stops mattering because the
+group bits grant nothing. Same for the storage directory at 0700.
+
+The cost accepted is the one this entry originally rejected: Vault owns the file
+and could `chmod` it. That is blocked by the `:ro` mount, and it is a smaller
+risk than a readable private key. Worth stating why the original reasoning was
+wrong rather than deleting it — it was right about ownership carrying `chmod`,
+and wrong to assume "group" is always the narrower grant. **Whether it is depends
+entirely on what that gid means on the host**, which is the same "only the number
+is real" point the mechanics paragraph above makes, arriving from the other side.
+
+MinIO at 5.1 inherits this: check what its gid resolves to on the host before
+reusing the pattern, rather than copying the numbers.
+
+**Amended again, and this one supersedes the arithmetic above: Vault does not run
+as the image's UID at all.** `user: "65100:65100"`, and the bind mounts are
+chowned to match.
+
+The previous two versions of this entry both asked "given uid 100 and gid 1000,
+which door do we open?" — and both answers were host-dependent, because the
+question was. Checked against the stock `ubuntu:24.04` image: **the highest
+assigned system uid in a fresh install is 42** (`_apt`). Ubuntu reserves 0-99 for
+static accounts and **100-999 for dynamic allocation at package-install time**,
+so on a fresh VM that whole range is empty and uid 100 is claimed by whichever
+package `bootstrap.sh` installs first — in an order apt does not guarantee.
+
+Two consequences, and the second is the one that decided this:
+
+1. "Who else can read `tls.key`?" has a different answer on every host, and on
+   this one it happened to be `dhcpcd` — which is why the earlier reasoning
+   sounded conclusive and was not.
+2. **The answer can change after the chown.** If uid 100 is still free when
+   `start_vault` runs, a package installed later is assigned it and inherits read
+   access to Vault's private key. Nothing warns, because the chown already
+   succeeded and still looks correct.
+
+**65100 is outside every allocator's range** — above the human range, below
+`nobody` (65534), and not in 100-999. No account maps to it, on this host or any
+other, so nothing can be that UID except the process we tell to be it. The
+question the two earlier amendments were arguing about stops existing.
+
+**Vault does not need its image UID.** Every path it writes is a bind mount we
+own and chown; `/vault/logs` is neither mounted nor used. Pinning `user:` already
+skipped the entrypoint's root-gated chown and setcap, so nothing in the image
+expects to be 100. This is the OpenShift arbitrary-UID pattern named in the
+enterprise note above — an image that works as any UID, given ownership it can
+use — applied on purpose rather than discovered.
+
+**What survives from the earlier reasoning:** ownership is still pinned rather
+than discovered, still duplicated in exactly two places that must agree
+(`VAULT_UID`/`VAULT_GID` and compose's `user:`), and the `getent` check in
+`start_vault` is now a much stronger signal — a hit means something genuinely
+unexpected has claimed 65100, rather than "a package was installed".
+
+**Unverified, and to confirm on the first real run:** that Vault starts cleanly as
+a UID the image never heard of. Reasoned from the entrypoint's own gating and the
+mount layout, not yet executed.
+
+**MinIO at 5.1 inherits the pattern, not the number** — pick another reserved-range
+UID for it rather than reusing 65100, so the two services cannot read each other's
+material.
+
+**Enterprise equivalent:** this is a gap in Compose rather than a lab shortcut.
+Kubernetes solves it with `fsGroup` — the kubelet chowns the volume's group to
+the pod's `fsGroup` and applies setgid, which is precisely the fix above,
+automated and declared by the *consumer*. That is the design being copied: the
+pod declares the ownership it needs and the issuer never knows who reads its
+output. Further along, the file stops existing on the host at all — cert-manager
+writes a Secret mounted as tmpfs, or a vault-agent sidecar templates it into a
+shared volume as the same UID as the app, or SPIFFE/SPIRE hands the workload an
+SVID over a socket. Per 0.2-8, what is skipped is the delivery mechanism; the
+ownership model is the real one.
+
+**Worth knowing, because it inverts the problem:** OpenShift assigns each
+namespace an arbitrary UID and runs containers as it, so images must work as
+*any* user. The convention that makes that possible is files owned by `root:0`
+with group permissions, because an arbitrary UID is always placed in gid 0. A
+lab that establishes "group, not owner" now produces images that survive that
+platform; one that chowns to a fixed UID does not.
+
+**Verified against the image rather than argued from memory** — `hashicorp/vault:2.0.4`,
+pulled apart through the registry API because the docker socket was unreadable:
+
+- `/etc/passwd` says `vault:x:100:1000`, so `user: "100:1000"` is the real pair.
+- `Cmd` is `["server", "-dev"]`. The dev-mode risk is a fact, not a caution.
+- The image declares `/vault/config`, `/vault/file`, `/vault/logs`.
+
+**And the entrypoint changes the shape of this decision.** It contains a chown
+block covering `/vault/config`, `/vault/logs` and `/vault/file` — gated on
+`[ "$(id -u)" != '0' ]`, so it runs only when PID 1 is root, after which it
+`su-exec`s down to vault. Two things follow:
+
+1. **It never touches `/vault/certs`.** That directory is not in its list, so the
+   certificate problem this entry exists for is unsolved by the image on *either*
+   path. Nothing about pinning the user made it worse.
+2. **Pinning the user turns off the storage half too.** With `user: "100:1000"`
+   the chown block is skipped, so `/vault/file` also becomes the host's problem.
+   That is accepted deliberately: it makes ownership one step in
+   `vault-installer.sh` covering both directories, rather than one directory
+   handled by the host and another by a container briefly running as root. The
+   rejected alternative — dropping `user:` and letting the entrypoint do it — is
+   the "container fixes its own permissions using root" pattern that `fsGroup`
+   exists to replace, and it would still leave the certs.
+
+**One consequence reaches into `vault.hcl`, and was not anticipated.** The same
+root gate wraps `setcap cap_ipc_lock=+ep` on the vault binary. `cap_add:
+IPC_LOCK` grants the *container* the capability, but a non-root process needs the
+*file* capability to exercise it, and only root can set that. So with the user
+pinned, mlock cannot work and Vault exits at startup unless `disable_mlock = true`.
+That makes compose's `user:` and `vault.hcl`'s `disable_mlock` one decision
+(TODO 1.6), and moves the real mitigation host-side: **this host has 8 GB of swap
+enabled**, and disabling it is what actually keeps key material off disk.
+
+**Consequences:**
+
+- The rule generalises without touching `ca/`: MinIO at 5.1 has the same problem
+  with a different number and solves it in its own installer.
+- It survives 3.4. When Vault's PKI engine replaces `issue-leaf.sh` as the writer,
+  the consumer-side ownership logic is already where it belongs — only the
+  producer changes.
+- `docker-compose.yml` must pin `user:` explicitly rather than inheriting the
+  image's. An image update that changes the UID would otherwise leave the chown
+  correct and the container unable to read anything, with no diff to explain it.
+- This is a fourth reason for 2.4-5's "leaves live with their consumer", and the
+  only one that is functional rather than organisational — the other three were
+  about encryption posture, directory modes, and retirement at 3.4.
+
+---
+
+## 3.1-2 · Vault's listener is not a decision; publishing is
+
+**Decided:** `config/vault.hcl` is a committed file, not a template. Its listener
+is `0.0.0.0:8200`. Compose publishes on the bridge only —
+`${CLOUDBR0_IP}:8200:8200` — with `.env` generated by `vault-installer.sh`, the
+same arrangement `docker/coredns` already uses.
+
+**The part that was never a choice.** Vault binds inside the container's network
+namespace, where the cloudbr0 address does not exist on any interface. Binding it
+there is impossible rather than unwise, so `0.0.0.0` is the only value the
+listener can take. TODO 1.3 read as a question about `vault.hcl` for as long as
+the two layers were conflated; it is a question about `ports:`.
+
+**Which settles whether the file is a template.** `listener` is fixed, `api_addr`
+is a name, `storage` is a container path, `disable_mlock` follows from 3.1-1 —
+nothing varies per host, so a `.tmpl`, a `render_config` step for it, and a
+gitignore rule would be machinery in exchange for nothing. `render_config` still
+exists; it writes `.env`. The per-host artifact moved to where the per-host
+decision is.
+
+**Rejected:** publishing on `0.0.0.0`, which is what 0.4-1 decided for services
+generally. Kept as the rule; Vault is the exception, and 0.4-1 named its own
+accepted cost in terms that stop applying here — "services answer on every
+interface — eight on this host... on an isolated single-host lab that is
+acceptable." Acceptable for a UI or an artifact store. Not for the service that
+holds every credential in the lab and becomes its CA at 3.4. 0.4-1 also records
+the reference being inconsistent in this direction, and it was inconsistent the
+right way: `VAULT_BIND_IP` exists there and `bootstrap.sh` sets it to cloudbr0.
+
+**Why cloudbr0 rather than loopback:** the k3s cluster on the backend VM reaches
+Vault for the ClusterSecretStore. cloudbr0 is that path. Pinning drops the four
+Docker bridges and `cloud0` and keeps the one interface that is actually used.
+
+**What it costs:** `docker compose up` by hand now needs `.env` to exist, so the
+installer has to have run. Already true of CoreDNS, so the pattern and its cost
+are established rather than new.
+
+**A consequence found while writing this, which would have surfaced as an unseal
+failure.** `VAULT_ADDR=https://127.0.0.1:8200` cannot work: the certificate names
+`vault.lab.test`, and TLS verifies the name, not the socket. Two fixes, both
+needed:
+
+- `VAULT_ADDR=https://vault.lab.test:8200` with an `extra_hosts` entry mapping
+  that name to `127.0.0.1`, so traffic stays on loopback while the name matches.
+- `VAULT_CACERT` — the container trusts nothing of ours. `bundle.crt` is leaf +
+  intermediate and verifies nothing; **a client needs the root**. `issue-leaf.sh`
+  now writes it alongside as `ca.crt`, which is the third key of a
+  `kubernetes.io/tls` secret and exactly what cert-manager will write at 3.4.
+
+The general shape: a serving bundle and a trust bundle are different files with
+different contents, and reaching for the wrong one fails at verification rather
+than at load — 2.4's lesson, arriving from the client side.
+
+---
+
+## 3.1-3 · Two tiers of credential, and there is no master password file
+
+**Decided:** exactly one file-based credential store exists in this lab —
+`docker/vault/secrets/`, holding only what is needed to *open* Vault. Every other
+credential in the lab lives in Vault's KV store, written by `ensure`-style
+scripts (3.6). The number of files in tier 1 is a design constraint, not an
+accident of what has been built so far.
+
+**Rejected:** one file listing every service's username and password. It is the
+obvious thing to want, and it is a secrets store implemented as a text file —
+the anti-pattern build-order 13.1 names as what started this whole line of work.
+Building Vault and then keeping a parallel copy of everything beside it means
+maintaining two stores, of which only one is audited, versioned, policy-controlled
+and revocable.
+
+**Tier 1 — cannot live in Vault, because it opens Vault:**
+
+- the unseal key
+- the root token
+
+That is the whole list, and the fact that it is two items is the point. Anything
+added here is a credential *not* protected by the thing built to protect
+credentials. If this grows, something upstream is wrong.
+
+**Tier 2 — everything else, in Vault KV**, and the syllabus already schedules it:
+CloudStack's API key at 3.6, Gitea and MinIO and the CI role at 5.4, authentik's
+bootstrap admin at 14.1 — that last one stated in build-order as "seeded into
+Vault via your `ensure` pattern". So the file holding every credential *is* Vault.
+
+**Where Vault's own admin userpass is created: 3.2, not 3.1.** 3.1 has no
+policies, so an admin created there could only be bound to `root` — which is not
+an admin account but a second root token with a password: long-lived,
+interactive, and strictly worse than the token that already exists. 3.2 is where
+policies arrive, and a userpass admin bound to a real one belongs with them.
+`vault-installer.sh` therefore stays four steps.
+
+That credential also has a short life. 14.3 puts Vault behind OIDC, after which
+local userpass is break-glass rather than a daily login — worth knowing before
+investing in it.
+
+**Generated, not typed** — 2.3-5's rule, transferred unchanged. `openssl rand`.
+Prefer `-hex` over `-base64` for anything that will be pasted into a URL or a
+shell one-liner: base64's `/` and `+` cost more in escaping than the entropy
+difference is worth.
+
+**Usernames are not generated.** A username is an identity, not a secret: it is
+readable from Vault's own API to anyone already authenticated, and 14.x replaces
+it with an authentik identity regardless. Randomising it costs a lookup at every
+login and buys obscurity rather than a control — the control against guessing is
+Vault's built-in `user_lockout`. Rejected deliberately, because it is the kind of
+thing that looks like security and is not.
+
+**Write-once and rotatable material go in separate files.** The unseal key and
+root token can never be regenerated; an admin password is routine to rotate. In
+one file, every rotation rewrites the file holding the irreplaceable thing, and
+the whole Vault is one bad redirect away from unrecoverable. This settles the
+format half of `vault-installer.sh` TODO 3.3: `operator init -format=json` into
+its own file, mode 0400, and nothing else ever appended to it.
+
+**Rejected:** keeping the reference lab's arrangement. Its `docker/vault/.env` is
+committed, describes itself as "portable across machines", and contains
+`VAULT_ADMIN_USER=admin` / `VAULT_ADMIN_PASS=password`. Three separate problems in
+two lines — a credential in Git, a credential in a file that also holds
+configuration, and a default that survives to production because nothing forces
+the change.
+
+---
+
+## 3.1-4 · Vault restarts automatically and comes back sealed; unsealing is its own script
+
+**Decided:** `restart: unless-stopped`, matching CoreDNS. Unsealing is a separate
+script, `vault-unseal.sh`, called by `vault-installer.sh` and runnable by hand.
+
+**Rejected:** `restart: "no"`, so that a restart is noticed immediately rather
+than presenting as a running-but-useless Vault.
+
+**Why the trap is real, and taken anyway.** Seal and unseal are not stop and
+start. A restarted Vault is running, listening, and answers every request with
+503 — `docker ps` says healthy, the port accepts connections, and the first
+symptom is some other service failing to read a secret. `unless-stopped` on a
+stateless service like CoreDNS is self-healing; on Vault it is half-healing, and
+the half it does is the half that looks fine.
+
+Taken because the alternative is worse in the way that matters. `restart: "no"`
+means a host reboot leaves Vault *down*, and a down Vault is only marginally more
+diagnosable than a sealed one — while costing availability on every restart that
+would otherwise have recovered on its own. Coming back sealed is a state we can
+detect and fix in one command; not coming back at all is a state that needs a
+person.
+
+**What makes it acceptable is the separate script**, and this is the load-bearing
+half of the decision. Unsealing being its own executable means:
+
+- it runs on every bootstrap, because unsealing an unsealed Vault is a no-op
+- it runs after a reboot, by hand or from a unit, without re-running an installer
+  that would also try to `operator init`
+- it is the same command in a 15.x recovery drill as in normal operation, which
+  is the property that makes a drill worth practising
+
+An unseal step buried inside the installer has none of those. It would only ever
+execute as part of a full install, which is exactly when it is least needed.
+
+**Consequence: step 3's output format becomes an interface.** A hand-runnable
+unsealer has to locate and read the unseal key itself, so the path and the format
+are now a contract between two scripts rather than a private detail of one. That
+settles the remaining half of `vault-installer.sh` TODO 3.3 in favour of
+`operator init -format=json`: a consumer running `jq -r '.unseal_keys_b64[0]'` is
+reading a documented structure, while one parsing the human-readable output is
+guessing at text that exists to be read by a person.
+
+**Open, for 15.x:** whether a systemd unit runs the unseal script at boot. That
+would make the lab self-recovering and would also mean the unseal key is read
+automatically by an unattended process — which is most of the way to not having
+a seal at all. Worth deciding as a security posture rather than as a convenience,
+and 3.1's own honesty note about `-key-shares=1` is the right frame for it.
+
+---
+
+## 3.1-5 · Storage is integrated raft, chosen for the backup story
+
+**Decided:** `storage "raft"` at `/vault/data`, `node_id = "vault-1"`.
+
+**Rejected:** the `file` backend, which is simpler, has no cluster machinery, and
+can never accidentally become a cluster.
+
+**Why — and it is not the clustering.** For one node, raft's consensus is
+inert: quorum is 1, the node elects itself, every write commits as soon as it
+reaches local disk. What raft actually buys here is
+`vault operator raft snapshot save` and its matching `restore` — online,
+consistent, one file. That exists because log compaction is part of the
+algorithm, not because someone added a backup feature.
+
+The file backend's equivalent is "stop Vault and tar a directory". There is no
+snapshot primitive and no consistency guarantee across files if you copy it
+live. Phase 15.1 backs up everything stateful and this is the first item in that
+category, so the difference is the whole decision. `vault-installer.sh` TODO 1.5
+asked for what a backup means before choosing; this is that answer.
+
+**What it costs for one node:** a `node_id`, a `cluster_addr`, a second bound
+port (8201, nothing published until there is a peer), and an `fsync` per commit.
+All negligible at lab volume.
+
+**What it teaches, which is a real second reason.** k3s's embedded datastore is
+**etcd, which is also raft** — same terms, same quorum arithmetic, same
+odd-node rule. Phase 9.2 adds two agents and meets quorum for real; having seen
+the algorithm somewhere it cannot hurt you is worth the config stanza.
+
+**A consequence that closed an argument elsewhere:** `/vault/data` is **not** one
+of the three directories the image's entrypoint chowns even when running as root
+— that list is `/vault/config`, `/vault/logs`, `/vault/file`. So storage
+ownership is the host's job regardless of the `user:` pin, which removed the last
+reason to consider dropping the pin. See 3.1-1.

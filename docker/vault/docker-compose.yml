@@ -1,42 +1,57 @@
 ---
 # Vault — the lab's secret store, and from 3.4 its issuing CA.
-#
-# SKELETON. Comments only; every key below is a TODO in vault-installer.sh
-# step 2. Written as comments rather than as keys with placeholder values,
-# because a compose file that parses but is wrong is one `docker compose up`
-# away from a Vault initialised against the wrong storage.
-#
-# The shape, following docker/coredns/docker-compose.yml:
-#
-#   name: vault
-#
-#   services:
-#     vault:
-#       image: ...            TODO 2.1  pinned, the way CoreDNS pins its tag.
-#                             BUSL from 1.15; OpenBao is the Apache-2.0 fork
-#       container_name: vault
-#       restart: ...          TODO 2.5  unless-stopped makes CoreDNS self-heal
-#                             and makes Vault come back SEALED — running,
-#                             listening, refusing everything
-#       cap_add: ...          TODO 1.6/2.x  IPC_LOCK, or disable_mlock instead
-#       ports:
-#         - "...:8200:8200"   TODO 1.3  the bind address decision, again — a
-#                             bare "8200:8200" publishes on every interface
-#       environment:
-#         - VAULT_ADDR=...    the address the CLI *inside* the container uses;
-#                             not the same value as api_addr, and confusing them
-#                             is a common way to get redirects pointing inward
-#       volumes:
-#         - ./certs:...:ro    TODO 2.3  read-only. Vault never writes here.
-#         - ./vault.hcl:...:ro
-#         - ./data:...        TODO 2.2  the ownership trap: the container is not
-#                             root, and a root-owned data dir fails operator init
-#                             with an error that never says "ownership"
-#       logging:
-#         options:
-#           tag: ...          TODO 2.4  CONTAINER_TAG per L-2, added now even
-#                             though the journald driver switch has not happened
-#
-# Note what is absent: no healthcheck. `docker ps` reports the same state for a
-# sealed Vault, an unreachable Vault and a working one, so a healthcheck here
-# would report green for the two cases that matter. Step 5 asks Vault instead.
+# TODOs are open decisions; the reasoning is in vault-installer.sh, by number.
+# No healthcheck on purpose: `docker ps` looks identical for a sealed, an
+# unreachable and a working Vault. Installer step 5 asks Vault instead.
+name: vault
+
+services:
+  vault:
+    # 2.x is Vault's own numbering (1.21 -> 2.0), still BUSL-1.1.
+    image: hashicorp/vault:2.0.4
+    container_name: vault
+
+    # The image's default Cmd is ["server", "-dev"] — in-memory, self-unsealing,
+    # indistinguishable from success until a restart. No -config: the entrypoint
+    # already expands this to `server -config=/vault/config`.
+    command: server
+
+    # TODO 2.5 — comes back SEALED, not healed.
+    restart: unless-stopped
+
+    # 3.1-1. NOT the image's own 100:1000 — Ubuntu gives uid 100 to whichever
+    # package claims it first, so on the host it means a different daemon on
+    # every machine. 65100 belongs to nobody and always will. Must match
+    # VAULT_UID in vault-installer.sh, which chowns the bind mounts to it.
+    # Pinning a user also skips the entrypoint's chown and setcap, both
+    # root-gated — hence no cap_add, and disable_mlock = true in vault.hcl.
+    user: "65100:65100"
+
+    # 3.1-2: pinned to the bridge, the one exception to 0.4-1. Vault holds every
+    # credential and becomes the CA at 3.4; cloudbr0 is also the interface the
+    # cluster reaches it on, so this drops the four Docker bridges and cloud0
+    # without losing anything.
+    ports:
+      - "${CLOUDBR0_IP:?generated into .env by vault-installer.sh}:8200:8200"
+
+    # The in-container CLI must dial the NAME the certificate carries, or TLS
+    # verification fails on an address mismatch. extra_hosts keeps the traffic on
+    # loopback while the name still matches. See 3.1-2.
+    extra_hosts:
+      - "vault.lab.test:127.0.0.1"
+
+    environment:
+      # What the CLI inside the container dials. Not api_addr.
+      - VAULT_ADDR=https://vault.lab.test:8200
+      # bundle.crt is leaf + intermediate and verifies nothing; a client needs
+      # the root. issue-leaf.sh writes it as ca.crt, per kubernetes.io/tls.
+      - VAULT_CACERT=/vault/certs/ca.crt
+
+    volumes:
+      - ./certs:/vault/certs:ro
+      - ./config:/vault/config:ro
+      - ./data:/vault/data
+
+    logging:
+      options:
+        tag: vault

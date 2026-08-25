@@ -217,6 +217,16 @@ install_coredns() {
   "${installer}"
 }
 
+# Run the Vault installer: prepares ownership, starts the container behind the
+# certificate ca/ issued, then initialises and unseals it. Last, and after
+# CoreDNS: Vault is reached by name from the moment it exists, so the resolver
+# has to answer first.
+install_vault() {
+  local installer="${SOURCE_SCRIPT}/docker/vault/vault-installer.sh"
+  [[ -x "${installer}" ]] || die "Missing or not executable: ${installer}"
+  "${installer}"
+}
+
 # Run every step, in dependency order.
 main() {
   require_root
@@ -227,6 +237,7 @@ main() {
   install_ca
   install_cloudstack
   install_coredns
+  install_vault
 }
 
 main "$@"

@@ -49,6 +49,7 @@ LEAF_DIR="${REPO_ROOT}/docker/vault/certs"
 LEAF_KEY="${LEAF_DIR}/tls.key"
 LEAF_CRT="${LEAF_DIR}/tls.crt"
 LEAF_BUNDLE="${LEAF_DIR}/bundle.crt"
+LEAF_CA="${LEAF_DIR}/ca.crt"   # the root, for clients that must verify
 LEAF_CSR="${LEAF_DIR}/tls.csr" # transient; sign_csr deletes it
 
 # Refuse to start unless the intermediate is present and its passphrase opens
@@ -74,7 +75,7 @@ require_intermediate_ca() {
 check_existing() {
   local present=() missing=() file
 
-  for file in "${LEAF_KEY}" "${LEAF_CRT}" "${LEAF_BUNDLE}"; do
+  for file in "${LEAF_KEY}" "${LEAF_CRT}" "${LEAF_BUNDLE}" "${LEAF_CA}"; do
     if [[ -e "${file}" ]]; then
       present+=("${file}")
     else
@@ -127,6 +128,11 @@ create_key() {
     -quiet \
     -out "${LEAF_KEY}"
 
+  # 0400 root:root and no further. Vault cannot read this as written — it runs
+  # as a non-root UID in a container, and a bind mount translates nothing — but
+  # widening it is the consumer's job, not the CA's. vault-installer.sh sets
+  # ownership because it is the file that knows what UID Vault runs as. See
+  # 3.1-1; do not add a chown here.
   chmod 0400 "${LEAF_KEY}"
 
   log "Generated the leaf private key: ${LEAF_KEY}"
@@ -177,6 +183,13 @@ build_bundle() {
 
   cat "${LEAF_CRT}" "${INT_CRT}" >"${LEAF_BUNDLE}"
   chmod 0444 "${LEAF_BUNDLE}"
+
+  # The root, under the kubernetes.io/tls name for a trust bundle. A server sends
+  # LEAF_BUNDLE; a client verifying that chain needs this instead — the two are
+  # not interchangeable, and Vault's own CLI needs the second one.
+  rm -f "${LEAF_CA}"
+  cp "${ROOT_CRT}" "${LEAF_CA}"
+  chmod 0444 "${LEAF_CA}"
 
   log "Built the serving bundle: ${LEAF_BUNDLE}"
 }

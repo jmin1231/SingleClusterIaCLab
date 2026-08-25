@@ -11,8 +11,10 @@
 # CA ever issues, because Vault becomes the issuing CA at 3.4 (3.4-1).
 #
 # ---------------------------------------------------------------------------
-# SKELETON. Every TODO is a decision to make, not just code to write. Grep for
-# TODO to see what is left; they are numbered by the step they belong to.
+# PARTIAL. Steps 1 and 2 are written; 3 to 5 are not. A remaining TODO is a
+# decision still to make, not merely code still to write, and each is numbered
+# by the step it belongs to. Settled ones have been removed rather than marked —
+# the reasoning lives in docs/decisions.md, which is where it is looked for.
 #
 # THE PARADOX THIS STEP MANAGES, which is the whole of 3.1:
 #
@@ -46,108 +48,151 @@ source "${SOURCE_SCRIPT}/../../lib/common.sh"
 
 COMPOSE="${SOURCE_SCRIPT}/docker-compose.yml"
 CERT_DIR="${SOURCE_SCRIPT}/certs"
+DATA_DIR="${SOURCE_SCRIPT}/data"
+# Plural, and not a preference: .gitignore's global secrets/ rule and
+# .yamllint's docker/**/secrets/ match this name and nothing else. The unseal
+# key lands here, so a name one character off is 2.3-6 with the worst possible
+# file in it.
+SECRETS_DIR="${SOURCE_SCRIPT}/secrets"
 
-# TODO 0.1: the remaining paths — rendered config, storage directory, and
-#           wherever init material lands. Declare them together the way the CA
-#           scripts do, so "what does this write" reads in one place.
+# The UID Vault runs as, and it is deliberately NOT the image's own (100:1000).
 #
-#           Two names are already chosen for you by files that exist. .yamllint
-#           ignores docker/**/data/ and docker/**/secrets/, and .gitignore has a
-#           global secrets/ rule. Using those means no new rules; using anything
-#           else means adding some, and 2.3-6 is the entry about what happens
-#           when a rule and the thing it protects drift apart.
+# Ubuntu reserves 0-99 for static system accounts and 100-999 for dynamic
+# allocation at package-install time. A fresh 24.04 has that whole dynamic range
+# empty — the highest assigned uid in the base image is 42 — so uid 100 is
+# claimed by whichever package bootstrap.sh happens to install first, in an
+# order apt does not guarantee. That makes "who else can read tls.key" a
+# different answer on every host, and it can change AFTER the chown: a package
+# installed later takes uid 100 and inherits read access to Vault's key, with
+# nothing to warn you.
 #
-# TODO 0.2: .gitignore. docker/vault/certs/ is covered. The storage directory and
-#           the init material are not. Add them BEFORE the first run. An unseal
-#           key in git history is not fixed by deleting the file — it is fixed by
-#           rebuilding the Vault.
+# 65100 is above the human range and below nobody(65534), outside every
+# allocator's reach, so no account maps to it and no process can be it except
+# the one we tell to be it. Vault does not need its image UID: every path it
+# writes is a bind mount we own. This is the arbitrary-UID pattern 3.1-1 cites
+# from OpenShift, applied deliberately rather than inherited.
 #
-# TODO 0.3: this script writes into a directory the CA already created as root
-#           (mkdir -p made docker/vault/ root-owned when the leaf was issued).
-#           Decide who owns what here: the compose file and config are committed
-#           and want to be user-editable; certs/ and the storage directory do
-#           not. Getting this wrong is not a security problem, it is an hour of
-#           sudo-to-edit friction.
+# Must match user: in docker-compose.yml. Nothing discovers this at run time —
+# see 3.1-1 for why pinning is the point.
+VAULT_UID=65100
+VAULT_GID=65100
 
-# --- Step 1 · The configuration ---------------------------------------------
+LEAF_KEY="${CERT_DIR}/tls.key"
+LEAF_CA="${CERT_DIR}/ca.crt" # the root; what VAULT_CACERT points at
+LEAF_BUNDLE="${CERT_DIR}/bundle.crt"
 
-# TODO 1.1: the listener. Vault serves TLS itself — nothing terminates in front
-#           of it (3.4-1). tls_cert_file must be the BUNDLE, not tls.crt: leaf
-#           plus intermediate, the same rule nginx follows. Point it at the bare
-#           leaf and a browser that has met your intermediate before will work
-#           while curl on a clean machine fails. That asymmetry is the hardest
-#           version of this bug to believe while you are looking at it.
-#
-# TODO 1.2: tls_client_ca_file is NOT what you want, despite the name. It
-#           verifies certificates CLIENTS present — mutual TLS, a different
-#           feature. Serving a chain needs only the cert and the key.
-#
-# TODO 1.3: the bind address. 0.4-1 says services publish on 0.0.0.0; 3.4-1's
-#           accepted cost 3 defers the exception to right here. With nothing in
-#           front of it, Vault on 0.0.0.0:8200 answers on every interface on this
-#           host — eight of them, four Docker bridges and cloud0 among them.
-#           Decide whether Vault is the one service that pins the bridge address.
-#           0.4-1 records the reference being inconsistent in exactly this
-#           direction, so either answer reverses somebody.
-#
-# TODO 1.4: api_addr = https://vault.lab.test:8200, and this is the most
-#           consequential line in the file. Vault hands this address out — in
-#           redirects, in cluster responses, to every client deriving a URL from
-#           it. Set it to the container's own view and everything works locally
-#           and fails for everyone else, quietly. 3.1 calls it the address that
-#           propagates furthest in the lab: CI variables, a cluster-vars
-#           ConfigMap, the ClusterSecretStore. A NAME here is what stops the
-#           bridge address being baked into thirteen phases of configuration.
-#
-# TODO 1.5: storage. `file` or integrated `raft`. Raft is HashiCorp's
-#           recommendation and brings cluster machinery for the one node this lab
-#           has; file is simpler and can never become a cluster. Whichever you
-#           choose, write down what a backup of it means — 15.1 backs up
-#           everything stateful and this is the first thing in that category.
-#
-# TODO 1.6: mlock. Vault asks the kernel to pin its memory so secrets cannot be
-#           swapped to disk; in a container that needs cap_add IPC_LOCK. The
-#           alternative, disable_mlock = true, is one line and means plaintext
-#           secrets can reach swap. Decide it deliberately — this is a security
-#           property, not a startup warning to silence.
-#
-# TODO 1.7: ui = true, or not. Costs nothing and adds one more surface on
-#           whatever address 1.3 settled.
+# --- Step 1 · Preflight and generated config ---------------------------------
+
+# Refuse to start without the certificate Vault serves. Presence is enough here:
+# issue-leaf.sh writes all four files together and its own check_existing already
+# refuses a partial or orphaned set, so re-verifying the chain would be asking a
+# question whose answer cannot have changed. Reports every missing file at once,
+# so one run names everything to fix.
+require_leaf() {
+  local missing=() file
+
+  for file in "${LEAF_KEY}" "${LEAF_BUNDLE}" "${LEAF_CA}"; do
+    [[ -e "${file}" ]] || missing+=("${file}")
+  done
+
+  [[ ${#missing[@]} -eq 0 ]] ||
+    die "No usable certificate: missing ${missing[*]}. Run ca/ca-install-all.sh first; bootstrap.sh runs it before this one."
+}
+
+# Write .env from this host's bridge address. Discovered values only — the image
+# pin and everything else live in docker-compose.yml (3.1-3), and vault.hcl is
+# committed because nothing in it varies per host (3.1-2). Overwrites, so a
+# re-run corrects a stale address rather than skipping.
 render_config() {
-  die "TODO 1.1: render_config() not implemented"
+  local cloudbr0_ip
+  cloudbr0_ip="$(bridge_ip)"
+
+  printf 'CLOUDBR0_IP=%s\n' "${cloudbr0_ip}" >"${SOURCE_SCRIPT}/.env"
+
+  log "Vault will publish on ${cloudbr0_ip}:8200; wrote .env"
 }
 
 # --- Step 2 · The container ---------------------------------------------------
 
-# TODO 2.1: the image, pinned, in docker-compose.yml the way CoreDNS pins its
-#           tag. Note HashiCorp relicensed Vault to BUSL at 1.15 — free for a lab
-#           and OpenBao is the Apache-2.0 fork if that matters. Either way pin
-#           it: "latest" makes a rebuild a different lab.
-#
-# TODO 2.2: the bind-mount ownership trap, which 3.1 names because it catches
-#           everyone. The container does not run as root. A root-owned storage
-#           directory makes `operator init` fail with a permission error that
-#           never says "ownership". Fix it before the container starts, and
-#           record which UID and why — MinIO has the same problem with a
-#           different number, and 5.1 will thank you.
-#
-# TODO 2.3: mount certs READ-ONLY. Vault has no reason to write there, and the
-#           key it would overwrite is the one file here that cannot be replaced
-#           without also redistributing trust.
-#
-# TODO 2.4: CONTAINER_TAG, per L-2, so this service is queryable by a stable name
-#           once the daemon's log driver moves to journald. Add it now even
-#           though that switch has not happened — L-2 says per compose file as
-#           each is written, and retrofitting means finding them all again.
-#
-# TODO 2.5: the restart policy, and it is a trap. CoreDNS uses unless-stopped and
-#           is self-healing because it is stateless. The same policy on Vault
-#           brings it back SEALED — running, listening, and refusing everything.
-#           Either accept that and make unsealing part of the recovery you
-#           practise, or decline to restart automatically and find out
-#           immediately. 15.x's drills depend on which you pick.
+# Prepare everything the container will touch, then start it. Ownership first:
+# Docker creates a missing bind-mount source as root, so a compose up before this
+# would be a failure to repair rather than one to prevent.
 start_vault() {
-  die "TODO 2.1: start_vault() not implemented"
+  # 0400 with owner and group both VAULT_UID/GID. With 65100 chosen precisely
+  # because no account maps to it, owner-versus-group stops being the interesting
+  # question — neither number means anything on this host. What matters is that
+  # nothing but the container can be 65100, so the narrowest mode is also free.
+  #
+  # The certificates stay 0444 as issue-leaf.sh wrote them: they are public, and
+  # ca.crt is copied into trust stores everywhere at 2.6.
+  chown "${VAULT_UID}:${VAULT_GID}" "${LEAF_KEY}"
+  chmod 0400 "${LEAF_KEY}"
+
+  # Vault's own state, so Vault owns it; 0700 because nothing else has business
+  # there and the group bits would grant that to no one anyway.
+  mkdir -p "${DATA_DIR}"
+  chown "${VAULT_UID}:${VAULT_GID}" "${DATA_DIR}"
+  chmod 0700 "${DATA_DIR}"
+
+  # Root only, and created before step 3 needs it. mkdir alone leaves this at the
+  # umask — typically 0755 — and the next thing written here is the one
+  # credential in the lab that cannot be regenerated.
+  mkdir -p "${SECRETS_DIR}"
+  chown root:root "${SECRETS_DIR}"
+  chmod 0700 "${SECRETS_DIR}"
+
+  # --remove-orphans: a renamed service otherwise leaves an old container holding
+  # 8200, and the bind error that follows reads like something else is installed.
+  log "Starting Vault..."
+  docker compose -f "${COMPOSE}" up -d --remove-orphans
+
+  wait_for_vault
+}
+
+# Poll until Vault answers at all. `docker compose up -d` returns when the
+# process starts, not when the listener is up, so without this "started" is a
+# claim start_vault cannot back.
+#
+# Any HTTP status counts as ready, including 501 (not initialised) and 503
+# (sealed) — those are exactly the states init and unseal need to find. So the
+# predicate is "did a response arrive", not "was it 200", and --fail is
+# deliberately absent because it would turn the two useful codes into errors.
+#
+# --resolve, not the bare address: the certificate's only SAN is
+# DNS:vault.lab.test, so connecting by IP fails verification. This gives
+# name-based verification over an IP-based connection. The IP is the bridge and
+# not loopback because 3.1-2 pinned the publish address there — Docker binds
+# only cloudbr0, so 127.0.0.1:8200 is not listening at all.
+#
+# --cacert on purpose. This probes Vault, nothing else; verify_vault is the check
+# that must succeed WITHOUT it, because that is what proves 2.6.
+wait_for_vault() {
+  local bridge code i
+  bridge="$(bridge_ip)"
+
+  log "Waiting for Vault to answer on ${bridge}:8200..."
+
+  for ((i = 0; i < 60; i++)); do
+    code="$(curl -s -o /dev/null -w '%{http_code}' \
+      --cacert "${LEAF_CA}" \
+      --resolve "vault.lab.test:8200:${bridge}" \
+      "https://vault.lab.test:8200/v1/sys/health")" || true
+
+    # 000 is curl's placeholder when no connection was made at all.
+    if [[ "${code}" != "000" ]]; then
+      log "Vault is answering (HTTP ${code})."
+      return 0
+    fi
+    sleep 1
+  done
+
+  # The answer is almost always in the container's own log, and the likeliest
+  # cause right now is Vault unable to read tls.key — it dies loading its
+  # listener. Printing the log here saves the round trip a "check the logs"
+  # message would cost.
+  warn "Last lines from the container:"
+  docker logs vault --tail 20 2>&1 | sed 's/^/    /' >&2 || true
+  die "Vault did not answer on ${bridge}:8200 within 60s. See the log above."
 }
 
 # --- Step 3 · Initialisation, which happens exactly once ----------------------
@@ -186,6 +231,7 @@ start_vault() {
 #           and jointly a disclosure, which is the kind of thing that is obvious
 #           only in the order you happen to build them.
 init_vault() {
+
   die "TODO 3.1: init_vault() not implemented"
 }
 
@@ -196,12 +242,6 @@ init_vault() {
 #           promise true for this service. Read the state rather than assuming
 #           it: `vault status` exits 2 when sealed, a documented exit code and
 #           not an error, so `set -e` will need handling.
-#
-# TODO 4.2: the container is up before Vault is listening — docker compose
-#           returns when the process STARTS. Poll for readiness rather than
-#           sleeping, bound the loop, and make the failure message name the fix.
-#           Same shape as coredns-installer.sh's resolvectl retry, same reason.
-#
 # TODO 4.3: how the unseal key reaches the CLI. Not on argv, where ps shows it to
 #           every user on the host — 2.3-5 rejected exactly that for the CA
 #           passphrase and the reasoning transfers unchanged.
@@ -232,6 +272,7 @@ verify_vault() {
 # Run every step, in dependency order.
 main() {
   require_root
+  require_leaf
   render_config
   start_vault
   init_vault

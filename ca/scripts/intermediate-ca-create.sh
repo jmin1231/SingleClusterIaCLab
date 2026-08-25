@@ -35,7 +35,12 @@ CHAIN="${INT_DIR}/ca-chain.crt"
 check_existing() {
   local present=() missing=()
 
-  for file in "${INT_KEY}" "${INT_CRT}" "${INT_CSR}"; do
+  # The CSR is deliberately absent from this set: it is a transient that
+  # sign_csr consumes and deletes, so requiring it would report a healthy CA as
+  # incomplete and tell the operator to remove it. The passphrase is present
+  # because an intermediate that cannot be opened cannot sign, which is the
+  # thing this function is really being asked about.
+  for file in "${INT_KEY}" "${INT_CRT}" "${INT_PASS}"; do
     if [[ -e "${file}" ]]; then
       present+=("${file}")
     else
@@ -47,14 +52,27 @@ check_existing() {
     return 0
   fi
 
+  # A passphrase with no key opens nothing, so deleting it loses nothing — the
+  # only half-state with a safe answer, and what a deleted ca/intermediate
+  # leaves behind. Called out separately because the generic advice below is
+  # "remove ${INT_DIR} and re-run", which in this state is already true and
+  # would send the operator round the same loop.
+  if [[ ${#present[@]} -eq 1 && "${present[0]}" == "${INT_PASS}" ]]; then
+    die "Orphaned passphrase: ${INT_PASS} exists but ${INT_DIR} has no key. Delete it and re-run:  sudo rm -f ${INT_PASS}"
+  fi
+
   if [[ ${#missing[@]} -gt 0 ]]; then
-    die "Incomplete intermediate CA: missing ${missing[*]}. Remove ${INT_DIR} and re-run; the root is untouched."
+    die "Incomplete intermediate CA: missing ${missing[*]}. Remove ${INT_DIR} and ${INT_PASS} and re-run; the root is untouched."
   fi
 
   # Present is not the same as usable. Minting a new root leaves the old
   # intermediate sitting here, and nothing about its three files says which root
   # signed it — so ask the root on disk instead of trusting the filenames.
+  # Two different failures, and neither implies the other: the chain check
+  # catches a re-minted root, the passphrase check catches a key and passphrase
+  # from different generations. root-ca-create.sh has always done the second.
   verify_chain_to_root
+  verify_passphrase
   ensure_chain
 
   log "Using the existing intermediate CA ${INT_CRT}"
@@ -82,6 +100,15 @@ verify_chain_to_root() {
 
   openssl verify -CAfile "${ROOT_CRT}" "${INT_CRT}" >/dev/null 2>&1 ||
     die "${INT_CRT} was not signed by the root now in ${ROOT_DIR} — the root was replaced. Remove ${INT_DIR} and re-run."
+}
+
+# Confirm the passphrase in /root still opens the intermediate's own key. Present
+# is not usable: a key whose passphrase is from a different generation signs
+# nothing, and without this the failure surfaces two scripts later in
+# issue-leaf.sh, which is the wrong place to learn it.
+verify_passphrase() {
+  openssl pkey -in "${INT_KEY}" -passin file:"${INT_PASS}" -noout 2>/dev/null ||
+    die "${INT_PASS} does not open ${INT_KEY} — different generations, so this CA cannot sign. Restore the matching passphrase, or remove ${INT_DIR} and ${INT_PASS} and re-run to mint a new intermediate — which invalidates every certificate issued under the old one."
 }
 
 # Refuse to start unless the root CA is present and its passphrase opens it.
@@ -156,6 +183,7 @@ sign_csr() {
     -out "${INT_CRT}"
 
   chmod 0444 "${INT_CRT}"
+  rm -f "${INT_CSR}" # success path only: a failed signing leaves it to inspect
 
   log "Signed the intermediate certificate: ${INT_CRT}"
 }

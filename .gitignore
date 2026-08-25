@@ -77,9 +77,12 @@ secrets/
 ca/root/
 ca/intermediate/
 
-# Issued leaf certificates and their keys (Phase 2.4 onward). These live with
-# the service that reads them rather than under ca/ — see 2.4-5 — and the key
-# is unencrypted by necessity, because nginx starts unattended. That makes this
-# the first private key in the tree that a copy of the tree actually exposes,
-# so it is listed here before the directory exists rather than after.
-docker/proxy/certs/
+# Vault's bootstrap certificate and key (Phase 2.4). Lives with the service that
+# reads it rather than under ca/ — see 2.4-5 — and the key is unencrypted by
+# necessity, because Vault starts unattended. That makes this the first private
+# key in the tree that a copy of the tree actually exposes, so it is listed
+# before the directory exists rather than after.
+#
+# Only Vault. Every other certificate in the lab is issued by Vault's own PKI
+# engine after 3.4 (see 3.4-1), so no other service has a key here to ignore.
+docker/vault/certs/

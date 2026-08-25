@@ -1394,7 +1394,9 @@ differ in what they teach. Terminating Vault's TLS at the proxy is one fewer
 certificate and one fewer profile; it also makes 3.1's central lesson —
 that `VAULT_ADDR` propagates further than any other address in the lab —
 unlearnable, because the cleartext hop it warns about is exactly the hop the
-shortcut creates.
+shortcut creates. That example stopped being hypothetical: 2.5-1 took the
+shortcut anyway and 3.4-1 reversed it, on the grounds this paragraph had already
+written down.
 
 **What this does not mean.** Not every enterprise mechanism is in scope. A second
 Vault node, an HSM, a real load balancer, SPIFFE — those need hardware or scale
@@ -1410,7 +1412,7 @@ letting the scaled-down version pass as complete.
 | one multi-SAN proxy certificate | per-service certificates chosen by SNI | automated issuance, which is 3.4 |
 | `issue-leaf.sh` writes to a bind mount | vault-agent / cert-manager / SPIRE deliver | the delivery agent; key still touches disk |
 | `tls.crt` / `tls.key` | `tls.crt` / `tls.key` | nothing — `kubernetes.io/tls` mandates these |
-| single Vault, TCP passthrough in nginx | NLB in front of a Vault cluster | the balancing half; no second node |
+| single Vault, terminating its own TLS on `:8200` | NLB doing TCP passthrough to a Vault cluster | the balancing half, and the passthrough tier; no second node and nothing in front (3.4-1) |
 | passphrase file in `/root` | HSM, KMS, or Shamir across real holders | see 2.3-3 and 3.1's own honesty note |
 
 **Related:** 2.3-3 already worked this way without naming it — "offline" was
@@ -1420,6 +1422,13 @@ makes that the standing rule rather than a one-off.
 ---
 
 ## 2.4-6 · `issue-leaf.sh` takes no arguments
+
+> **AMENDED by [3.4-1](#34-1--vault-is-the-issuing-ca-the-openssl-intermediate-issues-exactly-one-certificate).**
+> The conclusion holds and the premise does not. "TLS terminates in one place, so
+> there is one certificate" is false now that Vault terminates its own; the
+> reason there is one certificate is that there is one thing to bootstrap. The
+> multi-SAN debt recorded below never accrues — there is a single name — and the
+> per-service certificates it defers are what Vault issuing per service *is*.
 
 **Decided:** like `root-ca-create.sh` and `intermediate-ca-create.sh`, this
 script takes no arguments. The CN, the SAN list and the destination directory are
@@ -1487,6 +1496,14 @@ one appears, the shape is the rejected enum, not a free-form name.
 ---
 
 ## 2.5-1 · TLS terminates once, at the proxy — Vault included
+
+> **SUPERSEDED by [3.4-1](#34-1--vault-is-the-issuing-ca-the-openssl-intermediate-issues-exactly-one-certificate).**
+> Vault is no longer behind the proxy: it terminates its own TLS on `:8200`, and
+> the proxy moves after 3.4 so its certificate comes from Vault. The four
+> accepted costs below were the argument against this entry and are now avoided
+> rather than accepted. Kept in full because the *reasoning* still applies to
+> every service that genuinely does sit behind the proxy, and because the
+> passthrough analysis is what 3.4-1 builds on.
 
 **Decided:** one L7 nginx terminates TLS for every host-tier name —
 `cloudstack`, `gitea`, `minio`, `grafana` **and `vault`** — routing by Host
@@ -1700,3 +1717,266 @@ decision invented a format that would then need converting.
 correlation. Diagnosing something that spans CloudStack and a container means two
 `journalctl` invocations and reading timestamps by eye. That is tolerable on one
 host with one operator, and it is the cost being deferred rather than avoided.
+
+---
+
+## 3.4-1 · Vault is the issuing CA; the openssl intermediate issues exactly one certificate
+
+**Decided:** the offline root and the openssl intermediate exist to bootstrap one
+thing — Vault's own serving certificate. Every other certificate in the lab is
+issued by Vault's PKI engine after 3.4. `issue-leaf.sh` issues `vault.lab.test`
+and nothing else, and Vault terminates its own TLS on `:8200` rather than sitting
+behind the proxy.
+
+**Supersedes [2.5-1](#25-1--tls-terminates-once-at-the-proxy--vault-included).**
+Amends [2.4-6](#24-6--issue-leafsh-takes-no-arguments) and
+[0.2-8](#02-8--the-lab-mimics-enterprise-practice-and-names-what-it-is-skipping).
+
+**What forced it was the phase order, not taste.** 3.4 lands *before* Gitea
+(4.1), MinIO (5.1) and Grafana (13.1). Every one of those can therefore be issued
+by Vault. The only names needing a certificate before Vault is a CA were Vault's
+own and the proxy's — and deferring the proxy removes the second, leaving the
+openssl intermediate with exactly one job. A six-name SAN was issuing
+certificates for services that arrive after the thing meant to issue them.
+
+**The old design contradicted three things already written down.** 0.2-8 names
+*"terminating Vault's TLS at the proxy"* as its worked example of the shortcut to
+reject, because it makes 3.1's central lesson unlearnable — the cleartext hop 3.1
+warns about is precisely the hop the shortcut creates. 0.2-8's own mapping table
+then describes the lab as doing *"single Vault, TCP passthrough in nginx."*
+Build-order 3.1 says *"Vault in a container using a certificate from Phase 2"* —
+a container holding a certificate, not a backend behind a terminator. 2.5-1 did
+none of those and none of them was updated, so three places said one thing while
+the decision said another. That is the failure this file exists to prevent.
+
+**The build order changes in exactly one place.** 2.5 — the reverse proxy — moves
+after 3.4, so its certificate comes from Vault:
+
+```
+1     CloudStack        creates cloudbr0; UI on http://<bridge>:8080
+2.1   CoreDNS           binds the bridge
+2.3   root CA
+2.4   intermediate  ->  issues ONE leaf: vault.lab.test
+2.6   distribute the root
+3.1   Vault on :8200, its own certificate
+3.4   Vault PKI intermediate, CSR signed by the offline root
+----  everything below is issued by Vault  --------------------------
+2.5   the proxy
+4.1   Gitea    5.1 MinIO    13.1 Grafana
+```
+
+2.6 stays in Phase 2: distributing the *root* is independent of who issues
+leaves, and the root has to be trusted before Vault's certificate means anything.
+
+**Rejected: Vault first, then CloudStack.** The obvious reading of "bootstrap the
+CA service before anything needs it", and impossible here. The vendored installer
+rebuilds the host's network underneath itself, converting the NIC into
+`cloudbr0` — 1.3-6 snapshots `/etc/netplan` because of it, and 1.3-2 installs a
+temporary resolver floor for the window in which DNS does not work. CoreDNS binds
+`cloudbr0` and is the one service that cannot take `0.0.0.0`, because
+systemd-resolved already holds `:53`. No bridge, no DNS, no name to put in a
+certificate. CloudStack being first is a constraint, not an ordering preference.
+
+**Rejected: nginx `stream` + `ssl_preread` fronting Vault on `:443`.** 2.5-1
+weighed this against termination and called it machinery. It still is, and it is
+now unnecessary: with the proxy arriving after 3.4 nothing contends for `:443`
+when Vault comes up. Vault on its own port is simpler than *both* designs 2.5-1
+considered — no second listener, no SNI inspection, no port-ownership shuffle.
+That third option was never on the table when 2.5-1 was decided.
+
+**`:8200`, and the port in the URL is not the interesting part.**
+`VAULT_ADDR=https://vault.lab.test:8200`. 3.1's lesson is that this address
+propagates further than any other in the lab — into CI variables, a
+`cluster-vars` ConfigMap, and the ClusterSecretStore — so what matters is that it
+is a *name*, not whether it carries a port. 8200 is Vault's documented default
+and every client already expects it.
+
+**What this buys that the superseded design could not:**
+
+- **3.3's audit device names real clients.** Under termination every request was
+  attributed to the proxy, so the log answered *what* and *when* but never *by
+  whom* — the one question an audit log exists for.
+- **Vault's TLS certificate auth method stays available** rather than being
+  structurally unreachable.
+- **Nothing but Vault ever holds `X-Vault-Token`.** 2.5-1 accepted nginx holding
+  it in memory on every request, one `log_format` change from holding it on disk.
+- **After 3.4 Vault issues its own replacement certificate.** The openssl leaf
+  becomes a genuine bootstrap artifact: 397 days, one consumer, no successor.
+
+**Accepted costs, and they are real:**
+
+1. **CloudStack's UI is plain HTTP until the proxy exists**, now Phase 3½ rather
+   than 2.5. It is a bridge-local port on a single host, and Phase 1 leaves it
+   that way regardless — this defers the fix rather than creating the exposure.
+2. **2.5's lesson arrives later.** Arguably better placed: "where TLS terminates"
+   is chosen with Vault already outside the proxy as the worked counter-example,
+   which is the distinction 2.5-1 was reaching for and could not draw while being
+   the thing it was arguing against.
+3. **Vault binds `0.0.0.0:8200`** per 0.4-1, so it answers on every interface —
+   eight on this host, including four Docker bridges and `cloud0`. That cost is
+   small for CoreDNS and larger for a secrets store with nothing in front of it.
+   Revisit at 3.1 whether Vault is the one service that pins the bridge address;
+   0.4-1 records that the reference was already inconsistent here, in exactly
+   this direction.
+
+**2.4-6 keeps its conclusion and loses its reasoning.** `issue-leaf.sh` still
+takes no arguments, but no longer because "TLS terminates in one place so there
+is one certificate" — that premise is now false. The reason is stronger: there is
+one certificate because there is one thing to bootstrap. 2.4-6's *reversal
+trigger* — a second pre-3.4 consumer — is correspondingly harder to hit, since
+the window between the CA existing and Vault taking over is now two phases with
+nothing in it.
+
+**2.4-6's multi-SAN debt is retired rather than paid.** The "deliberate debt" of
+one certificate carrying six names does not arise: there is one name. Per-service
+certificates selected by SNI, which 2.4-6 called the enterprise pattern being
+deferred, is what Vault issuing per service *is*.
+
+**`test.lab.test` is deleted.** It existed only as 2.4's acceptance scaffold, and
+2.4's check becomes real: `curl --cacert root.pem https://vault.lab.test:8200/v1/sys/health`
+against a running service rather than a static page proving nothing but itself.
+
+---
+
+## 3.4-2 · `issue-leaf.sh` does not verify what it just issued
+
+**Decided:** no `verify_leaf`. The script creates the key, the request, the
+certificate and the bundle, and stops. The one check worth keeping — does the
+leaf still chain to the CA on disk — moves into `check_existing`, where it is
+answering a question that can actually have a different answer.
+
+**Written, tested, and then removed**, which is the part worth recording. It
+asserted five things: the chain verified, the key matched the certificate, the
+bundle carried the intermediate, the SAN held every requested name, and
+`basicConstraints` was `CA:FALSE`. All five passed. Three of them *could not have
+failed*:
+
+| Assertion | Why it cannot fail here |
+|---|---|
+| chain verifies | `sign_csr` signed it with that intermediate, moments earlier |
+| key matches certificate | the CSR was built from that key |
+| bundle carries the intermediate | `build_bundle` is a `cat` of those two files |
+
+A check that cannot fail on the path that produces it is not coverage, it is the
+appearance of coverage — and the more of them there are, the more the two look
+alike. The remaining two (SAN, `CA:FALSE`) test the *config* rather than the run,
+and `2.4-2` already documents what `[ leaf_ext ]` must contain.
+
+**Rejected: keeping it because `root-ca-create.sh` has `verify_root`.** The
+symmetry is real and the situations are not. `verify_root` asserts `CA:TRUE` and
+`Certificate Sign` on a self-signed root, where the extensions come from a config
+section that nothing else exercises and a mistake is silent for twenty years. A
+leaf is re-issued every 397 days by a script whose next step is a service that
+fails loudly if the certificate is wrong.
+
+**Rejected: keeping the SAN assertion alone.** It was the strongest of the five —
+`$ENV::LEAF_SAN` is dereferenced when the config *loads*, so a typo yields a
+certificate with no SAN that looks entirely well-formed under `openssl x509
+-text`. What retires it is 3.4-1: with one name, a missing SAN is total and
+immediate rather than partial and quiet. Under the superseded six-name design
+one absent SAN broke one service while five kept working, and *that* is the
+failure an assertion earns its place against.
+
+**What must not be lost with it.** `check_existing` still has to ask whether an
+existing leaf chains to the intermediate *currently* on disk. That is
+[2.4-3](#24-3--an-existing-intermediate-is-verified-against-the-root-not-counted)
+one level down, and it is the one question whose answer changes between runs:
+re-mint the intermediate and a leaf that "exists" is no longer usable. TODO 2.3
+now carries that call, and says plainly that it is the only place the chain is
+checked.
+
+**The general rule this is an instance of:** verify at the boundary where state
+can have changed, not at the end of the code that just set it. The creation path
+is deterministic; the re-run path is not.
+
+---
+
+## 3.4-3 · Mechanics `issue-leaf.sh` no longer explains in place
+
+`issue-leaf.sh` was written as a teaching skeleton and its comments grew to three
+times the code. Cut back to the one-line function headers the two CA scripts use,
+the same move [2.3-5](#23-5--the-passphrase-is-generated-not-typed-and-lives-outside-the-repo)
+made for `root-ca-create.sh`. What the comments carried is recorded here, because
+every item below is something openssl accepts in silence.
+
+**The CN and the SAN are coupled by us, not by openssl.** `[ leaf_pol ]` sets
+`commonName = supplied`, so a CSR without a CN is refused outright — verified. A
+CN that is *absent from the SAN* is accepted without a word, and then rejected by
+every client, since none has read CN for identity since roughly 2017. That is why
+`sign_csr` builds the SAN by seeding it with `LEAF_CN` and appending
+`LEAF_ALT_NAMES`: the rule is structural rather than remembered. `LEAF_CN` is
+deliberately absent from the array, because listing it twice yields
+`DNS:vault.lab.test` twice, which openssl also accepts without complaint.
+`LEAF_ALT_NAMES` stays as an empty array rather than being deleted — it is what
+the union iterates, and removing it would make adding a name a change of shape.
+
+**`create_csr` must not load `intermediate-ca.cnf`, for two independent reasons.**
+Its `[ req ]` sets `distinguished_name = ca_dn`, whose `commonName` is
+`"lab.test Issuing CA"` — the request would name itself the CA. And the file
+dereferences `$ENV::CA_DIR` (line 22) and `$ENV::LEAF_SAN` (line 51) when it
+*loads*, whether or not the sections holding them are used, so passing it fails
+with `variable has no value` unless both are exported. `-subj` alone yields a DN
+encoded as `UTF8STRING`, matching what the CA's own `utf8only` produces, so
+`[ leaf_pol ]`'s `match` on domainComponent and organizationName is satisfied —
+verified rather than assumed. That config belongs to the CA; only `openssl ca`
+reads it.
+
+**The SAN is applied at signing, never requested in the CSR.**
+`copy_extensions = none` (2.4-1) means the CA discards every extension a request
+asks for. A SAN placed in the CSR is dropped in silence and the leaf comes back
+with none, while `openssl x509 -text` still looks entirely reasonable.
+
+**Two variables ride on the `openssl ca` command line and both fail quietly.**
+`CA_DIR` must be the *intermediate's* directory: point it at the root's and
+openssl signs happily, then records the issuance in the wrong CA's `index.txt`
+and allocates from the wrong `newcerts/`, with no error. `LEAF_SAN` is openssl's
+spelling of the names. Neither is exported, because `$ENV::` expands at config
+load and keeping them on the call puts the values beside the file that reads
+them. `-extensions leaf_ext` is redundant — `[ intermediate_ca ]` already sets
+it — and passed anyway, matching `root-ca-create.sh`: what a certificate is
+*allowed to be* should be visible at the call site. No `-days`, because
+`default_days = 397` lives in the config where 2.4-2 explains it.
+
+**`require_intermediate_ca`'s required set is read off `[ intermediate_ca ]`, and
+`serial` is deliberately not in it.** `rand_serial = yes` means openssl never
+reads that file — verified. `index.txt` and `newcerts/` *are* checked, because
+openssl's own complaint about a missing database names a path without saying
+which step should have created it.
+
+**The leaf key is unencrypted, reversing 2.3-5 on purpose.** Vault starts
+unattended; an encrypted key makes every boot a prompt. The CA keys can afford a
+passphrase because they are used twice in twenty years by a human. What protects
+this one instead: mode `0400 root:root`, two independent `.gitignore` rules that
+`make lint` asserts (2.3-6), a 397-day life, and a blast radius of one
+certificate. Stated plainly because 2.3-5's *"a copy of the tree carries an
+encrypted key and no way in"* stops being true the moment this file exists.
+
+**RSA-4096 is a simplicity choice, not a security one.** 2.3-2's argument was
+about a twenty-year trust anchor facing clients of unknown vintage and does not
+transfer to a 397-day server key; 2048 would be ample and cheaper per handshake.
+Taken for one algorithm and one size across the chain, at a handshake rate where
+the difference is unmeasurable.
+
+**`genpkey` creates its output `0600` itself, before any `chmod`, under any
+umask** — verified. That is why `create_key` needs no `umask 077` subshell while
+the CA scripts' passphrase files do: those are written by a shell redirect, which
+obeys umask, and `-out` does not. The directory is `0755` because `tls.crt` and
+`bundle.crt` are public and `ca/root`'s `0700` already demonstrated what happens
+when a public certificate needs `sudo` to read.
+
+**`LEAF_DIR` is resolved off `REPO_ROOT`, not by a `../` hop off `PKI_DIR`.**
+`PKI_DIR` is already `ca/`, so relative arithmetic from it lands back inside `ca/`
+with one `..` too few and outside the repository with one too many. Both were
+written while settling 2.4-5 and both looked correct on the page.
+
+**`bundle.crt` is leaf + intermediate and is not `ca/intermediate/ca-chain.crt`,**
+which is intermediate + root. The first is what a server sends; the second is
+what a verifier trusts. The root is excluded deliberately: a client either
+already trusts it, in which case sending it changes nothing, or does not, in
+which case receiving it does not help. Omitting the *intermediate* is the failure
+build-order 2.4 asks you to reproduce — fine in a browser that cached it, broken
+in `curl` on a clean machine.
+
+**The CSR is declared with the other paths and deleted by `sign_csr`,** on the
+success path only, so a failed signing leaves the request to be inspected.
+Transience is expressed by the deletion; the declaration only says where it went.

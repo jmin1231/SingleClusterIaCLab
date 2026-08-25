@@ -581,6 +581,16 @@ fails in `curl`.
 
 ### 2.5 The reverse proxy, and where TLS terminates · `M`
 
+> **Reordered — build this after 3.4.** Decision 3.4-1 makes Vault the lab's
+> issuing CA, and 3.4 lands before Gitea (4.1), MinIO (5.1) and Grafana (13.1).
+> The proxy's certificate therefore comes from Vault rather than from
+> `issue-leaf.sh`, which now issues exactly one leaf: Vault's own, at
+> `vault.lab.test:8200`. Vault is **not** behind this proxy — it terminates its
+> own TLS, which is what keeps 3.1's `VAULT_ADDR` lesson and 3.3's audit
+> attribution intact. Everything else in this step is unchanged; only its
+> position and the source of its certificate move. 2.6 stays where it is —
+> distributing the *root* is independent of who issues leaves.
+
 Promote that nginx into a real component: one proxy, Host-header routing, holding certificates for
 every host-tier name. Put CloudStack behind it as the first real backend. Decide explicitly whether
 the hop from proxy to backend is plain HTTP or re-encrypted, and write the decision down.

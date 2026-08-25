@@ -46,11 +46,10 @@ YAML  := $(filter-out $(VENDORED),$(wildcard $(filter %.yml %.yaml,$(FILES))))
 # once — the pki/ -> ca/ rename carried the .gitignore entries and left the
 # generated root key behind, un-ignored. Checked as file paths, not directories,
 # so the assertion is "this key cannot be committed" whichever rule covers it.
-# The third entry is a probe, not a real file: leaf names are per-certificate,
-# so the assertion is that the docker/proxy/certs/ rule covers anything landing
-# in there. An unencrypted leaf key is the one this matters most for.
+# The third is Vault's bootstrap key (3.4-1) — the only leaf this lab issues
+# from openssl, and the only unencrypted private key in the tree.
 CA_KEYS := ca/root/root-ca.key.enc ca/intermediate/intermediate-ca.key.enc \
-           docker/proxy/certs/any-leaf.key
+           docker/vault/certs/tls.key
 
 # ---------------------------------------------------------------------------
 

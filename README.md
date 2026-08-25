@@ -10,23 +10,32 @@ depend on them, so nothing has to be retrofitted.
 
 ## Status
 
-**Phase 2 — names and trust.** CoreDNS is running on the bridge (2.1). The CA
-scripts are written and reviewed but **have never been run on any host**, so
-`ca/root/` is empty and no certificate exists yet.
+**Phase 2 — names and trust.** CoreDNS is running on the bridge (2.1). The root
+and intermediate CAs are written, and whether they have been *generated* is a
+per-machine fact — see "Working on more than one machine" below. `ca/root/` and
+`ca/intermediate/` are gitignored, so a clone shows nothing either way; check
+the host rather than the repo.
 
-Two skeletons are in flight. Both are complete as documents and unimplemented as
-code — every decision is written up in [`docs/decisions.md`](docs/decisions.md),
-and each numbered `TODO` in the file points at the entry that settles it.
+Work in flight, with every decision written up in
+[`docs/decisions.md`](docs/decisions.md) and each numbered `TODO` pointing at the
+entry that settles it:
 
 | File | State | Next |
 |---|---|---|
-| `ca/scripts/issue-leaf.sh` | skeleton, 32 TODOs | TODO 1.1 — name the certificate |
+| `ca/scripts/issue-leaf.sh` | key, CSR and signing written; 17 TODOs | `verify_leaf`, then `check_existing` last |
 | `teardown.sh` | skeleton, 43 TODOs | TODO 0.4 — the `try`/`run` helpers |
 | `bootstrap.sh` | working; transcript block is a skeleton | TODO L-1.1 — the `exec` redirect |
 
-Blocking everything in `ca/`: run `sudo ./ca/ca-install-all.sh` once. It creates
-the root and the intermediate, and — less obviously — the `index.txt` and
+Blocking everything in `ca/` on a machine that has not done it: run
+`sudo ./ca/ca-install-all.sh` once. It is a no-op if the CA is already there. It
+creates the root and the intermediate, and — less obviously — the `index.txt` and
 `newcerts/` that `openssl ca` needs before a leaf can be signed at all.
+
+**The CA issues one certificate, for Vault** (3.4-1). Vault's PKI engine becomes
+the issuing CA at 3.4, and since 3.4 lands before Gitea, MinIO and Grafana, every
+other certificate in the lab comes from Vault. The reverse proxy of 2.5 moves
+after 3.4 for the same reason. `issue-leaf.sh` is a bootstrap step, not a
+general-purpose issuer.
 
 ### Working on more than one machine
 

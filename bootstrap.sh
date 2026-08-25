@@ -188,9 +188,11 @@ EOF
 
 # ---- Services --------------------------------------------------------------
 
-# Run the CA installer: the offline root, then the intermediate that signs
-# everything the lab serves over TLS. Before CloudStack — it is seconds of local
-# openssl work, so a bad path fails here rather than after a long install.
+# Run the CA installer: the offline root, the intermediate, and Vault's leaf —
+# the only certificate this CA issues, since Vault's PKI engine takes over at
+# 3.4 (3.4-1). Before CloudStack — it is seconds of local openssl work, so a bad
+# path fails here rather than after a long install, which is also why issuance
+# sits inside the CA installer rather than beside the service that reads it.
 install_ca() {
   local installer="${SOURCE_SCRIPT}/ca/ca-install-all.sh"
   [[ -x "${installer}" ]] || die "Missing or not executable: ${installer}"

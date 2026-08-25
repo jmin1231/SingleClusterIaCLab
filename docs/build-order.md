@@ -570,14 +570,24 @@ unencrypted beside it.
 
 ### 2.4 Issue an intermediate and a first leaf certificate · `M`
 
-The intermediate signs a leaf for a test hostname. Serve a static page from nginx over HTTPS with
-the chain assembled correctly.
+The intermediate signs the one leaf it will ever issue: Vault's, at `vault.lab.test`. Decision
+3.4-1 makes Vault the lab's issuing CA from 3.4, and 3.4 lands before Gitea, MinIO and the reverse
+proxy — so this is a bootstrap step, not a general-purpose issuer, and `test.lab.test` no longer
+exists.
+
+Nothing serves that certificate yet, and the chain is only half the lesson, so stand a throwaway
+nginx in front of it on `:8200` — the port Vault will claim at 3.1 — and serve a static page over
+HTTPS with the chain assembled correctly. Same name, same port, so the acceptance check you write
+here is the one that keeps working once Vault replaces the placeholder.
 
 **Learning:** the CSR flow — key stays put, request travels, certificate comes back. How to assemble
 a chain, and why a server that omits the intermediate works in your browser (which cached it) and
-fails in `curl`.
+fails in `curl`. Note which file each side wants: nginx serves `bundle.crt` (leaf + intermediate),
+while `--cacert` takes the root alone — send the root as well and you have wasted bytes on every
+handshake; omit the intermediate and only a clean client notices.
 
-**Done when:** `curl --cacert root.pem https://test.lab.test` succeeds with no `-k`.
+**Done when:** `curl --cacert ca/root/root-ca.crt https://vault.lab.test:8200` succeeds with no
+`-k`, and the same command still succeeds at 3.1 with Vault answering instead of nginx.
 
 ### 2.5 The reverse proxy, and where TLS terminates · `M`
 

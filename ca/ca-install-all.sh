@@ -1,13 +1,21 @@
 #!/usr/bin/env bash
 #
-# ca-install-all.sh — create the lab's certificate authority: the offline root,
-# then the intermediate that signs everything the lab serves over TLS.
+# ca-install-all.sh — create the lab's certificate authority and issue the one
+# certificate it exists to produce: the offline root, the intermediate beneath
+# it, and Vault's leaf.
 #
 # Usage: sudo ./ca-install-all.sh
 #
 # The entry point bootstrap.sh calls; every other script here is called by it,
 # and the order is a dependency, not a preference — the intermediate consumes
-# the root. Safe to re-run: an existing CA is left alone.
+# the root, and the leaf consumes the intermediate. Safe to re-run: an existing
+# CA and an existing leaf are both left alone.
+#
+# Issuing sits here rather than in bootstrap.sh because of where bootstrap.sh
+# calls this: before CloudStack, so a wrong path fails in seconds instead of
+# after a forty-minute install. That is worth more than the tidier reading in
+# which issuance belongs beside the service that consumes it — and there is only
+# ever one certificate, because Vault's PKI engine takes over at 3.4 (3.4-1).
 
 set -euo pipefail
 
@@ -17,24 +25,34 @@ source "${SOURCE_SCRIPT}/../lib/common.sh"
 
 require_root
 
-# Resolve both children before running either. Step 1 generates a passphrase and
-# a 4096-bit key, so a path that is wrong — renamed, moved, not executable — has
-# to stop us here, while nothing has been written to disk yet.
+# Resolve all three children before running any of them. Step 1 generates a
+# passphrase and a 4096-bit key, so a path that is wrong — renamed, moved, not
+# executable — has to stop us here, while nothing has been written to disk yet.
+# Every entry below belongs in the loop: one left out is one that fails at its
+# own step, after the steps before it have already written keys.
+#
+# LEAF, not LEAF_CA. A leaf is `CA:FALSE` and the root's pathlen:0 on the
+# intermediate is what guarantees it — naming it a CA here would contradict the
+# one constraint this chain is built on.
 ROOT_CA="${SOURCE_SCRIPT}/scripts/root-ca-create.sh"
 INTERMEDIATE_CA="${SOURCE_SCRIPT}/scripts/intermediate-ca-create.sh"
-for script in "${ROOT_CA}" "${INTERMEDIATE_CA}"; do
+LEAF="${SOURCE_SCRIPT}/scripts/issue-leaf.sh"
+for script in "${ROOT_CA}" "${INTERMEDIATE_CA}" "${LEAF}"; do
   [[ -x "${script}" ]] || die "Missing or not executable: ${script}"
 done
 
 # Run every step, in dependency order.
 main() {
-  log "Step 1/2: creating the offline root CA..."
+  log "Step 1/3: creating the offline root CA..."
   "${ROOT_CA}"
 
-  log "Step 2/2: creating the intermediate CA..."
+  log "Step 2/3: creating the intermediate CA..."
   "${INTERMEDIATE_CA}"
 
-  log "CA ready; the intermediate is what issues leaf certificates."
+  log "Step 3/3: issuing Vault's certificate..."
+  "${LEAF}"
+
+  log "CA ready. Vault holds the only leaf this intermediate issues; everything else is issued by Vault's PKI engine from 3.4."
 }
 
 main "$@"

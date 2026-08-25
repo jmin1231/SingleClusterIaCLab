@@ -1,6 +1,6 @@
 ---
 # Vault — the lab's secret store, and from 3.4 its issuing CA.
-# TODOs are open decisions; the reasoning is in vault-installer.sh, by number.
+# Reasoning for these choices is in docs/decisions.md 3.1-x.
 # No healthcheck on purpose: `docker ps` looks identical for a sealed, an
 # unreachable and a working Vault. Installer step 5 asks Vault instead.
 name: vault
@@ -16,7 +16,7 @@ services:
     # already expands this to `server -config=/vault/config`.
     command: server
 
-    # TODO 2.5 — comes back SEALED, not healed.
+    # Comes back SEALED, not healed — vault-unseal.sh is the other half (3.1-4).
     restart: unless-stopped
 
     # 3.1-1. NOT the image's own 100:1000 — Ubuntu gives uid 100 to whichever

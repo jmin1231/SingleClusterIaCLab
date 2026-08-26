@@ -1614,6 +1614,10 @@ whether `VAULT_ADDR` is routable from the cluster at all.
 
 ## L-1 · The install transcript is a local file, written by `bootstrap.sh` itself
 
+> **AMENDED by [L-4](#l-4--l-1-as-built-four-corrections-to-the-note).** Built, and
+> three of the notes below were wrong in ways only building found: where the
+> redirect goes, which tool timestamps, and that `tee` is not the writer.
+
 **Decided:** `bootstrap.sh` redirects its own stdout and stderr through `tee` to
 a timestamped file under `/var/log/`, once, before any step runs. Skeleton and
 open decisions are `TODO L-1.x` in the script.
@@ -1671,6 +1675,10 @@ the structure does not.
 ---
 
 ## L-2 · Runtime logs land in journald, containers included
+
+> **AMENDED by [L-5](#l-5--journald-retention-as-built-and-three-findings).** The
+> premise below — "no retention limits are set at all" — is true of the config and
+> false of the behaviour. Defaults are a 4G cap. Two other findings there.
 
 **Decided:** Docker's log driver is set to `journald` in `/etc/docker/daemon.json`
 so container output and systemd unit output share one store, one query tool and
@@ -2486,3 +2494,127 @@ currently reads as a thing nobody thought of, and it is not — it is a plane th
 costs 2 GB against a hard ceiling, on a host that cannot run the server anyway.
 That is a decision, and 0.2-8 says name what is being skipped rather than let the
 scaled-down version pass as complete.
+
+---
+
+## L-4 · L-1 as built — four corrections to the note
+
+**Built** as `start_transcript` / `close_transcript` in `bootstrap.sh`. The shape
+L-1 described survived; four of its details did not.
+
+**1. The redirect does not go "before any step runs".** L-1.1 said file scope.
+That places it above `require_root`, so a non-root invocation dies on
+`install: cannot create '/var/log/lab': Permission denied` instead of the
+readable `bootstrap.sh must be run as root: sudo ./bootstrap.sh`. It is called
+from `main()` immediately after `require_root` instead. The cost is that the
+root check itself is not in the transcript, which is acceptable — that failure
+is immediate and on the terminal.
+
+**2. `tee` is not the writer, and `tee >(…)` would have been a bug.** The
+obvious build is `exec > >(tee >(strip >>"$LOG"))` — `tee` to the terminal,
+nested substitution to the file. It is wrong: `$!` is the *outer* process, so
+`close_transcript` could only wait for `tee` while the inner stripper was still
+draining — reintroducing precisely the truncation L-1.3 exists to prevent.
+
+The build instead saves the terminal on **fd 3** and uses one substitution
+containing a pipeline. A pipeline's subshell waits for all its members, so the
+single `wait "$TRANSCRIPT_PID"` covers everything.
+
+**3. `ts` was the wrong dependency question.** L-1.5 framed it as moreutils'
+`ts` versus `awk`/`strftime`. Both are wrong: `ts` is not installed, and
+`strftime` is a **gawk extension**. `awk` on the development host is gawk, so it
+worked — but a fresh Ubuntu defaults to **mawk**, and this would have been a
+fresh-VM failure discovered on the machine it was written to serve.
+
+Bash's `printf '%(%Y-%m-%dT%H:%M:%SZ)T'` is a builtin: no package, and no fork
+per line across a forty-minute install. `TZ=UTC` is exported inside the
+subshell only, so nothing else in the run sees a changed timezone.
+
+**4. `set -x` is decided NO, and that decides the mode.** `cloudstack-install.sh:1148`
+runs `cloudstack-setup-databases cloud:cloud@localhost`; trace would put that
+credential in a file permanently, and the vendored installer has not been
+audited for others. Recorded as a decision so it reads as a control. Because it
+is off, L-1.4's `0640 root:adm` is convention rather than a control — `adm` is
+the Debian log-reader group (`/var/log/syslog` is `640 syslog:adm`) and the
+primary user is in it, so reading a transcript needs no `sudo`.
+
+**Also settled:** `/var/log/lab/bootstrap-<UTC>.log`, newest 20 kept, swept by
+the script that writes them — a logrotate drop-in would be a second mechanism
+for one concern. Filenames sort chronologically, so retention orders by name
+rather than mtime, which a copy or a restore would rewrite.
+
+**Verified, not assumed:** without the `EXIT` trap the file was empty at the
+moment the parent exited and filled a second later; with it, complete. A failing
+run exits 1 with the `die` message in the file.
+
+---
+
+## L-5 · journald retention as built, and three findings
+
+**Built** as `configure_journald`, writing `/etc/systemd/journald.conf.d/10-lab.conf`
+with `Storage=persistent`, `SystemMaxUse=2G`, `SystemKeepFree=20G`,
+`MaxRetentionSec=1month`.
+
+**Finding 1 — L-2's premise is wrong.** It says "no retention limits are set at
+all", which reads as unbounded growth. The defaults are a **4G size cap with no
+time cap**: `SystemMaxUse` and `SystemKeepFree` are each a percentage of the
+filesystem *capped at 4G*, so a 457 GB disk and a 200 GB disk produce the same
+4G. The journal was never going to fill the disk. What it could never do is tell
+you how many days it holds — so this file buys **predictable history, not disk
+safety**. That changes what the change is for.
+
+**Finding 2 — persistence is inherited, not configured.** `Storage=auto` means
+"persistent if `/var/log/journal` exists, volatile otherwise — the existence of
+the directory controls the storage mode". Nothing guarantees that directory: no
+package owns it (`dpkg -S` finds nothing) and the tmpfiles rule is `z`
+(adjust-if-present), not `d` (create). On a fresh VM it is a coin flip, and
+losing it is silent — a volatile journald ignores every `System*` key, because
+`Runtime*` governs volatile storage, and the whole install history goes at the
+first reboot. `Storage=persistent` is the line that earns the file.
+
+**Finding 3 — `SystemKeepFree`'s default protects the wrong party.** It reserves
+space for everything that is *not* the journal. 4G free on a 200 GB disk shared
+with CloudStack primary and secondary storage, Docker images and containerd
+describes a lab that has already failed. Sized at 20G against what CloudStack
+needs, not what journald would like.
+
+**`MaxRetentionSec=1month` is aligned deliberately** with logrotate's
+`rotate 4, weekly` for `/var/log/syslog`. Two stores whose horizons would
+otherwise drift; this is the cheapest coordination available and it is not
+coincidence.
+
+**`ForwardToSyslog` is left as Ubuntu ships it.** The distro drop-in
+`/usr/lib/systemd/journald.conf.d/syslog.conf` sets it to `yes` with rsyslog
+active, so every entry is already on disk twice — the two-store arrangement L-2
+rejected on design grounds *without noticing the distro had already chosen it*.
+Measured before deciding: **~20 MB/month and 4 MB of rsyslog memory**, neither
+worth acting on against 200 GB. Masking it would also empty `/var/log/auth.log`,
+where sshd, sudo and su land and where fail2ban and CIS-shaped checks look. Per
+0.2-8 the deviation is named rather than left to read as an oversight.
+
+**REVISIT when the Docker log driver lands.** Container output then gets
+forwarded too, and CoreDNS's `log` plugin logs every query — thousands a minute
+during an image pull. 20 MB/month is not the steady state after that.
+
+**And the reversal does not work the obvious way.** `ForwardToSyslog=no` in
+`10-lab.conf` is ignored: drop-ins sort by **filename across all four search
+directories**, not by directory precedence, so `syslog.conf` sorts after
+`10-lab.conf` and wins from `/usr/lib`. `/etc` outranks `/usr/lib` only when the
+two files share a name — which is the documented fix: symlink
+`/etc/systemd/journald.conf.d/syslog.conf` to `/dev/null`. Same trap as 1.3-3,
+direction reversed: 1.3-3 warned that a high number can outrank what should
+replace it; here no number is high enough.
+
+**Two assertions, because they fail differently.** The first greps journald's
+own log for *our file's path* — systemd's parser names the offending file in
+every complaint, so silence is success and the check does not depend on error
+wording upstream can reword. The second checks `/var/log/journal` exists, which
+is the outcome the first cannot see: a file can parse perfectly and still leave
+storage volatile.
+
+**A trap worth recording from writing that first assertion.** It was briefly
+`journalctl … | grep -qF "$path"`. Under `set -o pipefail` that **fails open**:
+`grep -q` exits on first match, the producer takes `SIGPIPE`, and the pipeline
+reports failure — so the `if` reads false *on a match* and the assertion never
+fires. It is a race on output length, so it passes on a quiet host. Capture into
+a variable and test with a here-string.

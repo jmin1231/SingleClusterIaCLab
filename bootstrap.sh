@@ -14,75 +14,82 @@ SOURCE_SCRIPT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=/dev/null
 source "${SOURCE_SCRIPT}/lib/common.sh"
 
+# journald retention. The number orders this file against other NUMBERED
+# drop-ins only: *.conf.d/ sorts by filename across every search directory, so a
+# vendor file starting with a letter outranks it from a lower-priority one. Two
+# constants because masking that vendor file needs a second path here. See L-2.
+JOURNALD_DIR="/etc/systemd/journald.conf.d"
+JOURNALD_DROPIN="${JOURNALD_DIR}/10-lab.conf"
+DOCKER_DAEMON_JSON="/etc/docker/daemon.json"
+
 # --- Transcript -------------------------------------------------------------
 #
-# SKELETON. Every TODO is a decision to make, not just code to write. Numbered
-# L-x to match docs/decisions.md L-1.
-#
-# One run of this script is a forty-minute unattended install of software we did
-# not write, and the only record of what it did is whatever scrolled past. The
-# transcript is that record, written to a file so it survives the terminal.
-#
-# THE CONSTRAINT THAT DECIDES THE SHAPE: this cannot push anywhere. Loki is Phase
-# 13.2 and this is Phase 0, so the transcript is a plain local file that a later
-# agent ingests — never a push, never a network dependency. Same rule as the
-# netplan snapshot in 1.3-6: a record must not depend on the thing it records.
-#
-# TODO L-1.1: one `exec` redirect, here, before any step runs — NOT a `tee` on
-#             each call. Children inherit the file descriptors, so this captures
-#             ca-install-all.sh, coredns-installer.sh, and the 2,700-line
-#             vendored CloudStack installer with no change to any of them. That
-#             last one is the whole point: it is the output you most want after a
-#             failed install and the one you cannot get by teeing call sites.
-#
-#               exec > >(tee -a "${LOG_FILE}") 2>&1
-#
-# TODO L-1.2: strip ANSI on the FILE branch only. common.sh's log/warn/die emit
-#             \033[1;32m, which lands in the file as literal escape bytes and
-#             makes it grep-hostile. Do not fix this by removing colour, and do
-#             NOT make log() conditional on [[ -t 1 ]] — after the exec above,
-#             stdout is a pipe, so that test is false and colour would vanish
-#             from the terminal too. Tee into a stripper instead, and use sed -u:
-#             without unbuffered output the tail is lost on a crash.
-#
-# TODO L-1.3: wait for tee before exiting. Process substitution can outlive the
-#             script, so a `die` at the end can truncate the log at exactly the
-#             moment it matters. Capture the substitution PID from $! straight
-#             after the exec and wait on it in an EXIT trap. This is the single
-#             most common way a logging harness works until the day it is needed.
-#             Prove it: make the last step die, and check the file has the
-#             message.
-#
-# TODO L-1.4: the filename. A run identity that cannot overwrite the run before
-#             it — re-running bootstrap must not destroy the log of the run that
-#             failed. Decide the directory, the timestamp format (UTC), and the
-#             mode. 0640 root:adm is the convention; see L-1.6 for why the mode
-#             is a security control here rather than housekeeping.
-#
-# TODO L-1.5: per-line timestamps. Forty minutes of output without them cannot
-#             be read, and the vendored installer emits none of its own. `ts` from
-#             moreutils is the obvious tool and is NOT installed on this host —
-#             so either add it to install_cli_tools or prefix with awk/strftime
-#             and take no new dependency. Whichever, it goes on the file branch
-#             ahead of the ANSI strip.
-#
-# TODO L-1.6: decide `set -x`, deliberately. BASH_XTRACEFD sends trace to a
-#             dedicated fd, so it can go to the file and never to the terminal:
-#
-#               exec 9>>"${LOG_FILE}"; BASH_XTRACEFD=9; set -x
-#
-#             The cost is real. cloudstack-install.sh:1148 runs
-#             `cloudstack-setup-databases cloud:cloud@localhost` — with -x that
-#             credential is in a file, permanently. The CA scripts are safe (the
-#             passphrase goes openssl rand > file and never through an echoed
-#             variable), but the vendored installer is not ours and has not been
-#             audited for this. If -x is on, L-1.4's mode is a control.
-#
-# TODO L-1.7: rotation. One file per run, forever, is a disk leak on a host that
-#             already carries 22 GB of containerd data. logrotate drop-in, or a
-#             retention sweep in this script. Decide which owns it.
+# One run is forty minutes of unattended installation of software we did not
+# write, and the only other record is terminal scrollback. It cannot push
+# anywhere — Loki is Phase 13.2, this is Phase 0 — so it is a plain local file:
+# a record must not depend on the thing it records (1.3-6). See L-1.
+
+# Fixed at script start so the run identity cannot change mid-run. UTC and
+# ISO-8601 basic form, so lexicographic order is chronological order.
+LOG_DIR="/var/log/lab"
+LOG_FILE="${LOG_DIR}/bootstrap-$(date -u +%Y%m%dT%H%M%SZ).log"
 
 # --- Steps ------------------------------------------------------------------
+
+# Open this run's transcript. Called after require_root rather than at file
+# scope: the redirect would otherwise precede the root check, and a non-root run
+# would die on "permission denied" instead of the readable message.
+start_transcript() {
+  # Mode set at creation, not corrected afterwards — this holds the output of a
+  # privileged install and must never be briefly world-readable.
+  install -d -m 0750 -o root -g adm "${LOG_DIR}" ||
+    die "Cannot create ${LOG_DIR} — check 'df -h /var/log' and 'mount | grep /var'."
+  install -m 0640 -o root -g adm /dev/null "${LOG_FILE}" ||
+    die "Cannot create ${LOG_FILE} — check free space and mount options."
+
+  # Keep the newest 20. Filenames sort chronologically, so sort is the ordering
+  # rather than mtime, which a copy or a restore would rewrite.
+  compgen -G "${LOG_DIR}/bootstrap-*.log" 2>/dev/null |
+    sort -r | tail -n +21 | xargs -r rm -f || true
+
+  # One redirect for the whole process — children inherit these descriptors, so
+  # it captures the vendored CloudStack installer without touching it.
+  #
+  # fd 3 is the terminal branch, which is why colour survives there and not in
+  # the file. NOT `tee >(...)`: nesting hides a process from $!, so
+  # close_transcript could only wait for the outer one. printf '%(...)T' is a
+  # builtin — no fork per line, and no dependency on moreutils' ts or gawk's
+  # strftime, since a fresh Ubuntu defaults to mawk.
+  exec 3>&1
+  exec > >(
+    export TZ=UTC
+    while IFS= read -r line; do
+      printf '%s\n' "${line}" >&3
+      printf '%(%Y-%m-%dT%H:%M:%SZ)T %s\n' -1 "${line}"
+    done | sed -u 's/\x1B\[[0-9;]*[mK]//g' >>"${LOG_FILE}"
+  ) 2>&1
+
+  # Global: close_transcript reads it from a trap, after this function returns.
+  TRANSCRIPT_PID=$!
+  trap close_transcript EXIT
+
+  log "Transcript: ${LOG_FILE}"
+}
+
+# Flush and close the transcript, preserving the exit status. The shell does not
+# wait for its process substitutions, so without this a die can exit while the
+# tail of the log is still in an undrained pipe.
+close_transcript() {
+  local rc=$? # first statement: $? is still the script's status
+
+  # Closing fd 1 and 2 is what gives the writer EOF; without it the wait never
+  # returns. Nothing may write to stdout or stderr below this line.
+  exec 1>&- 2>&-
+  wait "${TRANSCRIPT_PID}" 2>/dev/null || true
+
+  # Explicit, so a line added above can never turn a failed run into exit 0.
+  exit "${rc}"
+}
 
 # Enable NTP and wait up to 60s for the clock to synchronise. Runs first because
 # a skewed clock breaks apt and TLS.
@@ -93,6 +100,7 @@ sync_clock() {
   systemctl restart systemd-timesyncd 2>/dev/null || true
 
   log "Waiting for the clock to synchronise..."
+  local i
   for ((i = 0; i < 60; i++)); do
     if [[ "$(timedatectl show -p NTPSynchronized --value)" == "yes" ]]; then
       log "Clock synchronised: $(date)"
@@ -102,6 +110,80 @@ sync_clock() {
   done
 
   die "Clock did not synchronise within 60s — apt signature validation will fail."
+}
+
+# Give the journal a retention policy before anything noisy writes to it.
+# After sync_clock, because MaxRetentionSec ages entries by their own
+# timestamps; before install_cloudstack, whose output is the history it keeps.
+#
+# journald accepts a drop-in it ignored — a bad section header or a typo'd key
+# reads as "running on defaults", indistinguishable from success. So the checks
+# below assert what the daemon concluded, never the file that was written.
+#
+# ForwardToSyslog is deliberately left as Ubuntu ships it, so every entry is on
+# disk twice (L-2). Revisit when the Docker log driver lands: container output
+# starts being duplicated into /var/log/syslog too.
+configure_journald() {
+  local rendered restarted_at complaints
+
+  # Above the early return: install -d re-asserts the mode on an existing
+  # directory where mkdir -p would not, so a re-run corrects drift.
+  install -d -m 0755 "${JOURNALD_DIR}"
+
+  # `<<-` strips leading TABS only — that is what puts [Journal] at column 0.
+  # Spaces would survive, and an indented section header is not a header.
+  rendered="$(
+    cat <<-'EOF'
+			[Journal]
+			# Storage=auto means "persistent if /var/log/journal exists", and no package
+			# creates that directory — so on a fresh VM the default is a coin flip.
+			Storage=persistent
+
+			# SystemKeepFree guards what is NOT the journal: CloudStack primary and
+			# secondary storage share this disk. MaxRetentionSec is aligned on purpose
+			# with logrotate's `rotate 4, weekly` for /var/log/syslog — do not change
+			# one without the other.
+			SystemMaxUse=2G
+			SystemKeepFree=20G
+			MaxRetentionSec=1month
+		EOF
+  )"
+
+  # Matching content alone is not enough to skip: a run that died after writing
+  # would leave it matching, and the next run would return before checking
+  # anything. Restarting journald pulls the log socket out from under every
+  # service, so the skip has to be real.
+  if [[ -f "${JOURNALD_DROPIN}" && "$(<"${JOURNALD_DROPIN}")" == "${rendered}" && -d /var/log/journal ]]; then
+    log "journald retention already configured"
+    return 0
+  fi
+
+  log "Configuring journald retention..."
+  printf '%s\n' "${rendered}" >"${JOURNALD_DROPIN}"
+  chmod 0644 "${JOURNALD_DROPIN}"
+
+  # Before the restart, so the query below cannot match a complaint the previous
+  # instance made about a previous version of this file.
+  restarted_at="$(date '+%Y-%m-%d %H:%M:%S')"
+  systemctl restart systemd-journald ||
+    die "systemd-journald failed to restart — check 'systemctl status systemd-journald' and ${JOURNALD_DROPIN}."
+
+  # Silence is success: systemd's parser names the offending FILE in every
+  # complaint, so our own path is the pattern rather than error wording upstream
+  # can reword. Captured, not piped into `grep -q`: -q exits on first match, the
+  # producer takes SIGPIPE, and pipefail then reports the pipeline as failed —
+  # so the test would read false on a match and never fire.
+  complaints="$(journalctl -u systemd-journald --since "${restarted_at}" --no-pager 2>/dev/null || true)"
+  if grep -qF "${JOURNALD_DROPIN}" <<<"${complaints}"; then
+    die "journald rejected ${JOURNALD_DROPIN} — see: journalctl -u systemd-journald --since '${restarted_at}'"
+  fi
+
+  # What the parse check cannot see: a file that parses and still leaves storage
+  # volatile, which looks like success until the next reboot throws it away.
+  [[ -d /var/log/journal ]] ||
+    die "journald did not create /var/log/journal — storage is still volatile, so this install will not survive a reboot."
+
+  log "journald retention configured — $(journalctl --disk-usage)"
 }
 
 # Check the host can run KVM guests. Verify-only, and fatal: later phases boot VMs.
@@ -141,11 +223,27 @@ install_cli_tools() {
   log "CLI tools ready"
 }
 
+# Assert Docker is usable, not merely present. Called on BOTH paths of
+# install_docker: `command -v docker` proves a binary exists on PATH and nothing
+# else, and `apt install docker.io` leaves exactly the state it cannot see — a
+# daemon that may be dead and no compose plugin at all. Returning early on the
+# binary alone would mean a half-installed Docker never converges, which is the
+# line at the top of this file claiming more than it delivers.
+verify_docker() {
+  docker info >/dev/null 2>&1 ||
+    die "Docker is installed but the daemon is not responding — check 'systemctl status docker'."
+  docker compose version >/dev/null 2>&1 ||
+    die "Docker is installed but the compose plugin is missing — install docker-compose-plugin."
+
+  log "Docker ready: $(docker --version)"
+}
+
 # Install Docker Engine and the Compose v2 plugin from Docker's own apt
 # repository, then check the daemon actually responds.
 install_docker() {
   if command -v docker >/dev/null 2>&1; then
     log "Docker already installed: $(docker --version)"
+    verify_docker
     return
   fi
 
@@ -154,9 +252,10 @@ install_docker() {
   local codename
   codename="$(. /etc/os-release && echo "${UBUNTU_CODENAME:-$VERSION_CODENAME}")"
 
-  install -m 0755 -d /etc/apt/keyrings
+  install -d -m 0755 /etc/apt/keyrings
   curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
-    -o /etc/apt/keyrings/docker.asc
+    -o /etc/apt/keyrings/docker.asc ||
+    die "Could not fetch Docker's signing key — check egress to download.docker.com."
   chmod a+r /etc/apt/keyrings/docker.asc
 
   tee /etc/apt/sources.list.d/docker.sources >/dev/null <<EOF
@@ -174,16 +273,66 @@ EOF
     docker-ce-cli \
     containerd.io \
     docker-buildx-plugin \
-    docker-compose-plugin
+    docker-compose-plugin ||
+    die "Failed to install Docker packages — check 'apt-get update' output above for the docker.sources repository."
 
   systemctl enable --now docker
+  verify_docker
+}
 
-  docker info >/dev/null 2>&1 ||
-    die "Docker installed but the daemon is not responding — check 'systemctl status docker'."
-  docker compose version >/dev/null 2>&1 ||
-    die "Docker installed but the compose plugin is missing."
+# Point Docker's logs at journald, so container output and systemd unit output
+# share one store, one query tool and one retention policy (L-2). Runs directly
+# after install_docker and before any container exists: LogConfig is baked in at
+# container creation, so anything started under the old driver keeps it until
+# recreated.
+#
+# Wholesale ownership of daemon.json rather than a jq merge — Docker has no
+# conf.d, and T-3 already assumes a fresh VM. That discards a stale
+# insecure-registries entry naming a Gitea this repo has not built, at a
+# hardcoded address 0.4-1 exists to prevent; Phase 4 adds it back derived from
+# bridge_ip().
+#
+# tag "{{.Name}}" is set daemon-wide, so every container is queryable by its own
+# name (journalctl -t vault) with no per-compose configuration. The default is
+# the first 12 characters of the container ID, which changes on every recreate.
+configure_docker() {
+  local rendered stale
 
-  log "Docker ready: $(docker --version)"
+  rendered="$(
+    cat <<-'EOF'
+			{
+			  "log-driver": "journald",
+			  "log-opts": {
+			    "tag": "{{.Name}}"
+			  }
+			}
+		EOF
+  )"
+
+  if [[ -f "${DOCKER_DAEMON_JSON}" && "$(<"${DOCKER_DAEMON_JSON}")" == "${rendered}" ]]; then
+    log "Docker logging already configured"
+    return 0
+  fi
+
+  log "Pointing Docker's logs at journald..."
+  install -d -m 0755 "${DOCKER_DAEMON_JSON%/*}"
+  printf '%s\n' "${rendered}" >"${DOCKER_DAEMON_JSON}"
+  chmod 0644 "${DOCKER_DAEMON_JSON}"
+
+  # Not reloadable: log-driver is not in dockerd's SIGHUP set.
+  systemctl restart docker ||
+    die "Docker failed to restart after writing ${DOCKER_DAEMON_JSON} — malformed JSON is the usual cause. Check 'journalctl -u docker -n 30'."
+
+  [[ "$(docker info --format '{{.LoggingDriver}}' 2>/dev/null)" == "journald" ]] ||
+    die "Docker restarted but its logging driver is not journald — check ${DOCKER_DAEMON_JSON}."
+
+  # A re-run on a live lab is exactly when this matters: those containers still
+  # write json-file and will keep doing so until they are recreated.
+  stale="$(docker ps -aq 2>/dev/null | wc -l)"
+  ((stale == 0)) ||
+    warn "${stale} container(s) predate this change and keep their original log driver; recreate with 'docker compose up -d --force-recreate'."
+
+  log "Docker logging: journald, tagged by container name"
 }
 
 # ---- Services --------------------------------------------------------------
@@ -230,10 +379,13 @@ install_vault() {
 # Run every step, in dependency order.
 main() {
   require_root
-  sync_clock
+  start_transcript
   check_kvm
+  sync_clock
+  configure_journald
   install_cli_tools
   install_docker
+  configure_docker
   install_ca
   install_cloudstack
   install_coredns

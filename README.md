@@ -67,9 +67,9 @@ make fmt        # rewrite files into canonical format
 | | Minimum |
 |---|---|
 | OS | Ubuntu 24.04 LTS, x86_64 |
-| CPU | 16 cores, VT-x/AMD-V enabled |
-| RAM | **32 GB — a hard ceiling, not a target** |
-| Disk | 200 GB+, SSD |
+| CPU | 12 cores, VT-x/AMD-V enabled |
+| RAM | **16 GB — a hard ceiling** |
+| Disk | 200 GB, SSD — the floor, with no margin |
 | Virtualization | `/dev/kvm` present; nested virt on if this host is a VM |
 
 Check the two that stop people first:

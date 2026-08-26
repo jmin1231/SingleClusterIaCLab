@@ -17,8 +17,8 @@ it. Everything you build goes in a new repository of your own.
 | Requirement | Minimum | Why |
 |---|---|---|
 | OS | Ubuntu 24.04 LTS, x86_64 | The CloudStack installer and every package assumption below target it |
-| CPU | 16 cores with VT-x/AMD-V **enabled** | CloudStack runs KVM guests; Packer builds an image with QEMU |
-| RAM | **32 GB — treat as a hard ceiling** | Everything in this plan does not fit at once. Phase 0.5 is where you decide what runs when, and it is not optional |
+| CPU | 12 cores with VT-x/AMD-V **enabled** | CloudStack runs KVM guests; Packer builds an image with QEMU. Not the binding constraint |
+| RAM | **16 GB — a hard ceiling** | Everything in this plan does not fit at once, and at 16 GB it does not fit *mostly*. Phase 0.5 is where you decide what runs when, and it is not optional |
 | Disk | 200 GB+, SSD strongly preferred | Primary and secondary storage, VM disks, and image builds share it |
 | Virtualization | `/dev/kvm` present | If this machine is itself a VM, **nested virtualization must be on** |
 | Privileges | root / sudo | The cloud installer rewrites host networking |
@@ -326,50 +326,51 @@ decide about binding.
 **Done when:** a committed table names every range, marks which are discovered, chosen, or derived,
 and states which parts of the bridge `/24` belong to CloudStack.
 
-### 0.5 The resource budget — 32 GB is the ceiling · `M`
+### 0.5 The resource budget — 16 GB is the ceiling · `M`
 
-Not a paperwork exercise. **Everything in this plan cannot run simultaneously in 32 GB**, so decide
+Not a paperwork exercise. **Everything in this plan cannot run simultaneously in 16 GB**, so decide
 now what runs when, or you will discover it as an out-of-memory event during Phase 14.
 
-Here is the budget to start from. Adjust it as you measure real numbers, but do not skip building
-it — the act of totalling this is the step.
+The full table, the stop-order and the disk budget live in
+[`resource-budget.md`](resource-budget.md) — build it there rather than duplicating it here, because
+a number in two places drifts. What matters at this step is the shape it forces:
 
-| Layer | Component | RAM |
-|---|---|---|
-| Host | Ubuntu + KVM/QEMU overhead | ~2 GB |
-| Cloud | CloudStack management server (JVM) | 2–4 GB |
-| Cloud | MySQL | ~1 GB |
-| Cloud | Secondary storage VM + console proxy | ~2 GB |
-| Cloud | VPC virtual router | ~1 GB |
-| Control plane | Gitea + PostgreSQL | ~0.7 GB |
-| Control plane | MinIO, Vault, CoreDNS, proxy | ~0.6 GB |
-| Control plane | CI runner, idle | ~0.2 GB |
-| Guests | frontend + tunnel tiers | ~2 GB |
-| Guests | backend tier (k3s server) | 8 GB |
-| **Baseline total** | | **~20 GB** |
-| Later | two k3s agents, at 3 GB each | +6 GB |
-| Later | authentik (server, worker, postgres, redis) | +2 GB |
-| Transient | a Packer build in flight | +3–4 GB |
+| | |
+|---|---|
+| Fixed cost — host, CloudStack, its system VMs, the control-plane containers, two small tiers | **~9 GB** |
+| Backend tier — k3s and everything Phases 9–13 put in it | **5 GB** |
+| Reserve — page cache, kernel, burst | **~2 GB** |
+| **Committed** | **~16 GB** |
 
-Baseline leaves roughly 12 GB of headroom. Add the agents and authentik and you are at ~28 GB,
-before page cache and before any CI job runs. A Packer build on top of that is what tips it over.
+There is no headroom. That is the finding, not an accident of rounding — and it is why the rules
+below are constraints on later phases rather than advice.
 
-**Three rules that follow, and they shape later phases:**
+**Five rules that follow, and they shape later phases:**
 
-1. **Size the k3s agents small — 2–3 GB, not like the backend.** Phase 9.2 adds them to make
-   scheduling real, not to add capacity. Two 3 GB agents teach everything two 8 GB agents would.
-2. **Never run an image build with the full estate up.** Phase 6 comes before the agents exist for
-   exactly this reason. If you rebuild an image later, stop the agents first.
-3. **authentik is the last thing on and the first thing off.** It is the largest optional consumer,
-   and Phase 14 is the only phase that needs it running.
+1. **Pin CloudStack's JVM heap** in `/etc/default/cloudstack-management`. An unpinned heap sizes
+   itself against host RAM and will claim GB it does not need — from the tiers.
+2. **The backend tier is 5 GB, and nothing in Phases 9–13 installs at chart defaults.** Prometheus
+   retention, Loki's storage mode and Kyverno's controller count are budget decisions.
+3. **k3s agents (9.2) do not coexist with the full estate.** Size them at ~1 GB, or treat 9.2 as a
+   scheduled exercise: stop things, add agents, observe placement, remove them.
+4. **authentik (14.1) and the monitoring stack (13.x) do not run together.** Phase 14 means
+   stopping monitoring first.
+5. **Never run an image build with the estate up.** Phase 6 comes before the agents exist for
+   exactly this reason. Any rebuild later needs the stop-order applied first.
 
 **Learning:** capacity planning, and the discipline of an explicit stop-order rather than hoping.
 Note that disk is contended the same way: the reference's CI deletes its built images at the end of
-every run *because "the disk is shared with CloudStack"*. On a single host, every resource is shared
-with the hypervisor.
+every run *because "the disk is shared with CloudStack"*. At 200 GB that stops being good practice
+and becomes required. On a single host, every resource is shared with the hypervisor.
 
-**Done when:** you have a budget table with your own numbers, a baseline total under 22 GB, and a
-written stop-order naming what gets shut down first, second and third when you need headroom.
+**Also verify the disk is the size you think.** Subiquity's default LVM layout sizes the root volume
+well below the disk and leaves the rest of the volume group unallocated — the same trap 6.2
+documents for the Packer image, which nobody has applied to the host. `df -h /` and `vgs` before you
+trust any figure.
+
+**Done when:** `resource-budget.md` carries your own measured numbers, the committed total is at or
+under 16 GB with a named reserve, and the stop-order says what gets shut down first, second and
+third.
 
 > **Drill 0** — reboot the host. Everything in Phase 0 should come back untouched.
 
@@ -1222,15 +1223,16 @@ something that silently upgrades itself.
 ### 9.2 Add two agent nodes · `M`
 
 Two more VMs joining as agents — **sized 2–3 GB each, deliberately smaller than the backend.**
-Create a dedicated small service offering rather than reusing the backend's 4 vCPU / 8 GB one.
+Create a dedicated small service offering rather than reusing the backend's.
 
 **Learning:** the join process and the node token. More importantly, scheduling becomes real —
 anti-affinity and topology spread stop being abstract. A single-node cluster silently satisfies
 constraints a real one would not.
 
 **On the sizing, which is a budget decision not a shortcut:** these agents exist to make placement
-observable, not to add capacity, and two 3 GB nodes demonstrate every scheduling concept two 8 GB
-nodes would. At 8 GB each they would put you 6 GB over your 32 GB ceiling before authentik exists.
+observable, not to add capacity. At 16 GB there is no 6 GB to give them: size them at ~1 GB, or
+treat this step as a scheduled exercise — stop what the stop-order stops, add the agents, watch
+placement, remove them. See 0.5 rule 3.
 Small nodes also teach something larger ones hide — you will actually hit resource pressure and see
 how the scheduler responds, which is the behaviour you came for.
 
@@ -1613,7 +1615,7 @@ Server, worker, PostgreSQL and Redis at `sso.lab.test`, bootstrap credentials se
 your `ensure` pattern. Create your groups; integrate nothing yet.
 
 **Free the memory first.** This is four more containers and roughly 2 GB, and by now you are close
-to the 32 GB ceiling. Execute the stop-order from Phase 0.5 before starting it — the usual answer is
+to the 16 GB ceiling. Execute the stop-order from Phase 0.5 before starting it — the usual answer is
 to scale the monitoring stack down or drain and stop one k3s agent for the duration of this phase.
 Two nodes still demonstrate everything Phase 14 needs. Bring it back afterwards.
 
@@ -1787,12 +1789,13 @@ that didn't.
 > drift in them. That is an acceptable trade — reimplementing that installer is not a good use of
 > your time — but it should be a known boundary rather than a surprise.
 
-> **The hard constraint.** 32 GB is a ceiling, not a target. Baseline — CloudStack, its system VMs,
-> the control-plane containers and three tier VMs — is around 20 GB before you have added anything.
-> Two k3s agents and authentik take you to roughly 28 GB, and an image build on top of that is what
-> tips it over. This is why Phase 0.5 produces a stop-order rather than a wish list, why Phase 9.2
-> sizes the agents at 2–3 GB, and why Phase 14.1 opens by telling you to free memory. Treat those
-> three as one decision made in three places.
+> **The hard constraint.** 16 GB is a ceiling, and the fixed cost — CloudStack, its system VMs, the
+> control-plane containers and two small tiers — is around 9 GB before the backend tier exists. That
+> leaves 5 GB for k3s and everything Phases 9–13 put in it, and a 2 GB reserve. There is no headroom
+> at all: the k3s agents and authentik do not fit alongside the estate, and an image build needs the
+> estate stopped. This is why Phase 0.5 produces a stop-order rather than a wish list, why Phase 9.2
+> can no longer just "add two nodes", and why Phase 14.1 opens by telling you to free memory. Treat
+> those three as one decision made in three places.
 
 ---
 

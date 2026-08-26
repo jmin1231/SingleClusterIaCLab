@@ -54,6 +54,22 @@ how it stops working later.
 **Check when the VM exists:** does the LAN's DHCP pool overlap `.11–.50`? If it
 does, either shrink the pool or reserve CloudStack's range on the router.
 
+## What this plan does not contain: reverse DNS
+
+Every row above is a forward mapping. There is no `in-addr.arpa` zone anywhere in
+this lab — CoreDNS is authoritative for `lab.test` and nothing answers a PTR
+query for any address in it.
+
+That has cost nothing so far, and it is worth understanding why: forward-only DNS
+is invisible until something resolves an address back to a name and compares the
+answer to what it expected. Nothing here does that yet. The things that would:
+Kerberos, which derives service principals from hostnames and fails with an error
+naming the *principal* rather than the DNS (see 14.0-1); `sshd`'s `UseDNS`; and
+TLS clients that log peer names.
+
+Recorded for the same reason rows 4 and 5 are: a mapping nothing configures is a
+mapping nobody remembers is absent.
+
 ## Overlap check
 
 The three ranges that allocate **automatically**, and therefore collide silently:

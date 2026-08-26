@@ -1563,6 +1563,50 @@ so its event log is the only record of changes to the zone.
 Every prerequisite is in place — names resolve everywhere including inside the cluster, TLS is
 universal, clocks are synchronised since Phase 0.3, and your CA is already in the JVM truststore.
 
+### 14.0 Directory services, and the plane this lab does not have · `L` — optional
+
+> **Not scheduled — see decision 14.0-1.** Recorded here so the gap is visible in
+> the syllabus rather than only in the decision log. Gated on memory: FreeIPA
+> without Dogtag is 1.5–2 GB against a ceiling the estate already reaches at ~28.
+
+There are three identity planes, and Phase 14 as written delivers one. authentik is
+OIDC/SAML for **applications** — it has no KDC, no machine enrolment, no host keytabs, and a VM
+cannot be joined to it. Vault covers **workload** identity. What is missing is **host** identity:
+central accounts, central sudo, and machines that can authenticate as themselves. That is what
+Active Directory is, and what FreeIPA or a Samba AD DC would supply.
+
+Stand up FreeIPA with `--no-ca` on its own guest — it is RHEL-family and will not run on this
+Ubuntu host — then `realm join` the three tier VMs from the Phase 8 base role.
+
+**Learning:** what a *domain* is, as distinct from a user database. LDAP is the directory;
+Kerberos is the authentication; the pair is what makes a machine a member rather than a client. A
+joined host holds a principal (`host/backend.lab.test@LAB.TEST`) and a keytab, and authenticates
+**as itself** — the same idea as a Vault AppRole or a Kubernetes ServiceAccount, one layer down.
+Then: `id alice` with no local account, `kinit` once for SSO across every joined host, sudo rules
+from the directory, and HBAC expressing which humans reach which tier — which the
+frontend/tunnel/backend split makes a real question rather than an exercise.
+
+**Three prerequisites that are not obvious**, and two of them are gaps today:
+
+- **`SRV` records.** Clients discover the KDC through `_kerberos._udp`, `_ldap._tcp`,
+  `_kpasswd._udp`. The zone is A records only.
+- **Reverse DNS.** Kerberos derives service principals from hostnames and reverse-resolves them.
+  There is no `in-addr.arpa` zone anywhere in this lab, and the failure names the principal rather
+  than the DNS — so the search starts in the wrong place. See the open question in `decisions.md`.
+- **The clock, promoted from hygiene to load-bearing.** Kerberos rejects tickets outside five
+  minutes of skew. Phase 0.3 warned the clock would return "with certificates, JWTs and SAML
+  assertions"; Kerberos is the least forgiving item on that list.
+
+**The cheap version, and what it costs:** authentik's LDAP outpost serving POSIX attributes to
+SSSD. Central users, groups and sudo for roughly no extra memory, from a component already being
+built — and no Kerberos, so no tickets, no SSO, no keytabs. It teaches nsswitch, PAM and SSSD. It
+does not teach why a domain differs from a user database.
+
+**Done when:** `realm list` on the backend tier shows the domain, `id` resolves a directory user
+with no local account, and `kinit` on your workstation gets you into all three tiers with no
+password — or, if you take the cheap version, when `decisions.md` says plainly which half is
+missing.
+
 ### 14.1 Stand up authentik · `L` — split: stack up, then groups and flows
 
 Server, worker, PostgreSQL and Redis at `sso.lab.test`, bootstrap credentials seeded into Vault via

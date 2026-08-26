@@ -48,6 +48,21 @@ above the history so that appending a decision never has to step around them.
   Sentinel comments around every appended block would settle it; whether that is
   worth patching the vendored installer for is the open part.
 
+- **There is no reverse DNS anywhere in the lab.** — Phase 2.1 owns the zone;
+  14.0-1 is what made the absence matter. `lab.test.zone.tmpl` is A records only,
+  CoreDNS serves no `in-addr.arpa` zone, and `network-plan.md` does not mention
+  PTR records at all. Nothing has needed them yet, which is exactly why it went
+  unnoticed: forward-only DNS is invisible until something does a reverse lookup
+  and compares the answer.
+
+  Kerberos is that something, and it is not the only one. Service principals are
+  derived from hostnames, and a mismatched or absent PTR surfaces as an error
+  naming the *principal*, so the search starts in Kerberos and the fault is in
+  DNS. Outside Kerberos: `sshd`'s `UseDNS`, some TLS clients logging peer names,
+  and mail-shaped software all do it. Settle it if 14.0-1 is ever built, and
+  record it now either way — a range nothing configures is the same class of
+  problem 0.4's "derived" rows exist for.
+
 ---
 
 ## 0.2-1 · Repository layout is organised by tool
@@ -2379,3 +2394,95 @@ of the three directories the image's entrypoint chowns even when running as root
 — that list is `/vault/config`, `/vault/logs`, `/vault/file`. So storage
 ownership is the host's job regardless of the `user:` pin, which removed the last
 reason to consider dropping the pin. See 3.1-1.
+
+---
+
+## 14.0-1 · Directory services are a third identity plane, and the lab has none
+
+**Not scheduled.** This entry settles the *shape* of the thing and where it would
+go, so that the gap is a decision rather than an oversight. Building it is gated
+on the resource question below.
+
+**Decided, and it is the part worth having in writing: authentik is not a
+directory service.** authentik and Keycloak are OIDC/SAML providers for
+*applications* — browser SSO into Grafana, Gitea, the CloudStack UI. They have no
+KDC, no machine enrolment, no host keytabs. A VM cannot be joined to authentik.
+Phase 14 is called "Identity" and delivers one plane of three:
+
+| Plane | Principal → resource | Mechanism | Phase |
+|---|---|---|---|
+| Application SSO | humans → apps | OIDC / SAML | 14, authentik |
+| Workload identity | services → secrets, PKI | AppRole, k8s auth | 3.x, 11.x, Vault |
+| **Host identity** | **humans + machines → hosts** | **LDAP + Kerberos** | **absent** |
+
+The third is what Active Directory is, and what FreeIPA or a Samba AD DC would
+supply. Today the tier VMs have local accounts reached over SSH keys placed by
+Ansible: no central account, no central sudo policy, and no answer to "who may
+log into the backend tier" other than who holds a key.
+
+**What Active Directory actually bundles**, because conflating these is where the
+confusion starts: an LDAP directory (users, groups, computers), a Kerberos KDC
+(tickets, SSO), DNS (clients discover controllers through `SRV` records), and
+Group Policy. Optionally ADCS for PKI. What makes it a *domain* rather than a
+directory is that **machines get identities too** — the same idea as an AppRole
+or a ServiceAccount, one layer down.
+
+**What "realm join" means concretely.** The host gets a principal —
+`host/backend.lab.test@LAB.TEST` — and a keytab at `/etc/krb5.keytab` proving it.
+After that: `id alice` resolves with no local account, `ssh alice@backend`
+authenticates against the KDC rather than `/etc/shadow`, one `kinit` gives SSO to
+every joined host over GSSAPI, sudo rules come from the directory, and HBAC can
+express which humans reach which tier — which is a genuinely interesting thing to
+have given the frontend/tunnel/backend split already exists.
+
+**Decided, if built: FreeIPA with `--no-ca`, on its own VM, at 14.0.**
+
+- **`--no-ca`.** FreeIPA ships Dogtag, its own CA, and 3.4-1 has already made
+  Vault the issuing CA. The alternative — `--external-ca`, chaining Dogtag to the
+  offline root as a *third* sibling intermediate — works and is defensible, and
+  it means two issuing CAs to reason about for no lesson that 3.4 does not
+  already teach. Dropping Dogtag also removes roughly 1 GB and a JVM.
+- **Its own VM, not a container on the host.** FreeIPA expects systemd, and a
+  domain controller running on the hypervisor is not how anyone deploys one. It
+  also does not package for Ubuntu — it is RHEL-family — so this host cannot run
+  the server regardless. A Rocky or Fedora guest in the zone is both the workable
+  option and the realistic one. Samba AD DC is the alternative that *does* run
+  here and speaks AD's own protocols, at under 1 GB.
+- **14.0, before authentik.** Phase 14's preamble already assumes clocks are
+  synchronised and TLS is universal, which is most of the prerequisite. It also
+  puts the two planes side by side, where the distinction is easiest to see, and
+  authentik can federate against the directory rather than duplicating it.
+
+**Rejected as the primary answer, but recorded because it is the cheap version:**
+authentik's LDAP outpost serving POSIX attributes, consumed by SSSD on the tier
+VMs. That buys central users, groups and sudo for about zero extra memory, from a
+component already being built. What it skips is Kerberos — no tickets, no SSO, no
+host keytabs, no GSSAPI. Per 0.2-8 that gap is named rather than papered over:
+**LDAP is the directory, Kerberos is the authentication, and the pair is what a
+domain means.** The cheap version teaches nsswitch, PAM and SSSD; it does not
+teach why a domain differs from a user database.
+
+**Four obstacles, all real:**
+
+1. **`SRV` records.** Clients find the KDC through `_kerberos._udp.lab.test`,
+   `_ldap._tcp.lab.test`, `_kpasswd._udp`. The zone is A records only. Addable —
+   we own it — but FreeIPA normally wants to run DNS itself, so the choice is
+   between adding the records by hand and delegating a subdomain to it.
+2. **Reverse DNS does not exist.** See the open question above. Kerberos derives
+   service principals from hostnames and reverse-resolves; a missing PTR fails
+   with an error naming the principal, so the search starts in the wrong place.
+3. **Time stops being hygiene.** Kerberos rejects tickets outside five minutes of
+   skew. 0.3 already installs chrony and build-order already warns the clock will
+   return "with certificates, JWTs and SAML assertions" — Kerberos belongs on
+   that list and is the least forgiving item on it.
+4. **Memory, which is what gates this.** Baseline is ~20 GB; agents and authentik
+   put it near 28. FreeIPA without Dogtag is 1.5–2 GB and pushes past the
+   ceiling. So this needs a stop-order line in `resource-budget.md` before it
+   needs a single line of code, and the honest options are a Samba AD DC instead,
+   or accepting that 14.0 and 14.1 never run at the same time.
+
+**Why record an unscheduled phase at all.** Because "the lab has no host identity"
+currently reads as a thing nobody thought of, and it is not — it is a plane that
+costs 2 GB against a hard ceiling, on a host that cannot run the server anyway.
+That is a decision, and 0.2-8 says name what is being skipped rather than let the
+scaled-down version pass as complete.

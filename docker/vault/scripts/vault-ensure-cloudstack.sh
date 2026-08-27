@@ -34,6 +34,7 @@ source "${SOURCE_SCRIPT}/../../../cloudstack/scripts/cloudmonkey-install.sh"
 # KV v2, so the CLI path is secret/cloudstack/admin-api and the API path — the
 # one a policy must name — is secret/data/cloudstack/admin-api (3.2).
 SECRET_PATH="secret/cloudstack/admin-api"
+ADMIN_PATH="secret/cloudstack/admin"
 
 # What Vault holds, or empty. Not an error when absent — that is the first run.
 stored_key() {
@@ -69,6 +70,14 @@ seed() {
 main() {
   require_root
   vault_authenticate
+  # cmk authenticates by password to reach getUserKeys, and after
+  # vault-ensure-cloudstack-admin.sh has run the shipped default no longer works.
+  # Prefer Vault's copy; fall back to the default so a fresh host still works
+  # before that script has ever run.
+  CLOUDSTACK_ADMIN_PASS="$(vault_field "${ADMIN_PATH}" password)"
+  [[ -n "${CLOUDSTACK_ADMIN_PASS}" ]] || CLOUDSTACK_ADMIN_PASS="password"
+  export CLOUDSTACK_ADMIN_PASS
+
   cmk_configure
 
   local stored live

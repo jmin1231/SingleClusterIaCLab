@@ -366,9 +366,15 @@ COREDNS_INSTALLER="${SOURCE_SCRIPT}/docker/coredns/coredns-installer.sh"
 VAULT_INSTALLER="${SOURCE_SCRIPT}/docker/vault/vault-installer.sh"
 VAULT_CONFIGURE="${SOURCE_SCRIPT}/docker/vault/scripts/vault-configure.sh"
 VAULT_ENSURE_CS="${SOURCE_SCRIPT}/docker/vault/scripts/vault-ensure-cloudstack.sh"
+VAULT_ENSURE_CS_ADMIN="${SOURCE_SCRIPT}/docker/vault/scripts/vault-ensure-cloudstack-admin.sh"
+VAULT_ENSURE_CS_SVC="${SOURCE_SCRIPT}/docker/vault/scripts/vault-ensure-cloudstack-svc.sh"
+VAULT_ENSURE_GITEA="${SOURCE_SCRIPT}/docker/vault/scripts/vault-ensure-gitea.sh"
+GITEA_INSTALLER="${SOURCE_SCRIPT}/docker/gitea/gitea-installer.sh"
 PROXY_INSTALLER="${SOURCE_SCRIPT}/docker/proxy/proxy-installer.sh"
 for script in "${CA_INSTALLER}" "${CLOUDSTACK_INSTALLER}" "${COREDNS_INSTALLER}" \
   "${VAULT_INSTALLER}" "${VAULT_CONFIGURE}" "${VAULT_ENSURE_CS}" \
+  "${VAULT_ENSURE_CS_ADMIN}" "${VAULT_ENSURE_CS_SVC}" "${VAULT_ENSURE_GITEA}" \
+  "${GITEA_INSTALLER}" \
   "${PROXY_INSTALLER}"; do
   [[ -x "${script}" ]] || die "Missing or not executable: ${script}"
 done
@@ -425,6 +431,34 @@ ensure_cloudstack_secret() {
   "${VAULT_ENSURE_CS}"
 }
 
+# Move CloudStack's admin off its shipped default and into Vault. AFTER
+# ensure_cloudstack_secret: capturing the API key needs a working password
+# login, and this is what stops that password being the documented default.
+# admin stays enabled as break-glass (14.5); nothing automated uses it.
+ensure_cloudstack_admin() {
+  "${VAULT_ENSURE_CS_ADMIN}"
+}
+
+# A CloudStack identity for automation, so Terraform never authenticates as
+# admin (7.1). createAccount rather than createUser: the role, resource
+# ownership and event-log attribution all live on the ACCOUNT, so a user inside
+# admin's account would be a second key to the same identity. Root Admin for
+# now, narrowed at 7.1 once the consumer can show which APIs it calls.
+ensure_cloudstack_svc() {
+  "${VAULT_ENSURE_CS_SVC}"
+}
+
+# Generate Gitea's database and admin passwords IN Vault, before Gitea exists —
+# 4.1's other direction, where Vault is the origin rather than the capturer.
+ensure_gitea_secret() {
+  "${VAULT_ENSURE_GITEA}"
+}
+
+# Gitea and its database, reading those credentials back out of Vault.
+install_gitea() {
+  "${GITEA_INSTALLER}"
+}
+
 # Run the proxy installer: issue a certificate from Vault's PKI engine, render
 # the vhost against the discovered bridge address, start nginx. Last, and after
 # configure_vault, because the certificate comes from pki/issue/lab-server —
@@ -460,6 +494,10 @@ main() {
   install_vault
   configure_vault
   ensure_cloudstack_secret
+  ensure_cloudstack_admin
+  ensure_cloudstack_svc
+  ensure_gitea_secret
+  install_gitea
   install_proxy
 }
 

@@ -2939,3 +2939,54 @@ reading the sibling all-in-one scripts first turned up a stronger answer, a sing
 validation loop at file scope that fails **before anything runs**. Waiting until
 duplication causes something has now twice produced a better abstraction than
 acting on the count.
+
+---
+
+## L-6 · Loki runs in the backend tier; Alloy runs on both sides; Wazuh is rejected on budget
+
+**Decided:** at 13.2, Loki runs **inside the backend tier** in single-binary mode
+with filesystem storage (~0.5 GB, already in the budget). Alloy runs in **two**
+places: one in k3s for pod logs (~0.15 GB, budgeted) and one **on the host VM**
+scraping journald (~0.15 GB, *not* previously budgeted — the Control plane line
+goes ~1.5 → ~1.65 GB). Wazuh is not deployed.
+
+Extends [L-3](#l-3--nothing-ships-anywhere-until-132-and-the-transcript-never-ships-itself),
+which deferred shipping without saying where the collector would live.
+
+**The host agent is nearly free because of [L-2](#l-2--runtime-logs-land-in-journald-containers-included).**
+Docker's `log-driver: journald` with `tag: {{.Name}}` already puts Vault, Gitea,
+CoreDNS and the proxy in journald. One Alloy scraping journald therefore collects
+the bootstrap transcript *and* every container with no per-container
+configuration. Had the containers been left on `json-file`, this would have meant
+a file-discovery config per service — the second time L-2 has paid for itself.
+
+**journald stays the host's primary sink, not a way-station.** Loki lives in the
+backend tier, and the backend tier is a thing that can fail — at which point Loki
+is where you would look to find out why. The 2 GB `SystemMaxUse` cap
+([L-5](#l-5--journald-retention-as-built-and-three-findings)) means host-side
+forensics survive losing the cluster. Ship *and* retain; never ship *and* forget.
+This is [1.3-6](#13-6) again: a record must not depend on the thing it records.
+
+**Rejected: Wazuh, on arithmetic rather than merit.** The agent/server split is
+the right shape and the agents are cheap (~100 MB each). The server stack is not:
+the indexer is an OpenSearch fork wanting ~4 GB on its own. The backend tier is
+5 GB *in total* and already allocated, so a Wazuh server there evicts Prometheus,
+Loki, Grafana and Kyverno to run one scanner. On the host it takes ~4 GB from a
+2 GB reserve. Neither is a tuning problem, and
+[rule 4](resource-budget.md) already establishes that even the ~2 GB monitoring
+stack cannot coexist with authentik.
+
+**The escape hatch, named so it is not rediscovered:** a Wazuh server on the
+*development host* (125 GB) with agents reporting outward is architecturally
+clean and is how it would really be done. It is rejected because the lab must be
+runnable on a fresh VM ([0.2-1](#02-1)), and this would make it depend on
+something outside itself. Revisit only if that requirement is dropped.
+
+**What replaces it, and what is genuinely lost.** Trivy at build time gates the
+template; `unattended-upgrades` baked into the image handles drift afterwards;
+`apt list --upgradable` as a Prometheus textfile metric (~0 MB) answers "which
+VMs have pending security updates" on the Grafana already being built. That is
+most of Wazuh's vulnerability value at zero residency. **Not** covered: file
+integrity monitoring, and CIS/SCA benchmark scoring. Those are real gaps and are
+recorded here as gaps rather than quietly treated as covered — per
+[0.2-8](#02-8--the-lab-mimics-enterprise-practice-and-names-what-it-is-skipping).

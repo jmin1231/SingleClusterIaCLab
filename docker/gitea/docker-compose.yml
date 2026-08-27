@@ -1,0 +1,65 @@
+---
+# Gitea and its database. Behind the proxy at gitea.lab.test — Gitea itself
+# speaks plain HTTP on :3000 and never sees a certificate.
+#
+# Credentials come from .env, which gitea-installer.sh renders by reading Vault.
+# Nothing here has a default: a compose file with a fallback password is how a
+# lab ends up authenticating with one.
+name: gitea
+
+services:
+  db:
+    # Pinned by digest — see docker/vault/docker-compose.yml.
+    image: postgres:17-alpine@sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73
+    container_name: gitea-db
+    restart: unless-stopped
+    environment:
+      - POSTGRES_DB=${GITEA_DB_NAME:?rendered into .env by gitea-installer.sh}
+      - POSTGRES_USER=${GITEA_DB_USER:?rendered into .env by gitea-installer.sh}
+      - POSTGRES_PASSWORD=${GITEA_DB_PASSWORD:?rendered into .env by gitea-installer.sh}
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+    # Gitea retries a missing database, but the first-run schema creation does
+    # not — so the dependency is on readiness, not on the container existing.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${GITEA_DB_USER} -d ${GITEA_DB_NAME}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    logging:
+      options:
+        tag: gitea-db
+
+  gitea:
+    image: gitea/gitea:1.24-rootless@sha256:a664a64d7740ef0db74f090f567040d0e5b34592473aad08ed5e296ccbe00eab
+    container_name: gitea
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      # ROOT_URL is https because the PROXY genuinely terminates TLS (2.5). The
+      # reference lab had to set http here, and its comment says why: with TLS
+      # reverted, an https ROOT_URL marks cookies Secure and the login silently
+      # loops. The setting is only correct because the thing in front of it is.
+      - GITEA__server__ROOT_URL=https://gitea.lab.test/
+      - GITEA__server__DOMAIN=gitea.lab.test
+      - GITEA__server__SSH_DOMAIN=gitea.lab.test
+      - GITEA__database__DB_TYPE=postgres
+      - GITEA__database__HOST=db:5432
+      - GITEA__database__NAME=${GITEA_DB_NAME:?}
+      - GITEA__database__USER=${GITEA_DB_USER:?}
+      - GITEA__database__PASSWD=${GITEA_DB_PASSWORD:?}
+      # No open registration and no installer page: this instance is configured
+      # by script, and a reachable /install is an unauthenticated setup wizard.
+      - GITEA__security__INSTALL_LOCK=true
+      - GITEA__service__DISABLE_REGISTRATION=true
+    ports:
+      # Bound to the bridge, not 0.0.0.0: the only thing that should reach Gitea
+      # directly is the proxy on the same host. Everything else goes via :443.
+      - "${CLOUDBR0_IP:?rendered into .env by gitea-installer.sh}:3000:3000"
+    volumes:
+      - ./data/gitea:/var/lib/gitea
+    logging:
+      options:
+        tag: gitea

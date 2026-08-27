@@ -17,69 +17,62 @@ set -euo pipefail
 SOURCE_SCRIPT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=/dev/null
 source "${SOURCE_SCRIPT}/../../lib/common.sh"
+# shellcheck source=/dev/null
+source "${SOURCE_SCRIPT}/../../lib/vault.sh"
 
 COMPOSE="${SOURCE_SCRIPT}/docker-compose.yml"
 CONF_TMPL="${SOURCE_SCRIPT}/conf/default.conf.tmpl"
 CONF="${SOURCE_SCRIPT}/conf/default.conf"
 CERT_DIR="${SOURCE_SCRIPT}/certs"
-CRT="${CERT_DIR}/cloudstack.crt"
-KEY="${CERT_DIR}/cloudstack.key"
 
-VAULT_COMPOSE="${SOURCE_SCRIPT}/../vault/docker-compose.yml"
-VAULT_INIT="${SOURCE_SCRIPT}/../vault/secrets/vault-init.json"
 PKI_ROLE="lab-server"
-PROXY_CN="cloudstack.lab.test"
+# Every name this proxy serves. One certificate each, one server block each.
+PROXY_NAMES=(cloudstack.lab.test gitea.lab.test)
 
 # Reissue when fewer than this many seconds remain. 7 days against the role's
 # 30-day ceiling: enough slack that a re-run inside the window is a no-op, and
 # enough margin that a lab left alone for a week still comes back working.
 RENEW_BEFORE=$((7 * 24 * 3600))
 
-vault_() {
-  docker compose -f "${VAULT_COMPOSE}" exec -T -e VAULT_TOKEN vault vault "$@"
-}
-
-authenticate() {
-  [[ -r "${VAULT_INIT}" ]] ||
-    die "Cannot read ${VAULT_INIT}. Vault must be installed and configured before the proxy — bootstrap.sh runs both first."
-  VAULT_TOKEN="$(jq -r '.root_token // empty' "${VAULT_INIT}")"
-  [[ -n "${VAULT_TOKEN}" ]] || die "${VAULT_INIT} holds no root_token."
-  export VAULT_TOKEN
-}
-
 # Present is not the same as usable: a certificate can exist and be expired, or
 # be for the wrong name. Checked rather than assumed, so a re-run repairs.
 cert_usable() {
-  [[ -s "${CRT}" && -s "${KEY}" ]] || return 1
-  openssl x509 -in "${CRT}" -noout -checkend "${RENEW_BEFORE}" >/dev/null 2>&1 || return 1
-  openssl x509 -in "${CRT}" -noout -checkhost "${PROXY_CN}" >/dev/null 2>&1
+  local crt="${CERT_DIR}/$1.crt"
+  [[ -s "${crt}" && -s "${CERT_DIR}/$1.key" ]] || return 1
+  openssl x509 -in "${crt}" -noout -checkend "${RENEW_BEFORE}" >/dev/null 2>&1 || return 1
+  openssl x509 -in "${crt}" -noout -checkhost "$1" >/dev/null 2>&1
 }
 
 issue_cert() {
-  if cert_usable; then
-    log "Certificate for ${PROXY_CN} is current; not reissuing"
+  local cn="$1" crt="${CERT_DIR}/$1.crt" key="${CERT_DIR}/$1.key" json
+  if cert_usable "${cn}"; then
+    log "Certificate for ${cn} is current; not reissuing"
     return 0
   fi
 
-  local json
-  json="$(vault_ write -format=json "pki/issue/${PKI_ROLE}" common_name="${PROXY_CN}" 2>/dev/null)" ||
-    die "Vault would not issue for ${PROXY_CN}. Is the ${PKI_ROLE} role present? Run docker/vault/scripts/vault-configure.sh."
+  json="$(vault_ write -format=json "pki/issue/${PKI_ROLE}" common_name="${cn}" 2>/dev/null)" ||
+    die "Vault would not issue for ${cn}. Is the ${PKI_ROLE} role present? Run docker/vault/scripts/vault-configure.sh."
 
   install -d -m 0755 "${CERT_DIR}"
   # Key first and restrictive: it must never exist world-readable, not even
-  # briefly. nginx's master process reads it as root before dropping privileges.
+  # briefly. nginx's master reads it as root before dropping privileges.
   (
     umask 077
-    jq -r '.data.private_key' <<<"${json}" >"${KEY}"
+    jq -r '.data.private_key' <<<"${json}" >"${key}"
   )
-  chmod 0400 "${KEY}"
+  chmod 0400 "${key}"
 
-  # Leaf + issuing CA, in that order: a client that trusts only the root must be
+  # Leaf + issuing CA, in that order: a client trusting only the root must be
   # able to build the path from what the server sends.
-  jq -r '.data.certificate, .data.ca_chain[]' <<<"${json}" >"${CRT}"
-  chmod 0444 "${CRT}"
+  jq -r '.data.certificate, .data.ca_chain[]' <<<"${json}" >"${crt}"
+  chmod 0444 "${crt}"
 
-  log "Issued ${PROXY_CN}, valid until $(openssl x509 -in "${CRT}" -noout -enddate | cut -d= -f2)"
+  log "Issued ${cn}, valid until $(openssl x509 -in "${crt}" -noout -enddate | cut -d= -f2)"
+}
+
+issue_certs() {
+  local cn
+  for cn in "${PROXY_NAMES[@]}"; do issue_cert "${cn}"; done
 }
 
 render_conf() {
@@ -90,7 +83,7 @@ render_conf() {
   # a shell local. Same pattern as coredns-installer.sh:41.
   # shellcheck disable=SC2016  # the quotes are intentional: this is the allow-list
   CLOUDBR0_IP="${bridge}" envsubst '${CLOUDBR0_IP}' <"${CONF_TMPL}" >"${CONF}"
-  log "Rendered vhost: ${PROXY_CN} -> ${bridge}:8080"
+  log "Rendered vhosts for ${#PROXY_NAMES[@]} names against ${bridge}"
 }
 
 start_proxy() {
@@ -111,13 +104,13 @@ start_proxy() {
   docker compose -f "${COMPOSE}" exec -T proxy nginx -s reload >/dev/null 2>&1 ||
     die "nginx would not reload. See: docker logs proxy"
 
-  log "Proxy up. Verify: curl --cacert ca/root/root-ca.crt https://${PROXY_CN}/client/"
+  log "Proxy up for: ${PROXY_NAMES[*]}"
 }
 
 main() {
   require_root
-  authenticate
-  issue_cert
+  vault_authenticate
+  issue_certs
   render_conf
   start_proxy
 }

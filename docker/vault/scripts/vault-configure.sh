@@ -12,10 +12,9 @@ VAULT_DIR="${SOURCE_SCRIPT}/.."
 
 # shellcheck source=/dev/null
 source "${SOURCE_SCRIPT}/../../../lib/common.sh"
+# shellcheck source=/dev/null
+source "${SOURCE_SCRIPT}/../../../lib/vault.sh"
 
-# One level up: this script lives in scripts/, its service does not.
-COMPOSE="${VAULT_DIR}/docker-compose.yml"
-INIT_FILE="${VAULT_DIR}/secrets/vault-init.json"
 ROOT_CRT="${SOURCE_SCRIPT}/../../../ca/root/root-ca.crt"
 SIGNER="${SOURCE_SCRIPT}/../../../ca/scripts/sign-vault-intermediate.sh"
 
@@ -51,33 +50,11 @@ PKI_CRL_URL="https://vault.lab.test:8200/v1/pki/crl"
 
 # --- Helpers ------------------------------------------------------------------
 
-# -e VAULT_TOKEN with no value passes it through from the environment; writing
-# -e VAULT_TOKEN=$TOKEN would put the token in argv, where ps shows it (2.3-5).
-vault_() {
-  docker compose -f "${COMPOSE}" exec -T -e VAULT_TOKEN vault vault "$@"
-}
-
 mounted() {
   vault_ secrets list -format=json 2>/dev/null | jq -e --arg p "$1/" 'has($p)' >/dev/null
 }
 
 # --- Steps --------------------------------------------------------------------
-
-# The root token is the only credential that exists at this point, which is the
-# honest reason to use it and not a good one — 3.2's lesson is that a lab using
-# only the root token has installed a very expensive text file. Every consumer
-# after this gets a scoped token or an AppRole.
-authenticate() {
-  [[ -r "${INIT_FILE}" ]] ||
-    die "Cannot read ${INIT_FILE}. Run docker/vault/vault-installer.sh first; bootstrap.sh runs it before this."
-
-  VAULT_TOKEN="$(jq -r '.root_token // empty' "${INIT_FILE}")"
-  [[ -n "${VAULT_TOKEN}" ]] || die "${INIT_FILE} holds no root_token."
-  export VAULT_TOKEN
-
-  vault_ status >/dev/null 2>&1 ||
-    die "Vault is not answering, or is sealed. Run docker/vault/scripts/vault-unseal.sh."
-}
 
 # First, before anything worth reading is stored (3.3). Vault stops serving
 # requests if it cannot write this file, so vault-installer.sh owns the
@@ -193,7 +170,7 @@ ensure_pki_role() {
 
 main() {
   require_root
-  authenticate
+  vault_authenticate
   ensure_audit
   ensure_kv
   ensure_pki

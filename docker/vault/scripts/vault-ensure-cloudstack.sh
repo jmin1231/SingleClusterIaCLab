@@ -27,27 +27,13 @@ VAULT_DIR="${SOURCE_SCRIPT}/.."
 # shellcheck source=/dev/null
 source "${SOURCE_SCRIPT}/../../../lib/common.sh"
 # shellcheck source=/dev/null
+source "${SOURCE_SCRIPT}/../../../lib/vault.sh"
+# shellcheck source=/dev/null
 source "${SOURCE_SCRIPT}/../../../cloudstack/scripts/cloudmonkey-install.sh"
-
-COMPOSE="${VAULT_DIR}/docker-compose.yml"
-INIT_FILE="${VAULT_DIR}/secrets/vault-init.json"
 
 # KV v2, so the CLI path is secret/cloudstack/admin-api and the API path — the
 # one a policy must name — is secret/data/cloudstack/admin-api (3.2).
 SECRET_PATH="secret/cloudstack/admin-api"
-
-vault_() {
-  docker compose -f "${COMPOSE}" exec -T -e VAULT_TOKEN vault vault "$@"
-}
-
-authenticate() {
-  [[ -r "${INIT_FILE}" ]] ||
-    die "Cannot read ${INIT_FILE}. Vault must be installed and configured first."
-  VAULT_TOKEN="$(jq -r '.root_token // empty' "${INIT_FILE}")"
-  [[ -n "${VAULT_TOKEN}" ]] || die "${INIT_FILE} holds no root_token."
-  export VAULT_TOKEN
-  vault_ status >/dev/null 2>&1 || die "Vault is not answering, or is sealed. Run docker/vault/scripts/vault-unseal.sh."
-}
 
 # What Vault holds, or empty. Not an error when absent — that is the first run.
 stored_key() {
@@ -82,7 +68,7 @@ seed() {
 # still using. So it refuses, and names the reseed path.
 main() {
   require_root
-  authenticate
+  vault_authenticate
   cmk_configure
 
   local stored live

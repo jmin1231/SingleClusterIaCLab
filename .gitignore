@@ -110,3 +110,7 @@ docker/vault/.env
 # rendered vhost, which carries the discovered bridge address.
 docker/proxy/certs/
 docker/proxy/conf/default.conf
+
+# Gitea's rendered credentials and its data. Both generated, never committed.
+docker/gitea/.env
+docker/gitea/data/

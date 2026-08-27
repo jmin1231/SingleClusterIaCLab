@@ -202,7 +202,7 @@ configure_journald() {
   log "journald retention configured — $(journalctl --disk-usage)"
 }
 
-# Check the host can run KVM guests. Verify-only, and fatal: later phases boot VMs.
+# Verify-only, and fatal: later phases boot VMs.
 check_kvm() {
   log "Checking hardware virtualization..."
 
@@ -214,8 +214,6 @@ check_kvm() {
   log "KVM available: $(grep -Eom1 '(vmx|svm)' /proc/cpuinfo) flag present, /dev/kvm ready"
 }
 
-# Install the CLI tools later steps use: curl, jq, envsubst, openssl and
-# ca-certificates. Installs only what is missing.
 install_cli_tools() {
   local missing=()
   command -v curl >/dev/null 2>&1 || missing+=(curl)
@@ -254,8 +252,7 @@ verify_docker() {
   log "Docker ready: $(docker --version)"
 }
 
-# Install Docker Engine and the Compose v2 plugin from Docker's own apt
-# repository, then check the daemon actually responds.
+# From Docker's own apt repository, not Ubuntu's.
 install_docker() {
   if command -v docker >/dev/null 2>&1; then
     log "Docker already installed: $(docker --version)"
@@ -392,15 +389,14 @@ install_ca() {
   "${CA_INSTALLER}"
 }
 
-# Run the CloudStack all-in-one installer, which also creates the cloudbr0 bridge.
+# The all-in-one installer also creates the cloudbr0 bridge.
 install_cloudstack() {
   log "Running the CloudStack all-in-one installer (this takes a while)..."
   "${CLOUDSTACK_INSTALLER}"
   log "CloudStack installed; cloudbr0 is up."
 }
 
-# Run the CoreDNS installer: renders its config, starts the container, and points
-# the host resolver at it. After CloudStack, whose bridge it binds to.
+# After CloudStack, whose bridge it binds to.
 install_coredns() {
   "${COREDNS_INSTALLER}"
 }
@@ -468,7 +464,6 @@ install_proxy() {
   "${PROXY_INSTALLER}"
 }
 
-# Run every step, in dependency order.
 main() {
   require_root
   start_transcript

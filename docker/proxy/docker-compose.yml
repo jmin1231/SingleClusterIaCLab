@@ -1,7 +1,7 @@
 ---
 # The lab's edge terminator. One nginx holding certificates issued by Vault's PKI
 # engine, routing by Host header to services that cannot terminate TLS well
-# themselves. Reasoning is in docs/decisions.md 2.5-x.
+# themselves. Reasoning is in docs/decisions.md 2.5-2.
 #
 # Vault is deliberately NOT behind this (3.4-1): it terminates its own TLS on
 # :8200, which is what keeps 3.1's VAULT_ADDR lesson and 3.3's audit attribution

@@ -3,6 +3,11 @@
 # sign-vault-intermediate.sh — the offline root signs a CSR from Vault's PKI
 # engine, producing the certificate that makes Vault an issuing CA (3.4).
 #
+# A filter: CSR on stdin, certificate on stdout, diagnostics on stderr. Separate
+# from vault-configure.sh because it is the only step needing the offline root's
+# passphrase. Why it checks so little, and the two openssl behaviours it works
+# around, are in docs/decisions.md 3.4-4.
+#
 set -euo pipefail
 
 SOURCE_SCRIPT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"

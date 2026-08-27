@@ -2618,3 +2618,324 @@ storage volatile.
 reports failure — so the `if` reads false *on a match* and the assertion never
 fires. It is a race on output length, so it passes on a quiet host. Capture into
 a variable and test with a here-string.
+
+
+---
+
+## 2.5-2 · The proxy terminates TLS for what cannot, and refuses everything else
+
+**Decided:** one nginx at the edge, routing by Host header, holding certificates
+issued by Vault's PKI engine. CloudStack and Gitea sit behind it; **Vault does
+not** (3.4-1). Built after 3.4 rather than in Phase 2, so its certificate comes
+from Vault rather than from `issue-leaf.sh`.
+
+**Why a proxy at all, since Vault proves a service can terminate its own TLS:**
+CloudStack cannot, usefully. Its management UI is plain HTTP on `:8080` with no
+HTTPS listener, and giving it one means Tomcat keystore configuration inside a
+vendored installer we drive rather than maintain (1.1). Until this existed, the
+admin password crossed `cloudbr0` in clear text on every login. That is the
+whole justification; the rest is convenience.
+
+The convenience is real at the second service, though: five names will want
+certificates, and at the PKI role's TTL that is one renewal job and one reload
+mechanism instead of five.
+
+**Rejected: letting the first `server` block be the default.** nginx silently
+promotes the first block on an address to `default_server`, so with one vhost the
+proxy answered for **every** name that resolved to the host — measured:
+`vault.lab.test`, `minio.lab.test` and `gitea.lab.test` all returned CloudStack's
+application, presented with CloudStack's certificate. A name mismatch is only a
+warning, and warnings get clicked through. That is how `https://vault.lab.test/`
+— no port, so `:443` — appeared to "redirect to CloudStack".
+
+An explicit default server with `ssl_reject_handshake on` now refuses at the TLS
+layer: no certificate is offered at all, so an unknown name fails to *connect*
+rather than failing to *validate*. Verified — unknown names return curl exit 35
+and `no peer certificate available`.
+
+**Accepted cost, stated rather than discovered:** the hop behind the proxy is
+unencrypted. Fine over a loopback bridge on one host; not fine at Phase 7 when
+the tiers are real VMs on real networks. That is why 2.5 says to decide where TLS
+terminates rather than let it happen.
+
+**The operational trap, hit twice.** nginx reads its configuration once at start,
+and `docker compose up -d` leaves a running container alone when the compose spec
+has not changed. So a re-rendered vhost or a reissued certificate sits on disk,
+visible inside the container, ignored. Both times the symptom pointed elsewhere —
+`nginx -t` passed, the config was correct, the certificates were correct. The
+installer now runs `nginx -s reload` after `nginx -t` passes: validate first, so
+a bad configuration can never take the proxy down. This is exactly the incident
+3.5 names — *"the certificate renewed but the site serves the old one"* — met
+before 3.5 was built.
+
+---
+
+## 3.4-4 · Vault as the issuing CA, as built
+
+**Decided:** `ca/scripts/sign-vault-intermediate.sh` is a **filter** — CSR on
+stdin, certificate on stdout, diagnostics on stderr — and it is a separate script
+because it is the only step in the PKI flow that needs the offline root's
+passphrase. That keeps `grep -rl root-ca.pass ca/` an honest answer to "what can
+use the crown jewel", and the filter shape is what an air gap looks like if this
+ever moves to its own host (2.3-3).
+
+Its caller, `docker/vault/scripts/vault-configure.sh`, owns re-runnability: it
+skips provisioning when the `pki` mount already has a signing issuer **whose
+certificate chains to our root** — not merely when the mount exists. A mount can
+exist with no issuer, and an issuer can chain somewhere else; both pass a weaker
+check and both leave the lab unable to issue anything trusted.
+
+**`match` is unsatisfiable for a Vault CSR on EVERY field, for two independent
+reasons.** This is why `[ vault_intermediate_pol ]` exists alongside
+`intermediate_pol` rather than replacing it:
+
+1. Vault's PKI engine has no `domainComponent` parameter at all. Its DN
+   vocabulary is `common_name`, `organization`, `ou`, `country`, `locality`,
+   `province`, `street_address`, `postal_code`, `serial_number` — and nothing
+   else. `match` on a field the requester cannot emit is unsatisfiable, not
+   merely unmet.
+2. `match` compares the ASN.1 **string type**, not just the characters.
+   `root-ca.cnf` sets `string_mask = utf8only`, so the root's DN is
+   `UTF8String`; Vault uses Go's `crypto/x509`, which emits `PrintableString`
+   whenever the characters allow. The failure reads *"The organizationName field
+   is different between CA certificate (SingleClusterIaCLab) and the request
+   (SingleClusterIaCLab)"* — two identical strings declared different, with no
+   mention of encoding.
+
+Re-encoding the CSR is not a way out: the subject is covered by the CSR's own
+self-signature, and re-signing needs the private key, which never leaves Vault.
+
+**Rejected: one relaxed policy for both producers.** Tried, then reverted. It
+would have given up `organizationName = match` on `openssl req`-generated CSRs,
+where it still works, to accommodate a producer that cannot meet it on any field.
+
+**What actually constrains Vault is not the DN policy.** It is
+`intermediate_ca_ext` with `copy_extensions = none`: whatever the CSR requests is
+discarded and the root stamps `CA:true, pathlen:0`. Vault gets exactly the
+authority the root decides to give it and can never mint a sub-CA — which matters
+more here than for the openssl intermediate, because Vault holds that key
+**online for the rest of the lab's life**.
+
+**Two `openssl ca` behaviours found by trying, both now load-bearing:**
+
+- **It exits 0 when it REFUSES a CSR whose self-signature does not verify.** No
+  certificate written, no `index.txt` row, exit **0**. A *policy* failure exits 1;
+  a *signature* failure does not. So `|| die` cannot be trusted alone, and the
+  only reliable evidence of signing is output existing. That single
+  `[[ -s "${CRT_FILE}" ]]` is the one hand-rolled check in the script, and it is
+  the one that fired on a real failure.
+- **It prepends a human-readable dump before the PEM** unless given `-notext` —
+  5579 bytes instead of 1545, starting with `Certificate:`. Harmless in a file a
+  human reads; corruption for a script whose stdout *is* the certificate.
+
+**Rejected: a preflight, and a CSR inspection step.** Both were written and both
+were removed. openssl already reports a missing CA file, a bad DN and an
+unverifiable signature better than a hand-rolled check does — measured, every
+case exits 1 naming the path. What survived is only what nothing else covers:
+`[[ ! -t 0 ]]`, because with no stdin the script hangs silently and openssl is
+never reached.
+
+**Accepted hole, named per 0.2-8:** openssl does not check key strength. A
+1024-bit CSR signs into a valid `CA:true, pathlen:0` certificate that chains and
+verifies. That is narrow here — the CSR comes from our own `vault-configure.sh`
+with `key_bits=4096` — so reaching it means editing that value, not feeding the
+script something hostile. Revisit if this ever signs a CSR produced outside this
+repo.
+
+**And a gap re-keying leaves behind.** Disabling and re-provisioning the `pki`
+mount mints a new intermediate; the superseded one stays marked `V` in
+`ca/root/index.txt` with its private key destroyed. The database then claims a
+certificate is valid that nobody can use. Revoking it is a manual step, not
+automated: the script cannot distinguish "superseded" from "still in use
+elsewhere", which is the same ambiguity that kept a duplicate-subject check out of
+the signer.
+
+---
+
+## 3.6-1 · Two directions for a secret, and why neither rotates
+
+**Decided:** every credential is either **captured** into Vault or **generated**
+in it, chosen per secret and written down. Both directions are `ensure`-shaped:
+create if absent, leave alone if present, never rotate silently.
+
+| Direction | Origin | Example |
+|---|---|---|
+| **capture** | the service mints it | CloudStack's API key |
+| **generate** | Vault is the origin, the service is told | Gitea's admin and database passwords |
+
+**The trap, made concrete.** `cloudmonkey-install.sh` called
+`registerUserKeys` unconditionally, and `registerUserKeys` is not a read — it
+mints new keys and invalidates the old ones. Calling it twice silently rotated a
+live credential. On this host it would have done real damage immediately:
+`~/.cmk/config` carried **no** api key and authenticated by password, while
+CloudStack already held an 86-character key from an earlier run. The old code
+would have destroyed it to fix a problem that did not exist.
+
+`getUserKeys` is the read that makes capture possible, and it is why 3.6's wording
+is *"generates **or captures**"*. The function is now split by what it does:
+`capture_` (read-only, returns 1 when there are none — a normal first-run state,
+not a failure), `register_` (rotates, and warns that it does), and `ensure_`
+(capture first, register only when there is nothing to capture).
+
+**Four states, and only one is "do nothing":**
+
+| Vault | far side | action |
+|---|---|---|
+| empty | has a credential | capture |
+| empty | has none | generate or register |
+| holds it | matches | **already present** |
+| holds it | **differs** | **refuse** |
+
+**The fourth is the one worth the paragraph.** CloudStack's admin account is
+recreated whenever its database is redeployed, which invalidates the stored key
+while Vault goes on serving it happily — every consumer then fails with a 401
+that says nothing about the cause. The script refuses rather than fixing it: it
+cannot tell a rebuild from a key someone else is still using, and rotating on a
+guess has a blast radius. The error names the reseed path, because a refusal
+without one is just a wall.
+
+**Generate-direction secrets have no fourth state**, and that asymmetry is the
+point. Gitea does not exist when `vault-ensure-gitea.sh` first runs — that is why
+it runs first — so there is nothing to compare against and "present" is the whole
+check.
+
+---
+
+## 4.1-1 · Gitea's credentials are generated in Vault before Gitea exists
+
+**Decided:** `vault-ensure-gitea.sh` generates the database and admin passwords
+in Vault, and `gitea-installer.sh` reads them back out. Nothing is typed into a
+setup form, and no default exists anywhere — the compose file has no fallback
+values, only `${VAR:?}` that fails loudly if the `.env` was not rendered.
+
+**Rejected:** the reference lab's arrangement, which takes its admin password
+from a committed `.env` default. A default password in a repository is a password
+in the repository.
+
+**Why generate rather than capture here:** Gitea has nothing to capture at
+install time. Running the generator *first* is what makes the credential exist
+before the service that uses it, which is the same ordering argument the whole
+build order rests on.
+
+**`ROOT_URL` is `https://` only because the proxy genuinely terminates TLS.**
+2.5's war story is the reference lab setting it to `http` with the comment that an
+`https` ROOT_URL marks cookies `Secure` and the HTTP login silently loops. That
+setting is not right or wrong in itself — it is correct here *because* the thing
+in front of Gitea really does serve HTTPS, and it would be wrong the moment that
+stopped being true.
+
+**The admin user is create-if-missing, not ensure-matches.** Gitea will not read a
+password back after creation, so there is nothing to compare against — the same
+limitation that makes its API tokens uncapturable, which 4.1 flags and 4.2 will
+have to answer.
+
+---
+
+## 1.2-2 · `admin` is break-glass; automation gets its own CloudStack account
+
+**Decided:** `admin` keeps its account and role, moves off its shipped
+`admin`/`password` to a generated secret in Vault, and is used by **nothing
+automated**. A separate account, `svc-terraform`, carries the credentials
+Terraform will use at 7.1.
+
+**The model is AWS's root account, and it transfers operationally but not
+structurally.** AWS root is special: it cannot be deleted, cannot be restricted by
+any policy, and can do things no IAM user can — so its compromise is both
+unbounded and unmitigable. CloudStack's `admin` is none of that; it is a normal
+user in a normal account with a normal role, closer to AWS's *first IAM admin*
+than to root. What transfers is the discipline: **the identity you cannot afford
+to lose is not the identity you work as.**
+
+**Rejected: disabling `admin`.** There is exactly one other user. Disabling the
+only fallback before the replacement is proven means recovery through MySQL
+directly, and the gain over an `admin` whose password is a 48-character
+Vault-held secret is small on a single host. `admin` is instead what 14.5's
+break-glass drill is *about*. A break-glass account at its factory default is not
+break-glass, which is the whole content of the rotation.
+
+**`createAccount`, not `createUser`** — and this is the part that is easy to get
+wrong. The **role lives on the account**, and so do resource ownership and
+event-log attribution. A user created inside `admin`'s account would be a second
+key to the same identity, not a separate one, and 13.4 calls CloudStack's event
+log *"the only record of changes to the zone"*.
+
+**Root Admin for now, narrowed at 7.1.** Scoping the role before the consumer
+exists means guessing which APIs Terraform calls; being wrong surfaces as a
+permission failure part-way through an apply. So today this buys **attribution
+and habit, not least privilege** — and the honest reason to build it now rather
+than at 7.1 is that once Terraform is configured with `admin`'s key, changing it
+later is a task nobody prioritises. That is how AWS accounts end up still using
+root keys.
+
+**Write Vault before CloudStack, always.** The two failure modes are not
+symmetric: CloudStack-first loses the password entirely if the write then fails —
+it would exist only in a dead shell, and the UI would be locked. Vault-first
+leaves Vault holding a password CloudStack has not accepted, which is recoverable
+with `vault kv delete` and a re-run. Every `die` on that path names the command.
+
+**Credentials never reach `argv`.** `cmk update user password=…` would put the new
+password on a command line visible to every user via `ps` (2.3-5). Both the login
+and the `updateUser` call go through the HTTP API with `curl --data @-`, so the
+credential travels in the request body — the same rule that moved `vault-unseal.sh`
+off Vault's CLI.
+
+**Two CloudStack behaviours found by hitting them:**
+
+- **`listall=true` is required to see another account's users, even as Root
+  Admin.** `list users` defaults to the caller's own account, so the lookup
+  returned nothing for a user that plainly existed and the script concluded
+  `createAccount` had lied.
+- **`login` returns `.loginresponse` on failure too**, carrying `errorcode: 531`
+  instead of a session key. "Did a response come back" is not "did it work" —
+  assert on `.loginresponse.sessionkey`, which exists only on success. Getting
+  this wrong made a working password change look like a no-op.
+
+**Left at its default deliberately:** nothing else. This was the last credential
+in the lab still shipping as documented.
+
+---
+
+## 0.2-9 · `lib/vault.sh`, factored on drift rather than on count
+
+**Decided:** `vault_()`, `vault_authenticate()`, `vault_field()` and
+`new_password()` live in `lib/vault.sh`, sourced by the six scripts that talk to
+Vault. Separate from `lib/common.sh` because `ca/` and `cloudstack/` never talk to
+Vault, and a helper they cannot use does not belong in the file they all source.
+
+**What forced it was not the sixth caller.** 0.2-5 allows repetition and names two
+triggers; this was the second one — *"the guard logic needs to change in more than
+one place at once."* The six `vault_()` bodies were identical, but the six
+`authenticate()` bodies had **six different hashes**, and two of them —
+`gitea-installer.sh` and `proxy-installer.sh` — had no `vault status` check. A
+sealed Vault therefore produced empty reads and an error naming the wrong script:
+it sent you to seed a secret that was already there, when the answer was to
+unseal. Verified after factoring: both now report *"Vault is not answering, or is
+sealed"* against a genuinely sealed Vault.
+
+`new_password()` had the same shape rather than the same size. Two callers, the
+same non-obvious choice — hex rather than base64, because these values land in
+PostgreSQL connection strings, URL form bodies and environment variables where
+`+` and `/` are meaningful — and the reasoning recorded in only one of them. The
+other looked like an arbitrary command someone could have "improved".
+
+**The lib locates Vault from its own position, not the caller's.** The six callers
+sit at four different depths and each carried its own relative path to the same
+compose file; moving `docker/vault/` would have broken them one at a time.
+`_VAULT_LIB_DIR` is underscore-prefixed for a reason this repo has already paid
+for once: **sourcing another of its scripts clobbers `SOURCE_SCRIPT`**, because
+the sourced file sets it from its own `BASH_SOURCE[0]`. Every path defined after
+that source resolves under the wrong directory, and the symptom is a `die` naming
+a path that never existed.
+
+**`vault-unseal.sh` deliberately does not use it.** `vault_authenticate()` dies
+when Vault is sealed, which is exactly when that script must work. Its header
+already claimed to be self-contained; this is what makes that concrete rather than
+incidental.
+
+**Precedent worth keeping:** the same morning, five identical `[[ -x ]] || die`
+guards in `bootstrap.sh` hit 0.2-5's *count* trigger. Factoring them into a
+`run_script()` helper was the obvious move and would have been the worse one —
+reading the sibling all-in-one scripts first turned up a stronger answer, a single
+validation loop at file scope that fails **before anything runs**. Waiting until
+duplication causes something has now twice produced a better abstraction than
+acting on the count.

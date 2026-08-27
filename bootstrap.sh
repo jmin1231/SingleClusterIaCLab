@@ -353,33 +353,47 @@ configure_docker() {
 
 # ---- Services --------------------------------------------------------------
 
+# Resolve every installer before running any of them, as ca-install-all.sh and
+# cloudstack-install-all.sh already do. This replaces a guard that was repeated
+# in each wrapper — 0.2-5's revisit trigger, which fired at the fifth copy — and
+# it is strictly better than factoring that guard into a helper: a per-call check
+# fails at the point of use, so a missing vault-configure.sh would surface only
+# after CloudStack had installed and the CA existed. This stops while the host is
+# still untouched.
+CA_INSTALLER="${SOURCE_SCRIPT}/ca/ca-install-all.sh"
+CLOUDSTACK_INSTALLER="${SOURCE_SCRIPT}/cloudstack/cloudstack-install-all.sh"
+COREDNS_INSTALLER="${SOURCE_SCRIPT}/docker/coredns/coredns-installer.sh"
+VAULT_INSTALLER="${SOURCE_SCRIPT}/docker/vault/vault-installer.sh"
+VAULT_CONFIGURE="${SOURCE_SCRIPT}/docker/vault/vault-configure.sh"
+for script in "${CA_INSTALLER}" "${CLOUDSTACK_INSTALLER}" "${COREDNS_INSTALLER}" \
+  "${VAULT_INSTALLER}" "${VAULT_CONFIGURE}"; do
+  [[ -x "${script}" ]] || die "Missing or not executable: ${script}"
+done
+
+# The wrappers below stay one-liners rather than collapsing into main(): each
+# carries the reason it runs where it does, and main() reads as a dependency
+# order rather than a list of paths.
+
 # Run the CA installer: the offline root, the intermediate, and Vault's leaf —
 # the only certificate this CA issues, since Vault's PKI engine takes over at
 # 3.4 (3.4-1). Before CloudStack — it is seconds of local openssl work, so a bad
 # path fails here rather than after a long install, which is also why issuance
 # sits inside the CA installer rather than beside the service that reads it.
 install_ca() {
-  local installer="${SOURCE_SCRIPT}/ca/ca-install-all.sh"
-  [[ -x "${installer}" ]] || die "Missing or not executable: ${installer}"
-  "${installer}"
+  "${CA_INSTALLER}"
 }
 
 # Run the CloudStack all-in-one installer, which also creates the cloudbr0 bridge.
 install_cloudstack() {
-  local installer="${SOURCE_SCRIPT}/cloudstack/cloudstack-install-all.sh"
-  [[ -x "${installer}" ]] || die "Missing or not executable: ${installer}"
-
   log "Running the CloudStack all-in-one installer (this takes a while)..."
-  "${installer}"
+  "${CLOUDSTACK_INSTALLER}"
   log "CloudStack installed; cloudbr0 is up."
 }
 
 # Run the CoreDNS installer: renders its config, starts the container, and points
 # the host resolver at it. After CloudStack, whose bridge it binds to.
 install_coredns() {
-  local installer="${SOURCE_SCRIPT}/docker/coredns/coredns-installer.sh"
-  [[ -x "${installer}" ]] || die "Missing or not executable: ${installer}"
-  "${installer}"
+  "${COREDNS_INSTALLER}"
 }
 
 # Run the Vault installer: prepares ownership, starts the container behind the
@@ -387,9 +401,17 @@ install_coredns() {
 # CoreDNS: Vault is reached by name from the moment it exists, so the resolver
 # has to answer first.
 install_vault() {
-  local installer="${SOURCE_SCRIPT}/docker/vault/vault-installer.sh"
-  [[ -x "${installer}" ]] || die "Missing or not executable: ${installer}"
-  "${installer}"
+  "${VAULT_INSTALLER}"
+}
+
+# Configure the running Vault: audit device, KV v2, and the PKI engine (3.2-3.4).
+# Separate from install_vault because of an ordering it cannot escape — the PKI
+# engine emits a CSR the offline root signs, so Vault must already be up and
+# unsealed. That is the reference lab's server-phase / secrets-phase split, one
+# phase earlier. Safe to re-run: it tests each outcome rather than re-issuing
+# each command.
+configure_vault() {
+  "${VAULT_CONFIGURE}"
 }
 
 # Run every step, in dependency order.
@@ -416,6 +438,7 @@ main() {
   install_cloudstack
   install_coredns
   install_vault
+  configure_vault
 }
 
 main "$@"

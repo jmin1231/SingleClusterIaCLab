@@ -6,17 +6,6 @@
 #
 # Usage: sudo ./ca-install-all.sh
 #
-# The entry point bootstrap.sh calls; every other script here is called by it,
-# and the order is a dependency, not a preference — the intermediate consumes
-# the root, and the leaf consumes the intermediate. Safe to re-run: an existing
-# CA and an existing leaf are both left alone.
-#
-# Issuing sits here rather than in bootstrap.sh because of where bootstrap.sh
-# calls this: before CloudStack, so a wrong path fails in seconds instead of
-# after a forty-minute install. That is worth more than the tidier reading in
-# which issuance belongs beside the service that consumes it — and there is only
-# ever one certificate, because Vault's PKI engine takes over at 3.4 (3.4-1).
-
 set -euo pipefail
 
 SOURCE_SCRIPT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"

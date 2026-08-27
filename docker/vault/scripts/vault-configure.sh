@@ -8,13 +8,16 @@
 set -euo pipefail
 
 SOURCE_SCRIPT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=/dev/null
-source "${SOURCE_SCRIPT}/../../lib/common.sh"
+VAULT_DIR="${SOURCE_SCRIPT}/.."
 
-COMPOSE="${SOURCE_SCRIPT}/docker-compose.yml"
-INIT_FILE="${SOURCE_SCRIPT}/secrets/vault-init.json"
-ROOT_CRT="${SOURCE_SCRIPT}/../../ca/root/root-ca.crt"
-SIGNER="${SOURCE_SCRIPT}/../../ca/scripts/sign-vault-intermediate.sh"
+# shellcheck source=/dev/null
+source "${SOURCE_SCRIPT}/../../../lib/common.sh"
+
+# One level up: this script lives in scripts/, its service does not.
+COMPOSE="${VAULT_DIR}/docker-compose.yml"
+INIT_FILE="${VAULT_DIR}/secrets/vault-init.json"
+ROOT_CRT="${SOURCE_SCRIPT}/../../../ca/root/root-ca.crt"
+SIGNER="${SOURCE_SCRIPT}/../../../ca/scripts/sign-vault-intermediate.sh"
 
 KV_PATH="secret"
 PKI_PATH="pki"
@@ -66,14 +69,14 @@ mounted() {
 # after this gets a scoped token or an AppRole.
 authenticate() {
   [[ -r "${INIT_FILE}" ]] ||
-    die "Cannot read ${INIT_FILE}. Run vault-installer.sh first; bootstrap.sh runs it before this."
+    die "Cannot read ${INIT_FILE}. Run docker/vault/vault-installer.sh first; bootstrap.sh runs it before this."
 
   VAULT_TOKEN="$(jq -r '.root_token // empty' "${INIT_FILE}")"
   [[ -n "${VAULT_TOKEN}" ]] || die "${INIT_FILE} holds no root_token."
   export VAULT_TOKEN
 
   vault_ status >/dev/null 2>&1 ||
-    die "Vault is not answering, or is sealed. Run vault-unseal.sh."
+    die "Vault is not answering, or is sealed. Run docker/vault/scripts/vault-unseal.sh."
 }
 
 # First, before anything worth reading is stored (3.3). Vault stops serving

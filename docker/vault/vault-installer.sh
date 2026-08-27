@@ -200,7 +200,7 @@ init_vault() {
 # Delegated to vault-unseal.sh (3.1-4): the same command has to work after a
 # reboot and in a drill, not only during an install.
 unseal_vault() {
-  local unsealer="${SOURCE_SCRIPT}/vault-unseal.sh"
+  local unsealer="${SOURCE_SCRIPT}/scripts/vault-unseal.sh"
   [[ -x "${unsealer}" ]] || die "Missing or not executable: ${unsealer}"
   "${unsealer}"
 }

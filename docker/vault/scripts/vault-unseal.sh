@@ -16,20 +16,23 @@
 set -euo pipefail
 
 SOURCE_SCRIPT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=/dev/null
-source "${SOURCE_SCRIPT}/../../lib/common.sh"
+VAULT_DIR="${SOURCE_SCRIPT}/.."
 
-COMPOSE="${SOURCE_SCRIPT}/docker-compose.yml"
-CERT_DIR="${SOURCE_SCRIPT}/certs"
+# shellcheck source=/dev/null
+source "${SOURCE_SCRIPT}/../../../lib/common.sh"
+
+# One level up: this script lives in scripts/, its service does not.
+COMPOSE="${VAULT_DIR}/docker-compose.yml"
+CERT_DIR="${VAULT_DIR}/certs"
 LEAF_CA="${CERT_DIR}/ca.crt"
-INIT_FILE="${SOURCE_SCRIPT}/secrets/vault-init.json"
+INIT_FILE="${VAULT_DIR}/secrets/vault-init.json"
 
 # Usable, not present — this runs standalone, months later, against a file that
 # could have been edited or truncated. The message carries both meanings because
 # it runs before Vault is asked anything and cannot yet tell them apart.
 require_init_file() {
   [[ -e "${INIT_FILE}" ]] ||
-    die "${INIT_FILE} is missing. Run vault-installer.sh — or, if Vault is already initialised, this held its only key."
+    die "${INIT_FILE} is missing. Run docker/vault/vault-installer.sh — or, if Vault is already initialised, this held its only key."
 
   jq -e '.unseal_keys_b64[0]' "${INIT_FILE}" >/dev/null 2>&1 ||
     die "${INIT_FILE} has no unseal key. Restore it; do NOT re-initialise — that abandons this Vault's data."
@@ -83,7 +86,7 @@ unseal_vault() {
 
   case "${response}" in
   501)
-    die "Vault is not initialised, so there is nothing to unseal. Run vault-installer.sh."
+    die "Vault is not initialised, so there is nothing to unseal. Run docker/vault/vault-installer.sh."
     ;;
   200 | 429 | 473)
     log "Vault is already unsealed."

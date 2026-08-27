@@ -63,7 +63,7 @@ issue_cert() {
 
   local json
   json="$(vault_ write -format=json "pki/issue/${PKI_ROLE}" common_name="${PROXY_CN}" 2>/dev/null)" ||
-    die "Vault would not issue for ${PROXY_CN}. Is the ${PKI_ROLE} role present? Run vault-configure.sh."
+    die "Vault would not issue for ${PROXY_CN}. Is the ${PKI_ROLE} role present? Run docker/vault/scripts/vault-configure.sh."
 
   install -d -m 0755 "${CERT_DIR}"
   # Key first and restrictive: it must never exist world-readable, not even

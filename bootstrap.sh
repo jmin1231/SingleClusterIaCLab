@@ -364,10 +364,12 @@ CA_INSTALLER="${SOURCE_SCRIPT}/ca/ca-install-all.sh"
 CLOUDSTACK_INSTALLER="${SOURCE_SCRIPT}/cloudstack/cloudstack-install-all.sh"
 COREDNS_INSTALLER="${SOURCE_SCRIPT}/docker/coredns/coredns-installer.sh"
 VAULT_INSTALLER="${SOURCE_SCRIPT}/docker/vault/vault-installer.sh"
-VAULT_CONFIGURE="${SOURCE_SCRIPT}/docker/vault/vault-configure.sh"
+VAULT_CONFIGURE="${SOURCE_SCRIPT}/docker/vault/scripts/vault-configure.sh"
+VAULT_ENSURE_CS="${SOURCE_SCRIPT}/docker/vault/scripts/vault-ensure-cloudstack.sh"
 PROXY_INSTALLER="${SOURCE_SCRIPT}/docker/proxy/proxy-installer.sh"
 for script in "${CA_INSTALLER}" "${CLOUDSTACK_INSTALLER}" "${COREDNS_INSTALLER}" \
-  "${VAULT_INSTALLER}" "${VAULT_CONFIGURE}" "${PROXY_INSTALLER}"; do
+  "${VAULT_INSTALLER}" "${VAULT_CONFIGURE}" "${VAULT_ENSURE_CS}" \
+  "${PROXY_INSTALLER}"; do
   [[ -x "${script}" ]] || die "Missing or not executable: ${script}"
 done
 
@@ -415,6 +417,14 @@ configure_vault() {
   "${VAULT_CONFIGURE}"
 }
 
+# Seed CloudStack's API credentials into Vault (3.6). After configure_vault
+# because it needs the KV mount, and after install_cloudstack because it reads
+# the keys from a running management server. Never rotates: it captures what
+# CloudStack already holds, and refuses if Vault's copy has gone stale.
+ensure_cloudstack_secret() {
+  "${VAULT_ENSURE_CS}"
+}
+
 # Run the proxy installer: issue a certificate from Vault's PKI engine, render
 # the vhost against the discovered bridge address, start nginx. Last, and after
 # configure_vault, because the certificate comes from pki/issue/lab-server —
@@ -449,6 +459,7 @@ main() {
   install_coredns
   install_vault
   configure_vault
+  ensure_cloudstack_secret
   install_proxy
 }
 

@@ -105,3 +105,8 @@ docker/vault/logs/
 # config/vault.hcl is NOT here: nothing in it varies per host (3.1-2), so it is
 # committed like any other config.
 docker/vault/.env
+
+# The proxy's leaf, reissued from Vault by proxy-installer.sh, and its
+# rendered vhost, which carries the discovered bridge address.
+docker/proxy/certs/
+docker/proxy/conf/default.conf

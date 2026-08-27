@@ -1,0 +1,35 @@
+---
+# The lab's edge terminator. One nginx holding certificates issued by Vault's PKI
+# engine, routing by Host header to services that cannot terminate TLS well
+# themselves. Reasoning is in docs/decisions.md 2.5-x.
+#
+# Vault is deliberately NOT behind this (3.4-1): it terminates its own TLS on
+# :8200, which is what keeps 3.1's VAULT_ADDR lesson and 3.3's audit attribution
+# intact. Everything the proxy fronts is a service whose own TLS story is worse
+# than nginx's.
+name: proxy
+
+services:
+  proxy:
+    # Pinned by digest, not tag — see docker/vault/docker-compose.yml.
+    image: nginx:1.29-alpine@sha256:5616878291a2eed594aee8db4dade5878cf7edcb475e59193904b198d9b830de
+    container_name: proxy
+    restart: unless-stopped
+
+    # 0.4-1: bind 0.0.0.0. Unlike CoreDNS (:53 collides with systemd-resolved)
+    # and Vault (3.1-2), nothing else wants :80 or :443, and reaching the UI from
+    # a workstation on the LAN is the point of putting a name in front of it.
+    ports:
+      - "80:80"
+      - "443:443"
+
+    volumes:
+      # Rendered by proxy-installer.sh: the backend address is discovered from
+      # the bridge at run time, so this cannot be committed as-is.
+      - ./conf/default.conf:/etc/nginx/conf.d/default.conf:ro
+      # Issued by Vault. Read-only: nothing in the container may rewrite them.
+      - ./certs:/etc/nginx/certs:ro
+
+    logging:
+      options:
+        tag: proxy

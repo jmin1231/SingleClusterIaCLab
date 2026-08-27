@@ -36,9 +36,10 @@ Measure with `free -m`, `docker stats --no-stream`, and `virsh dominfo <vm>`.
 | Cloud | Secondary storage VM + console proxy (512 MB each) | ~1.0 GB | |
 | Cloud | VPC virtual router | ~0.5 GB | |
 | Control plane | Gitea + PostgreSQL, MinIO, Vault, CoreDNS, proxy, runner idle | ~1.5 GB | |
-| Guests | frontend + tunnel tiers (768 MB each) | ~1.5 GB | |
-| **Fixed subtotal** | | **~9.0 GB** | |
-| Guests | backend tier (k3s + workloads) | **5.0 GB** | |
+| Control plane | Alloy on the host, scraping journald (L-6) | ~0.15 GB | |
+| Guests | frontend tier (768 MB) + tunnel tier (512 MB — see rule 6) | ~1.25 GB | |
+| **Fixed subtotal** | | **~8.9 GB** | |
+| Guests | backend tier (k3s + workloads) | **5.1 GB** | |
 | **Baseline** | | **~14.0 GB** | |
 | Reserve | page cache, kernel, burst | ~2.0 GB | |
 | **Committed** | | **~16.0 GB** | |
@@ -52,6 +53,7 @@ There is no headroom. That is the finding, not a formatting accident.
 | backend tier at 8 GB | **5 GB.** The single line that broke the budget |
 | two k3s agents at 3 GB | **impossible while the estate is up** — see rule 3 |
 | authentik at +2 GB | **impossible alongside monitoring** — see rule 4 |
+| a replicated/distributed Postgres | **single StatefulSet**, as build-order 12.1 always specified. Replicas were never budgeted and the tier has no room for them |
 | Packer build at +3–4 GB | **only with the estate stopped** — see rule 5 |
 
 ## Five rules this implies
@@ -61,12 +63,24 @@ There is no headroom. That is the finding, not a formatting accident.
    against host RAM. An unpinned heap on a 16 GB host will happily claim several
    GB it does not need, and it claims it from the tiers.
 
-2. **The backend tier is 5 GB and every workload in it is sized deliberately.**
+2. **The backend tier is 5.1 GB and every workload in it is sized deliberately.**
    Nothing in Phase 9–13 may be installed at chart defaults. Prometheus retention
    and scrape interval, Loki in single-binary mode with filesystem storage, and
    Kyverno's controller count are all budget decisions, not tuning. Rough split:
-   k3s ~0.8, Flux ~0.3, cert-manager ~0.15, ESO ~0.1, Kyverno ~0.4, Postgres
-   ~0.3, api + web ~0.3, Prometheus ~1.0, Grafana ~0.2, Loki ~0.5, Alloy ~0.15.
+   k3s ~0.8, Flux ~0.3, cert-manager ~0.15, ESO ~0.1, Kyverno ~0.4, **NGINX
+   Gateway Fabric ~0.2**, Postgres ~0.3, api + web ~0.3, **kube-prometheus-stack
+   ~1.4** (Prometheus, Alertmanager, kube-state-metrics, node-exporter and the
+   operator — *not* the ~1.0 a bare Prometheus would cost), Grafana ~0.2, Loki
+   ~0.5, Alloy ~0.15. That totals **~4.8 GB in a 5.1 GB tier**, leaving ~0.3 GB
+   for the guest's own kernel and userland. It closes, and only just.
+
+   **The correction that made it close:** an earlier version of this list said
+   "Prometheus ~1.0" and omitted NGINX Gateway Fabric entirely. 13.1 installs a
+   *stack*, and 13.3 configures an Alertmanager receiver — so Alertmanager,
+   kube-state-metrics, node-exporter and the operator were always going to be
+   there, unbudgeted, to the tune of ~0.6 GB. A single Postgres rather than a
+   replicated one is what absorbs that; build-order 12.1 specified exactly that
+   from the start, so this costs nothing against the written plan.
 
 3. **k3s agents (9.2) do not coexist with the full estate.** Two 3 GB agents were
    the old plan and there is no 6 GB to give them. Either size them at ~1 GB and
@@ -79,6 +93,17 @@ There is no headroom. That is the finding, not a formatting accident.
    Roughly 2 GB against roughly 2 GB with nothing spare. Phase 14 means stopping
    monitoring first. This is the clearest case of the whole document's point: the
    phases are a *schedule*, not a set of things that end up co-resident.
+
+6. **The tunnel tier is 512 MB, not 768.** WireGuard is in-kernel and the tier
+   routes rather than computes. The 256 MB this frees goes to the backend tier,
+   which is the only place in the budget where 256 MB decides whether something
+   installs. Verify with `free -m` inside the guest once 8.3 is up; raise it back
+   only against a measurement.
+
+7. **kube-prometheus-stack is pinned or it does not fit.** Retention and scrape
+   interval are the two knobs that matter, and both must be set before first
+   install rather than tuned after an OOM. Left at chart defaults the stack
+   drifts past ~2 GB and takes the tier with it.
 
 5. **Never run an image build with the estate up.** Phase 6 happens before the
    agents exist, which is convenient rather than accidental. Any *rebuild* later

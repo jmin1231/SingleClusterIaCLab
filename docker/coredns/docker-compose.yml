@@ -12,7 +12,11 @@ name: coredns
 
 services:
   coredns:
-    image: coredns/coredns:${VERSION:-1.14.6}
+    # Pinned by digest — see the note in docker/vault/docker-compose.yml. The
+    # ${VERSION} override this used to carry was never set anywhere and could not
+    # have worked next to a digest: overriding the tag would not change which
+    # bytes run, so the knob would have lied.
+    image: coredns/coredns:1.14.6@sha256:900f9c109f7a33545d3c811516e8376df9019147b750f5ce3e254468769176ea
     container_name: coredns
     restart: unless-stopped
     command: -conf /etc/coredns/Corefile

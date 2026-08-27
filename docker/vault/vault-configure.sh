@@ -36,8 +36,8 @@ PKI_MAX_TTL="87600h"
 # that replaces issue-leaf.sh's profile table. A caller asks for a name and a TTL;
 # the role decides whether it may have them.
 PKI_ROLE="lab-server"
-PKI_ROLE_TTL="72h"
-PKI_ROLE_MAX_TTL="168h"
+PKI_ROLE_TTL="720h"
+PKI_ROLE_MAX_TTL="720h"
 
 # Vault serves both of these itself, so unlike most AIA fields they are reachable
 # from inside the lab. Without them a client holding only a leaf cannot fetch the
@@ -162,9 +162,12 @@ ensure_pki_urls() {
 # issue-leaf.sh chooses to pass them: here the rules are server-side, so a caller
 # cannot ask for a name outside lab.test or a lifetime beyond the ceiling.
 #
-# 168h against the openssl CA's 397 days is the whole point of 3.4 — a CA as a
-# service can issue short certificates because renewal is automatic. Until 3.5
-# builds that renewal, nothing consumes this role, so nothing expires.
+# 720h (30 days) against the openssl CA's 397 days. Deliberately NOT shorter:
+# 3.4's lesson is that a CA as a service *can* issue short certificates, but the
+# renewal that makes them safe is 3.5's job and does not exist yet. A 72h ceiling
+# would mean the proxy's certificate expiring every three days until then — a
+# self-imposed deadline, not a lesson. Shorten it at 3.5, once a timer is
+# renewing and reloading without anyone watching.
 #
 # 2048-bit leaves, not the 4096 used for the CAs: a leaf is not a CA, 2048 is what
 # public issuers actually hand out, and a short lifetime is the control that

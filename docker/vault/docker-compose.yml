@@ -61,6 +61,11 @@ services:
       - ./certs:/vault/certs:ro
       - ./config:/vault/config:ro
       - ./data:/vault/data
+      # Read-write and separate from data/: the audit device writes here, and
+      # Vault refuses to serve if it cannot. Its retention is its own — L-2 keeps
+      # audit out of the journald story because "what happened" and "who did
+      # what" have different rules.
+      - ./logs:/vault/logs
 
     logging:
       options:

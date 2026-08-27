@@ -25,6 +25,7 @@ source "${SOURCE_SCRIPT}/../../lib/common.sh"
 COMPOSE="${SOURCE_SCRIPT}/docker-compose.yml"
 CERT_DIR="${SOURCE_SCRIPT}/certs"
 DATA_DIR="${SOURCE_SCRIPT}/data"
+LOGS_DIR="${SOURCE_SCRIPT}/logs"
 # Plural: .gitignore and .yamllint both match this name and nothing else.
 SECRETS_DIR="${SOURCE_SCRIPT}/secrets"
 # Write-once material, kept apart from anything rotatable (3.1-3).
@@ -80,6 +81,15 @@ start_vault() {
   mkdir -p "${DATA_DIR}"
   chown "${VAULT_UID}:${VAULT_GID}" "${DATA_DIR}"
   chmod 0700 "${DATA_DIR}"
+
+  # The audit device's destination, and it is load-bearing in a way data/ is not:
+  # Vault STOPS SERVING REQUESTS if it cannot write its audit log (3.3). The
+  # image ships /vault/logs owned by its own uid 100, and the `user:` pin skips
+  # the entrypoint's chown (3.1-1) — so without this the mount is unwritable and
+  # enabling the device would take Vault down.
+  mkdir -p "${LOGS_DIR}"
+  chown "${VAULT_UID}:${VAULT_GID}" "${LOGS_DIR}"
+  chmod 0700 "${LOGS_DIR}"
 
   # Root only, and created before step 3 writes the one unrepeatable credential
   # here. mkdir alone would leave it at the umask.

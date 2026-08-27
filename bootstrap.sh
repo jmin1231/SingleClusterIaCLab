@@ -365,8 +365,9 @@ CLOUDSTACK_INSTALLER="${SOURCE_SCRIPT}/cloudstack/cloudstack-install-all.sh"
 COREDNS_INSTALLER="${SOURCE_SCRIPT}/docker/coredns/coredns-installer.sh"
 VAULT_INSTALLER="${SOURCE_SCRIPT}/docker/vault/vault-installer.sh"
 VAULT_CONFIGURE="${SOURCE_SCRIPT}/docker/vault/vault-configure.sh"
+PROXY_INSTALLER="${SOURCE_SCRIPT}/docker/proxy/proxy-installer.sh"
 for script in "${CA_INSTALLER}" "${CLOUDSTACK_INSTALLER}" "${COREDNS_INSTALLER}" \
-  "${VAULT_INSTALLER}" "${VAULT_CONFIGURE}"; do
+  "${VAULT_INSTALLER}" "${VAULT_CONFIGURE}" "${PROXY_INSTALLER}"; do
   [[ -x "${script}" ]] || die "Missing or not executable: ${script}"
 done
 
@@ -414,6 +415,15 @@ configure_vault() {
   "${VAULT_CONFIGURE}"
 }
 
+# Run the proxy installer: issue a certificate from Vault's PKI engine, render
+# the vhost against the discovered bridge address, start nginx. Last, and after
+# configure_vault, because the certificate comes from pki/issue/lab-server —
+# which is 3.4-1's reordering of 2.5. Vault is NOT behind this proxy; it
+# terminates its own TLS on :8200.
+install_proxy() {
+  "${PROXY_INSTALLER}"
+}
+
 # Run every step, in dependency order.
 main() {
   require_root
@@ -439,6 +449,7 @@ main() {
   install_coredns
   install_vault
   configure_vault
+  install_proxy
 }
 
 main "$@"

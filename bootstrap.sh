@@ -4,6 +4,7 @@
 # Prepares the host, installs CloudStack, then installs the services.
 #
 # Usage: sudo ./bootstrap.sh
+#        sudo SKIP_HOST_PREP=1 ./bootstrap.sh   # host already prepared
 #
 # Safe to re-run: every step is a no-op once its work is done.
 
@@ -21,6 +22,21 @@ source "${SOURCE_SCRIPT}/lib/common.sh"
 JOURNALD_DIR="/etc/systemd/journald.conf.d"
 JOURNALD_DROPIN="${JOURNALD_DIR}/10-lab.conf"
 DOCKER_DAEMON_JSON="/etc/docker/daemon.json"
+
+# 2.1-1's mitigation, named there and never built. Host preparation runs on every
+# invocation, and from Phase 3 on the service layer is re-run far more often than
+# the host changes.
+#
+# It skips the steps that MUTATE the host, not everything before the services.
+# require_root and check_kvm stay: neither prepares anything — check_kvm only
+# verifies, and its failures are fatal (0.3-3). start_transcript stays because it
+# is the record of the run, and a skipped run still needs one.
+#
+# Validated rather than tested loosely, so SKIP_HOST_PREP=true fails instead of
+# being silently ignored — which would look exactly like the flag not working.
+SKIP_HOST_PREP="${SKIP_HOST_PREP:-0}"
+[[ "${SKIP_HOST_PREP}" == "0" || "${SKIP_HOST_PREP}" == "1" ]] ||
+  die "SKIP_HOST_PREP must be 0 or 1, got '${SKIP_HOST_PREP}'."
 
 # --- Transcript -------------------------------------------------------------
 #
@@ -381,11 +397,21 @@ main() {
   require_root
   start_transcript
   check_kvm
-  sync_clock
-  configure_journald
-  install_cli_tools
-  install_docker
-  configure_docker
+
+  if [[ "${SKIP_HOST_PREP}" == "1" ]]; then
+    warn "SKIP_HOST_PREP=1 — skipping clock, journald, CLI tools and Docker."
+    # Asserted anyway, for the same reason check_kvm runs early: install_coredns
+    # and install_vault both need Docker, and failing here names the cause where
+    # failing there names a container.
+    verify_docker
+  else
+    sync_clock
+    configure_journald
+    install_cli_tools
+    install_docker
+    configure_docker
+  fi
+
   install_ca
   install_cloudstack
   install_coredns

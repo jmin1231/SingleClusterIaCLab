@@ -72,7 +72,7 @@ wait_for_vault() {
 # A second probe rather than reusing wait_for_vault's: that proved Vault
 # answers, this needs to know what it answered.
 unseal_vault() {
-  local bridge response threshold i
+  local bridge response threshold i body
 
   bridge="$(bridge_ip)"
 
@@ -104,12 +104,27 @@ unseal_vault() {
   log "Unsealing Vault (${threshold} share(s))..."
 
   for ((i = 0; i < threshold; i++)); do
-    # `-` reads the key from stdin: never in argv, where ps shows it to every
-    # user (2.3-5), and never in a file. -T keeps Compose from taking the pipe.
-    # Output discarded — L-1 puts this stdout in /var/log permanently.
-    jq -r ".unseal_keys_b64[${i}]" "${INIT_FILE}" |
-      docker compose -f "${COMPOSE}" exec -T vault vault operator unseal - >/dev/null ||
-      die "Unseal failed on share $((i + 1)) of ${threshold}."
+    # The key travels in the request BODY, read from stdin by `--data @-`. Never
+    # in argv, where ps shows it to every user on the host (2.3-5).
+    #
+    # This is the API rather than `vault operator unseal` because the CLI cannot
+    # do it. It refuses a pipe outright — "file descriptor 0 is not a terminal" —
+    # and its only non-interactive form is the key as the first argument, which
+    # is exactly what 2.3-5 forbids. `-` is not a stdin convention here either;
+    # it is taken as the literal key and rejected as bad base64, which is the
+    # 400 this used to fail with. Every other call in this script is already
+    # curl, so this is also the consistent shape.
+    body="$(jq -c "{key: .unseal_keys_b64[${i}]}" "${INIT_FILE}" |
+      curl -s -X PUT \
+        --cacert "${LEAF_CA}" \
+        --resolve "vault.lab.test:8200:${bridge}" \
+        --data @- \
+        "https://vault.lab.test:8200/v1/sys/unseal")" ||
+      die "Could not reach Vault to submit share $((i + 1)) of ${threshold}."
+
+    # A 400 still returns a body, so the transport succeeding proves nothing.
+    jq -e 'has("sealed")' <<<"${body}" >/dev/null 2>&1 ||
+      die "Vault rejected share $((i + 1)) of ${threshold}: $(jq -r '(.errors // []) | join("; ")' <<<"${body}" 2>/dev/null)"
   done
 }
 

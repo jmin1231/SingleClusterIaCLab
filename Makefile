@@ -40,6 +40,15 @@ endif
 SH    := $(filter-out $(VENDORED),$(wildcard $(filter %.sh,$(FILES))))
 YAML  := $(filter-out $(VENDORED),$(wildcard $(filter %.yml %.yaml,$(FILES))))
 
+# From git like the rest, and that is the whole point. `terraform fmt -recursive`
+# walks the FILESYSTEM instead, so on a host that has actually run bootstrap it
+# descends into ca/intermediate, docker/vault/data and docker/vault/secrets —
+# root-owned 0700 directories — and fails with "Cannot read directory". Those are
+# all gitignored, so taking the list from git skips them for free, exactly as the
+# header above claims for the linters. Verified: terraform fmt accepts file paths
+# and multiple of them, exiting 3 when a file needs reformatting.
+TF    := $(filter-out $(VENDORED),$(wildcard $(filter %.tf %.tfvars,$(FILES))))
+
 # Every path a CA script writes a private key to. Asserted ignored by lint rather
 # than trusted, for the same reason VENDORED is verified against disk above: an
 # ignore rule and the path it protects can drift apart silently. They already did
@@ -81,11 +90,13 @@ lint: ## Check formatting and syntax. Never modifies a file.
 		echo "skip: yamllint not installed"; \
 		[ "$(STRICT)" = "0" ] || exit 1; \
 	fi
-	@if command -v terraform >/dev/null 2>&1; then \
-		terraform fmt -check -recursive; \
-	else \
+	@if ! command -v terraform >/dev/null 2>&1; then \
 		echo "skip: terraform not installed"; \
 		[ "$(STRICT)" = "0" ] || exit 1; \
+	elif [ -z "$(TF)" ]; then \
+		echo "skip: no terraform files yet"; \
+	else \
+		terraform fmt -check $(TF); \
 	fi
 
 fmt: ## Rewrite files into canonical format. The only target that writes.
@@ -95,11 +106,13 @@ fmt: ## Rewrite files into canonical format. The only target that writes.
 		echo "skip: shfmt not installed"; \
 		[ "$(STRICT)" = "0" ] || exit 1; \
 	fi
-	@if command -v terraform >/dev/null 2>&1; then \
-		terraform fmt -recursive; \
-	else \
+	@if ! command -v terraform >/dev/null 2>&1; then \
 		echo "skip: terraform not installed"; \
 		[ "$(STRICT)" = "0" ] || exit 1; \
+	elif [ -z "$(TF)" ]; then \
+		echo "skip: no terraform files yet"; \
+	else \
+		terraform fmt $(TF); \
 	fi
 
 setup: ## One-time per-clone setup: enable the git hooks

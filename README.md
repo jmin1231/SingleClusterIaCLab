@@ -23,7 +23,6 @@ entry that settles it:
 | File | State | Next |
 |---|---|---|
 | `ca/scripts/issue-leaf.sh` | key, CSR and signing written; 17 TODOs | `verify_leaf`, then `check_existing` last |
-| `teardown.sh` | skeleton, 43 TODOs | TODO 0.4 — the `try`/`run` helpers |
 | `bootstrap.sh` | working; logging complete (L-1, L-2) | run it on the target VM — never tested outside harnesses |
 
 Blocking everything in `ca/` on a machine that has not done it: run

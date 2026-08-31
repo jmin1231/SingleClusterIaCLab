@@ -62,6 +62,7 @@ secrets/
 *.key.enc
 *_rsa
 *.tfvars
+.runner
 
 # The offline root CA (Phase 2.3). Generated once per lab by ca/scripts/root-ca-create.sh,
 # and never committed: the key is the lab's trust anchor, and the certificate is
@@ -114,3 +115,16 @@ docker/proxy/conf/default.conf
 # Gitea's rendered credentials and its data. Both generated, never committed.
 docker/gitea/.env
 docker/gitea/data/
+
+# act_runner's registration state (4.4). `.runner` holds the token that
+# authenticates this runner to Gitea, so this is category 3, not merely the
+# machine-local state the name `data/` suggests. The rule above does not reach
+# it: `docker/gitea/data/` is a literal path, and the runner's state is one
+# directory deeper.
+#
+# act_runner writes this as root with the directory 0700, so git cannot read it
+# and `git status` shows nothing either way — the exact blind spot 2.3-6 was
+# written about, where the only thing standing between a token and a commit is
+# a permission bit and the fact that nobody has run `sudo git add -A` yet.
+# `.runner` is on the belt-and-braces list above for the same reason.
+docker/gitea/runner/data/

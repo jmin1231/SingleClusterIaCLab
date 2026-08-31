@@ -7,6 +7,20 @@
 # lab ends up authenticating with one.
 name: gitea
 
+networks:
+  # gitea <-> db, and nothing else. Postgres is unreachable from every other
+  # network here, which is what makes it safe to put job containers on `ci`.
+  gitea:
+    external: false
+  # Where CI job containers land (4.4). Untrusted pull-request code runs there,
+  # so it can reach Gitea to clone and dind to build — and cannot see db.
+  ci:
+    external: false
+  # Joined by the proxy from its own compose project, as external `gitea_edge`.
+  # This is what lets Gitea stop publishing a port at all.
+  edge:
+    external: false
+
 services:
   db:
     # Pinned by digest — see docker/vault/docker-compose.yml.
@@ -17,6 +31,8 @@ services:
       - POSTGRES_DB=${GITEA_DB_NAME:?rendered into .env by gitea-installer.sh}
       - POSTGRES_USER=${GITEA_DB_USER:?rendered into .env by gitea-installer.sh}
       - POSTGRES_PASSWORD=${GITEA_DB_PASSWORD:?rendered into .env by gitea-installer.sh}
+    networks:
+      - gitea
     volumes:
       - ./data/postgres:/var/lib/postgresql/data
     # Gitea retries a missing database, but the first-run schema creation does
@@ -54,12 +70,111 @@ services:
       # by script, and a reachable /install is an unauthenticated setup wizard.
       - GITEA__security__INSTALL_LOCK=true
       - GITEA__service__DISABLE_REGISTRATION=true
-    ports:
-      # Bound to the bridge, not 0.0.0.0: the only thing that should reach Gitea
-      # directly is the proxy on the same host. Everything else goes via :443.
-      - "${CLOUDBR0_IP:?rendered into .env by gitea-installer.sh}:3000:3000"
+      # Set explicitly rather than relying on the default: without it the runner
+      # registers, reports healthy, and no workflow ever dispatches to it.
+      - GITEA__actions__ENABLED=true
+    # No ports. Gitea speaks plain HTTP, so publishing :3000 on cloudbr0 put it
+    # on the LAN unencrypted and made the proxy's TLS optional rather than
+    # mandatory. Reached instead over `edge` by service name, so the only path
+    # in is https://gitea.lab.test.
+    networks:
+      - gitea
+      - ci
+      - edge
     volumes:
       - ./data/gitea:/var/lib/gitea
     logging:
       options:
         tag: gitea
+
+  # The daemon CI jobs build on — never the host's. Rootless: dockerd runs as an
+  # unprivileged user inside, so a container escaped from a job lands as a
+  # nobody in a user namespace rather than as root on the hypervisor. It is
+  # reachable unauthenticated on the ci network, which is deliberate — that is
+  # what jobs use it for — and is exactly why it must not be the host daemon.
+  #
+  # No /dev/kvm here: packer runs in the JOB container, which the runner creates
+  # on the host daemon, so the device never has to traverse this one.
+  dind:
+    image: docker:28-dind-rootless@sha256:7c3e797187e43738220462658f4586572cbd3bf009f728b21e34d9c5c06ce431
+    container_name: gitea-dind
+    restart: unless-stopped
+    # Required, and not negotiable: docker-library's own docs say "just like the
+    # regular dind images, --privileged is required" for the rootless variant
+    # too. Upstream tracks it as a known security issue.
+    #
+    # What rootless changes is not this flag but who runs behind it. Regular
+    # dind runs dockerd as root in a privileged container, which is trivially
+    # escapable. Here dockerd runs as uid 1000: the capabilities are in the
+    # container's bounding set but not held by the process, and containers it
+    # creates sit in a user namespace whose root maps to an unprivileged host
+    # uid. The privilege is available, not wielded.
+    #
+    # The way to remove this container entirely is to stop needing a daemon —
+    # rootless BuildKit builds images without --privileged. It would mean
+    # workflows using `docker buildx --driver remote` rather than plain
+    # `docker build`. Revisit at 6.1 if that trade looks worth it.
+    privileged: true
+    environment:
+      # Empty disables the entrypoint's cert generation: dockerd listens on
+      # :2375 with no TLS instead of :2376 with --tlsverify.
+      #
+      # Not laziness — TLS here would authenticate the one party we have already
+      # decided to trust. Job containers are the untrusted thing on this network
+      # AND the reason dind exists, so they would be handed the client cert
+      # anyway. What protects the host is that this is not the host daemon, and
+      # that dockerd inside runs rootless.
+      #
+      # The assumption this encodes: membership of `ci` stays gitea, dind,
+      # runner and job containers. Anything else added there gets unauthenticated
+      # root on this daemon, silently.
+      - DOCKER_TLS_CERTDIR=
+    networks:
+      - ci
+    volumes:
+      - dind-data:/var/lib/docker
+    logging:
+      options:
+        tag: gitea-dind
+
+  # Gitea Actions runner. Holds the host docker socket because it creates job
+  # containers on the host daemon — that is what keeps /dev/kvm a single hop.
+  # It does NOT pass that socket on: runner/config.yaml sets docker_host: "-".
+  runner:
+    image: gitea/runner:3.3.1@sha256:c8570d703deb1bbe53c7e203092cfc5a310ca074559dc7fe2e7ebe11dd066577
+    container_name: gitea-runner
+    restart: unless-stopped
+    depends_on:
+      - gitea
+      - dind
+    environment:
+      - CONFIG_FILE=/config.yaml
+      # By service name over the ci network. Not https://gitea.lab.test: that
+      # would need the proxy, DNS and the lab CA before a runner can register.
+      - GITEA_INSTANCE_URL=http://gitea:3000
+      # `:-` and not `:?`, which cost an hour to work out: compose interpolates
+      # the WHOLE file on every command, so a required-variable error here would
+      # break `up -d db gitea` — the very step that has to run before a token can
+      # be minted. gitea-installer.sh validates it instead, where the message can
+      # say what to do. Empty is also correct on a re-run: once the runner has
+      # registered, runner/data/.runner is the credential and this is ignored.
+      - GITEA_RUNNER_REGISTRATION_TOKEN=${RUNNER_TOKEN:-}
+      - GITEA_RUNNER_NAME=${RUNNER_NAME:-lab-runner}
+    networks:
+      - ci
+    # The host's docker group, discovered at run time — a GID that does not
+    # match the host's leaves the socket present and every open() denied.
+    group_add:
+      - "${DOCKER_GID:?rendered into .env by gitea-installer.sh}"
+    volumes:
+      - ./runner/config.yaml:/config.yaml:ro
+      - ./runner/data:/data
+      - /var/run/docker.sock:/var/run/docker.sock
+    logging:
+      options:
+        tag: gitea-runner
+
+volumes:
+  # dind's image store. Named rather than a bind mount: it holds a docker
+  # graph driver, which does not survive living on an arbitrary host path.
+  dind-data:

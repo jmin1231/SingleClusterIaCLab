@@ -5,6 +5,10 @@
 # unreachable and a working Vault. Installer step 5 asks Vault instead.
 name: vault
 
+networks:
+  vault:
+    external: false
+
 services:
   vault:
     # 2.x is Vault's own numbering (1.21 -> 2.0), still BUSL-1.1.

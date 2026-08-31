@@ -655,7 +655,7 @@ them as independent sends you looking for a keyserver problem that does not exis
 
 **Rejected:** pre-creating `cloudbr0` so the installer skips network
 configuration. It is the more complete fix — it protects every later network call,
-not just the key fetch — but it reverses [0.4-2](#04-2) and moves real work back
+not just the key fetch — but it reverses [0.4-2](#04-2--cloudstack-creates-the-bridge-we-verify-rather-than-configure) and moves real work back
 into Phase 0.4. Held in reserve: if anything downstream of the bridge shows the
 same flakiness, that is the answer, and 0.4-2 should be rewritten rather than
 worked around twice.
@@ -1614,7 +1614,7 @@ whether `VAULT_ADDR` is routable from the cluster at all.
 
 ## L-1 · The install transcript is a local file, written by `bootstrap.sh` itself
 
-> **AMENDED by [L-4](#l-4--l-1-as-built-four-corrections-to-the-note).** Built, and
+> **AMENDED by [L-4](#l-4--l-1-as-built--four-corrections-to-the-note).** Built, and
 > three of the notes below were wrong in ways only building found: where the
 > redirect goes, which tool timestamps, and that `tee` is not the writer.
 
@@ -2965,7 +2965,7 @@ backend tier, and the backend tier is a thing that can fail — at which point L
 is where you would look to find out why. The 2 GB `SystemMaxUse` cap
 ([L-5](#l-5--journald-retention-as-built-and-three-findings)) means host-side
 forensics survive losing the cluster. Ship *and* retain; never ship *and* forget.
-This is [1.3-6](#13-6) again: a record must not depend on the thing it records.
+This is [1.3-6](#13-6--etcnetplan-is-snapshotted-whole-before-the-installer-runs) again: a record must not depend on the thing it records.
 
 **Rejected: Wazuh, on arithmetic rather than merit.** The agent/server split is
 the right shape and the agents are cheap (~100 MB each). The server stack is not:
@@ -2979,7 +2979,7 @@ stack cannot coexist with authentik.
 **The escape hatch, named so it is not rediscovered:** a Wazuh server on the
 *development host* (125 GB) with agents reporting outward is architecturally
 clean and is how it would really be done. It is rejected because the lab must be
-runnable on a fresh VM ([0.2-1](#02-1)), and this would make it depend on
+runnable on a fresh VM ([T-3](#t-3--a-fresh-vm-is-assumed-so-nothing-records-what-was-installed)), and this would make it depend on
 something outside itself. Revisit only if that requirement is dropped.
 
 **What replaces it, and what is genuinely lost.** Trivy at build time gates the
@@ -3056,3 +3056,71 @@ time, so removing it is not free.
 **Revisit if** the image is ever published ([4.3-1](#43-1--the-toolbox-image-is-built-on-this-host-and-never-published)),
 where pull time starts costing something on every runner, or if a builder-only
 dependency turns large enough to matter on its own.
+
+## 4.4-1 · The runner keeps the host socket; jobs get a rootless dind instead
+
+**Decided:** act_runner mounts `/var/run/docker.sock` and creates job containers
+on the host daemon. `container.docker_host: "-"` in `runner/config.yaml` stops
+that socket being mounted *into* those containers. Jobs that need a daemon —
+6.1's image builds — get `docker:dind-rootless` on the `ci` network, reached
+through `DOCKER_HOST` injected by `runner.envs`.
+
+**What this closes.** The reference lab leaves `docker_host: ""`, the default,
+which mounts the host socket into every job container; its `docker-ci` then runs
+`docker login`, `build`, `push` and `run` against the host daemon. A pull request
+that edits a workflow file can add `docker run --privileged -v /:/host` and has
+root on the hypervisor. One line, no exploit. Its `privileged: false` and
+`valid_volumes: []` read as mitigations but are not: the socket arrives through
+the runner's own mount, not through a workflow-requested volume, so restricting
+what workflows may ask for does not touch it.
+
+**The deviation, named rather than presented as compliance.** Build-order 4.4
+says *"Register a runner that does not mount the host Docker socket."* This
+runner does. All three of its **done-when** criteria are met — a job runs,
+`docker ps` inside it lists dind's containers rather than the host's, and a job
+can open `/dev/kvm` — but the runner process itself retains host root.
+
+**Rejected: full DinD**, with act_runner pointed at dind and the host socket
+mounted nowhere. It satisfies the sentence literally and is the better end state.
+Rejected on two costs that are concrete rather than aesthetic:
+
+- `/dev/kvm` would have to nest — passed into the dind container, then permitted
+  again by its device cgroup for each job container. 4.4 already calls that
+  passthrough harder than it looks; this is the version that does it twice.
+- `toolbox:latest` would have to be seeded into dind's image store and kept
+  there across restarts. Keeping job containers on the host daemon answers
+  [4.3-1](#43-1--the-toolbox-image-is-built-on-this-host-and-never-published)'s
+  open question — *how does the image reach the daemon that runs jobs* — with
+  "it is already there".
+
+**Rejected: ephemeral one-shot runners.** They solve the *other* problem 4.4
+names — a persistent runner carrying the previous job's secrets and caches into
+the next — and nothing about socket exposure. They compose with this design
+rather than replacing it, and are not built.
+
+**What is skipped, per
+[0.2-8](#02-8--the-lab-mimics-enterprise-practice-and-names-what-it-is-skipping).**
+Two residuals, both real:
+
+- *The runner process holds host root.* The boundary is now act_runner's own
+  correctness — that it honours `docker_host: "-"` and `valid_volumes: []`. A bug
+  there, or a later config edit that looks harmless, reopens the path this
+  entry exists to close.
+- *dind's container is privileged, and must be.* docker-library's docs state it
+  is required for the rootless variant too. Rootless still helps: `dockerd` runs
+  as uid 1000, so the capabilities sit in the container's bounding set without
+  being held by the process, and nested containers live in a user namespace. But
+  a job that compromises `dockerd` itself, rather than merely using it, has more
+  to work with than it should.
+
+Job containers reach `gitea` to clone and `dind` to build. They are not attached
+to the network Postgres is on, so Gitea's database is not merely unauthenticated
+to them — it is unreachable.
+
+**The way out, named so it is not rediscovered:** stop needing a daemon at all.
+Rootless BuildKit builds images without `--privileged`, which removes the one
+privileged container in the lab. The cost is workflows using `docker buildx
+--driver remote` rather than plain `docker build`, plus reworking `docker push`
+and `docker login`. Revisit at 6.1, when those workflows are written and the
+cost is visible.
+

@@ -1,0 +1,74 @@
+---
+# runner-smoke — proves 4.4's "done when", and nothing else.
+#
+# Done when: a job runs successfully, `docker ps` inside it cannot see the host's
+# containers, and a job can still open /dev/kvm. Each is asserted below rather
+# than printed for a human to eyeball — a smoke test that only logs is a test
+# that passes while broken.
+#
+# Deliberately does NOT use actions/checkout. Gitea advertises its clone URL as
+# ROOT_URL (https://gitea.lab.test), and a job container has neither CoreDNS as
+# its resolver nor the lab CA in its trust store — so checkout would fail on TLS
+# and mask whatever this is meant to measure. That gap is real and belongs to
+# 4.5; this workflow exists to prove the runner before meeting it.
+#
+# Run it from Gitea: Actions -> runner-smoke -> Run workflow.
+name: runner-smoke
+
+on:
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    runs-on: gitea-iac-runner
+    steps:
+      # 1 of 3: the job runs at all, in the image 4.3 built.
+      - name: The toolbox image is what we are running in
+        run: |
+          set -eux
+          id
+          terraform version
+          trivy --version
+          ansible --version
+
+      # 2 of 3: the daemon reachable from a job is dind, never the host's.
+      # Two independent assertions: the host socket is absent, AND nothing the
+      # host is running shows up. Either alone can pass while the design is wrong.
+      - name: The host Docker socket is not reachable from a job
+        run: |
+          set -eu
+          echo "DOCKER_HOST=${DOCKER_HOST:-<unset>}"
+          [ -n "${DOCKER_HOST:-}" ] || { echo "FAIL: DOCKER_HOST unset"; exit 1; }
+          [ ! -S /var/run/docker.sock ] || { echo "FAIL: host socket mounted"; exit 1; }
+          docker version --format '{{.Server.Version}}'
+          docker ps --format '{{.Names}}' | tee /tmp/seen
+          for c in gitea gitea-db gitea-runner gitea-dind proxy vault coredns; do
+            if grep -qx "$c" /tmp/seen; then
+              echo "FAIL: host container '$c' visible from a job"; exit 1
+            fi
+          done
+          echo "OK: reachable daemon is not the host's"
+
+      # 3 of 3: packer-ci opens /dev/kvm in 6.2. Presence is not enough — the
+      # device cgroup and the root:kvm mode both have to permit the open.
+      - name: /dev/kvm is present and openable
+        run: |
+          set -eu
+          [ -c /dev/kvm ] || { echo "FAIL: /dev/kvm is not a character device"; exit 1; }
+          ls -l /dev/kvm
+          exec 3<>/dev/kvm
+          exec 3>&-
+          echo "OK: opened /dev/kvm read-write"
+
+      # Not in 4.4's list, but it is the network segmentation the design claims:
+      # jobs reach Gitea to clone and dind to build, and cannot see Postgres.
+      - name: Gitea is reachable and the database is not
+        run: |
+          set -eu
+          timeout 5 bash -c '</dev/tcp/gitea/3000' \
+            || { echo "FAIL: cannot reach gitea:3000"; exit 1; }
+          echo "OK: gitea:3000 reachable"
+          if timeout 3 bash -c '</dev/tcp/gitea-db/5432' 2>/dev/null; then
+            echo "FAIL: reached the database from a job container"; exit 1
+          fi
+          echo "OK: gitea-db unreachable"

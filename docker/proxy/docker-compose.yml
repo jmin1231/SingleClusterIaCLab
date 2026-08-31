@@ -9,6 +9,17 @@
 # than nginx's.
 name: proxy
 
+networks:
+  # Owned by the gitea project, joined here by its generated name. External
+  # because compose must attach to it, never create or delete it: `docker
+  # compose down` here must not remove a network Gitea is still on.
+  #
+  # This makes Gitea a start-order dependency of the proxy, which bootstrap.sh
+  # already satisfies — install_gitea runs before install_proxy.
+  edge:
+    external: true
+    name: gitea_edge
+
 services:
   proxy:
     # Pinned by digest, not tag — see docker/vault/docker-compose.yml.
@@ -22,6 +33,9 @@ services:
     ports:
       - "80:80"
       - "443:443"
+
+    networks:
+      - edge
 
     volumes:
       # Rendered by proxy-installer.sh: the backend address is discovered from

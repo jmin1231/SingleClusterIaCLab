@@ -1,0 +1,77 @@
+---
+# act_runner configuration — COMMITTED AND HAND-MAINTAINED (4.4).
+#
+# Base: `gitea-runner generate-config` from gitea/runner:3.3.1. Only the lines
+# marked below deviate from the generated defaults; preserve them on a bump.
+#
+# The whole threat model of 4.4 lives in `container:`. Read that block before
+# changing anything in it.
+log:
+  level: info
+
+runner:
+  file: .runner
+  # One job at a time. This host is also the hypervisor; concurrent jobs compete
+  # with the guests for the same cores.
+  capacity: 1
+  # DEVIATION. Two reasons this is not empty:
+  #   - stock ships A_TEST_ENV_NAME_* placeholders that land in every job
+  #   - DOCKER_HOST is how a job's docker CLI finds the dind sidecar instead of
+  #     a daemon it must never be given (see container.docker_host)
+  envs:
+    DOCKER_HOST: tcp://dind:2375
+  env_file: .env
+  timeout: 3h
+  shutdown_timeout: 0s
+  insecure: false
+  fetch_timeout: 5s
+  fetch_interval: 2s
+  # DEVIATION: one label, naming the image 4.3 builds — not the stock ubuntu-* set.
+  labels:
+    - "gitea-iac-runner:docker://toolbox:latest"
+
+cache:
+  enabled: true
+  dir: ""
+
+container:
+  # DEVIATION. The single most important line in this file.
+  #
+  # "-" means: find a docker host for the RUNNER to create job containers on,
+  # but never mount it into those containers. The default ("") mounts the host
+  # socket into every job — which hands root on this hypervisor to anyone who
+  # can open a pull request. Jobs get the dind sidecar via DOCKER_HOST instead.
+  docker_host: "-"
+
+  # DEVIATION: job containers land on the CI network only. They can reach gitea
+  # to clone and dind to build; the postgres holding Gitea's data is on a
+  # network they are not attached to.
+  network: gitea_ci
+
+  privileged: false
+
+  # DEVIATION: packer-ci opens /dev/kvm inside the job container (6.2). Because
+  # the runner creates job containers on the HOST daemon, this is a single hop —
+  # the device node, its cgroup rule and its root:kvm ownership all come
+  # straight from the host. Nesting it through dind would need it configured
+  # twice, which is the version that does not work.
+  options: "--device /dev/kvm"
+
+  # DEVIATION: a workflow may not request bind mounts. Without this, `volumes:`
+  # in a job definition is a second route to the host filesystem.
+  valid_volumes: []
+
+  # false: toolbox:latest is built on this host and never pushed (4.3-1). true
+  # would send an unqualified tag to docker.io/library/toolbox.
+  force_pull: false
+  force_rebuild: false
+  docker_timeout: 0s
+  require_docker: false
+  bind_workdir: false
+
+host:
+  workdir_parent:
+
+metrics:
+  enabled: false
+  addr: "127.0.0.1:9101"

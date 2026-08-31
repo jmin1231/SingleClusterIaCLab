@@ -265,4 +265,34 @@ RUN set -eux; \
     apt-get install -y --no-install-recommends docker-ce-cli docker-buildx-plugin; \
     rm -rf /var/lib/apt/lists/*
 
+# lab root CA — needed by anything in a job that speaks TLS to a lab hostname.
+# Named for a pipeline, per rule 3: 4.6's artifact upload. Gitea answers the
+# create-container POST with a fileContainerResourceUrl built from its own
+# ROOT_URL, so the chunk PUT goes to https://gitea.lab.test even though the
+# runner reached Gitea at http://gitea:3000 — two addresses in one job, and only
+# the first works without this. 6.1's `docker login` needs it for the same reason.
+#
+# Deliberately the LAST layer rather than beside the ca-certificates install
+# above: every layer between fetches from the public internet and does not need
+# the lab root, so keeping it here means rotating the CA rebuilds one 2 KB layer
+# instead of a gigabyte of pinned tools.
+#
+# The public root certificate only. No private key leaves ca/root/, and this is
+# the one file in there that is safe to bake into an image.
+#
+# The build context is this directory, and COPY may not escape it, so the cert
+# arrives through a second named context — see toolbox-installer.sh, which binds
+# labca to ca/root/. `root-ca.crt` is relative to THAT context's root. Enterprise
+# equivalent: the same flag pointed at an internal PKI URL rather than a path;
+# here the CA is generated on this host and never published, so a path is honest.
+#
+# The .crt extension is load-bearing: update-ca-certificates skips every other
+# suffix, .pem included, and reports success while trusting nothing. The
+# destination name is also what runner/config.yaml's NODE_EXTRA_CA_CERTS points
+# at — Node compiles in its own root store and never reads the bundle below, so
+# the trust store alone fixes curl, git and trivy while leaving JS actions
+# failing exactly as they did before.
+COPY --from=labca root-ca.crt /usr/local/share/ca-certificates/lab-root.crt
+RUN update-ca-certificates
+
 CMD ["/bin/bash"]

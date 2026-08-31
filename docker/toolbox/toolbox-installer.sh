@@ -4,9 +4,14 @@
 #
 # Usage: sudo ./toolbox-installer.sh
 #
-# Belongs to Phase 4 but depends on nothing else in it: the image is built from
-# this directory and never pulled, so it can be built before Gitea exists. 4.4
-# is what consumes it, by registering a runner whose label names the tag below.
+# Belongs to Phase 4 but depends on nothing else in it: the image is never
+# pulled, so it can be built before Gitea exists. 4.4 is what consumes it, by
+# registering a runner whose label names the tag below.
+#
+# It does depend on Phase 2. The last Dockerfile layer bakes in the lab root CA,
+# which reaches the build through a second named context rooted at ca/root/, so
+# ca-install-all.sh has to have run on this machine first. preflight() checks
+# that: .gitignore keeps the cert out of git, so a fresh clone never has one.
 #
 # Safe to re-run. An unchanged Dockerfile is all cache hits; a changed ARG
 # rebuilds from that layer down.
@@ -17,6 +22,10 @@ SOURCE_SCRIPT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=/dev/null
 source "${SOURCE_SCRIPT}/../../lib/common.sh"
 
+# Two levels up, and resolved rather than left as a literal `../..`:
+# --build-context takes its path relative to the CLI's working directory, not to
+# this script, so only an absolute path keeps the script runnable from anywhere.
+LAB_CA_DIR="$(cd -- "${SOURCE_SCRIPT}/../.." && pwd)/ca/root"
 DOCKERFILE="${SOURCE_SCRIPT}/Dockerfile"
 REQUIREMENTS="${SOURCE_SCRIPT}/requirements.yml"
 
@@ -37,11 +46,14 @@ preflight() {
   [[ -f "${DOCKERFILE}" ]] || die "No Dockerfile at ${DOCKERFILE}"
   [[ -f "${REQUIREMENTS}" ]] ||
     die "No requirements.yml at ${REQUIREMENTS}; the ansible layer COPYs it."
+  [[ -f "${LAB_CA_DIR}/root-ca.crt" ]] ||
+    die "No root CA at ${LAB_CA_DIR}/root-ca.crt. Run: sudo ./ca/ca-install-all.sh"
 }
 
 build_image() {
   log "Building ${IMAGE} — the first run downloads roughly a gigabyte of tools."
-  docker build -t "${IMAGE}" "${SOURCE_SCRIPT}" ||
+  docker build --build-context "labca=${LAB_CA_DIR}" \
+    -t "${IMAGE}" "${SOURCE_SCRIPT}" ||
     die "Build failed; the failing step's output is above."
   log "Built ${IMAGE}"
 }

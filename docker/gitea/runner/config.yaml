@@ -20,6 +20,7 @@ runner:
   #     a daemon it must never be given (see container.docker_host)
   envs:
     DOCKER_HOST: tcp://dind:2375
+    NODE_EXTRA_CA_CERTS: /usr/local/share/ca-certificates/lab-root.crt
   env_file: .env
   timeout: 3h
   shutdown_timeout: 0s

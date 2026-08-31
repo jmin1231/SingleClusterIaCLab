@@ -1,0 +1,75 @@
+---
+# scan — misconfiguration and vulnerability scanning for this repository (4.6).
+#
+# REPORTING, not gating. Every step exits 0 on findings, deliberately:
+#
+#   - Misconfiguration and CVE findings are continuous and mostly not caused by
+#     the change that triggered the run. A gate that fails on an inherited
+#     backlog gets bypassed within a week, and then there is neither a gate nor
+#     a report. Enterprise practice blocks on the DELTA a change introduces and
+#     reports the baseline; this lab has no baseline to diff against yet.
+#   - Secrets are the exception — they are unrecoverable once pushed, so they
+#     belong in a pre-push hook that can refuse, not in CI that can only notice.
+#     That hook is assumed present and is not this workflow's job.
+#
+# To make it a gate later: change --exit-code 0 to 1 on the steps you want
+# blocking, and add the finding IDs you accept to .trivyignore WITH A REASON.
+name: scan
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  scan:
+    runs-on: gitea-iac-runner
+    steps:
+      - uses: actions/checkout@v4
+
+      # One scan, not one per scanner: trivy walks the tree once and both
+      # analysers read the same filesystem pass. JSON because a finding that
+      # exists only in a job log stops existing when the log rotates.
+      #
+      # --ignore-unfixed is the rule .trivyignore's own header states: nothing
+      # belongs in the ignore file merely because upstream has not patched it,
+      # so those findings are dropped here rather than accumulating there.
+      - name: Scan the repository
+        run: |
+          set -eux
+          trivy fs . \
+            --scanners misconfig,vuln \
+            --ignore-unfixed \
+            --severity HIGH,CRITICAL \
+            --format json \
+            --output trivy-report.json \
+            --exit-code 0 \
+            --no-progress
+
+      # The human-readable half. Rendered from the JSON rather than a second
+      # trivy run, so the summary and the artifact can never disagree.
+      - name: Summarise
+        run: |
+          set -eu
+          echo "== findings by severity =="
+          jq -r '[.Results[]?  | (.Vulnerabilities//[])[], (.Misconfigurations//[])[]]
+                 | group_by(.Severity) | map({sev: .[0].Severity, n: length})
+                 | .[] | "  \(.sev): \(.n)"' trivy-report.json || echo "  none"
+
+          echo "== misconfiguration =="
+          jq -r '.Results[]? | select(.Misconfigurations)
+                 | .Target as $t | .Misconfigurations[]
+                 | "  [\(.Severity)] \(.ID) \($t): \(.Title)"' trivy-report.json || true
+
+          echo "== vulnerabilities (fixable only) =="
+          jq -r '.Results[]? | select(.Vulnerabilities)
+                 | .Target as $t | .Vulnerabilities[]
+                 | "  [\(.Severity)] \(.VulnerabilityID) \(.PkgName) \(.InstalledVersion) -> \(.FixedVersion)"' \
+                 trivy-report.json || true
+
+      # v3, not v4: v4 depends on GitHub's newer artifact API, which Gitea's
+      # artifact backend does not implement.
+      - name: Keep the report
+        uses: actions/upload-artifact@v3
+        with:
+          name: trivy-report
+          path: trivy-report.json

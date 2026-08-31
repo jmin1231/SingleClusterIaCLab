@@ -367,12 +367,13 @@ VAULT_ENSURE_GITEA="${SOURCE_SCRIPT}/docker/vault/scripts/vault-ensure-gitea.sh"
 GITEA_INSTALLER="${SOURCE_SCRIPT}/docker/gitea/gitea-installer.sh"
 VAULT_ENSURE_GITEA_TOKEN="${SOURCE_SCRIPT}/docker/vault/scripts/vault-ensure-gitea-token.sh"
 GITEA_REPO_SETUP="${SOURCE_SCRIPT}/docker/gitea/gitea-repo-setup.sh"
+TOOLBOX_INSTALLER="${SOURCE_SCRIPT}/docker/toolbox/toolbox-installer.sh"
 PROXY_INSTALLER="${SOURCE_SCRIPT}/docker/proxy/proxy-installer.sh"
 for script in "${CA_INSTALLER}" "${CLOUDSTACK_INSTALLER}" "${COREDNS_INSTALLER}" \
   "${VAULT_INSTALLER}" "${VAULT_CONFIGURE}" "${VAULT_ENSURE_CS}" \
   "${VAULT_ENSURE_GITEA}" "${GITEA_INSTALLER}" \
   "${VAULT_ENSURE_GITEA_TOKEN}" "${GITEA_REPO_SETUP}" \
-  "${PROXY_INSTALLER}"; do
+  "${TOOLBOX_INSTALLER}" "${PROXY_INSTALLER}"; do
   [[ -x "${script}" ]] || die "Missing or not executable: ${script}"
 done
 
@@ -455,6 +456,18 @@ setup_gitea_repo() {
   "${GITEA_REPO_SETUP}"
 }
 
+# Build the CI toolbox image every pipeline job runs in (4.3). Placed by phase
+# order, not by dependency: it builds from docker/toolbox/ and needs nothing but
+# Docker, so it could run any time after install_docker. It is also the slowest
+# step here after CloudStack — roughly a gigabyte of pinned tools — so it is not
+# a candidate for running early to fail fast. 4.4 is what consumes it: the
+# runner's label names the tag this builds, and the image stays on this host
+# rather than going to a registry, because the toolbox is the image every job
+# runs in and so cannot be built by a job.
+install_toolbox() {
+  "${TOOLBOX_INSTALLER}"
+}
+
 # Run the proxy installer: issue a certificate from Vault's PKI engine, render
 # the vhost against the discovered bridge address, start nginx. Last, and after
 # configure_vault, because the certificate comes from pki/issue/lab-server —
@@ -493,6 +506,7 @@ main() {
   install_gitea
   ensure_gitea_token
   setup_gitea_repo
+  install_toolbox
   install_proxy
 }
 

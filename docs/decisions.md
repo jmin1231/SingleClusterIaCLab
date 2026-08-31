@@ -2990,3 +2990,69 @@ most of Wazuh's vulnerability value at zero residency. **Not** covered: file
 integrity monitoring, and CIS/SCA benchmark scoring. Those are real gaps and are
 recorded here as gaps rather than quietly treated as covered — per
 [0.2-8](#02-8--the-lab-mimics-enterprise-practice-and-names-what-it-is-skipping).
+
+---
+
+## 4.3-1 · The toolbox image is built on this host and never published
+
+`toolbox-installer.sh` builds `toolbox:latest` on the machine that runs jobs.
+Nothing pushes it to Gitea's registry, and nothing pulls it.
+
+**The reason is a loop, not a preference.** The toolbox is the image every
+pipeline job runs *inside*. A pipeline that builds and pushes it would need it to
+already exist. So the first toolbox image can never come from CI — it has to be
+built out of band. That is not a lab shortcut: hosted runners work the same way,
+with the runner image provisioned alongside the host rather than pulled by the
+first job. Building locally is therefore the seed step that a registry-based flow
+would still need underneath it.
+
+**Rejected, for now: push to Gitea and pull at job time.** It is the better
+end state — an immutable tag, a digest a job can cite, and an image that
+[4.6](build-order.md)'s scan gate actually covers. It is rejected *here* because
+it drags [9.3](build-order.md)'s work into Phase 4: the daemon that starts job
+containers would need registry trust configured, and 9.3's own warning is that
+registry trust "has to exist in three places or this fails in ways that look like
+workflow bugs". Phase 4's job is a working isolated runner. Debugging that and
+registry trust at once means two unfamiliar failure modes that present
+identically.
+
+**This constrains 4.4, which is why it is written down now.** 4.4 forbids
+mounting the host Docker socket. That matters here: with the socket mounted, the
+daemon that starts jobs is the host daemon and already holds this image. A DinD
+service has its own image store and will not see it. So whatever isolation 4.4
+picks has to answer "how does the image get to the daemon that runs jobs" — by
+seeding it (`docker save` piped to `docker load`, or a shared image volume), or
+by accepting the registry work above. The choice cannot be deferred past 4.4.
+
+**One footgun, named so it is not met at 2am.** `force_pull: true` against an
+unqualified tag like `toolbox:latest` resolves to `docker.io/library/toolbox` and
+goes to Docker Hub. The reference lab sets `force_pull: false` for exactly this
+reason. The day this does move to a registry, the label must carry the fully
+qualified name.
+
+**What is skipped, per
+[0.2-8](#02-8--the-lab-mimics-enterprise-practice-and-names-what-it-is-skipping).**
+Provenance: no job can prove which toolbox it ran in, because a local tag is
+mutable and there is no digest to cite. And 4.6's scan-before-push gate never
+applies to this image, since it is never pushed — trivy can still be pointed at
+it locally, but nothing enforces that. Both are real gaps, recorded as gaps.
+
+## 4.3-2 · No multi-stage build, on measurement
+
+The Dockerfile carried a TODO to split into a builder stage that downloads and
+verifies and a final stage that copies out the binaries. Measured, then dropped.
+
+**The premise was wrong.** It assumed the downloaded archives were sitting in
+layers. They are not: every tool's `RUN` downloads, checksums, installs and
+deletes within one layer, so no archive is ever committed. The only thing a
+builder stage would actually remove is three apt packages — curl 523 KB, unzip
+375 KB, gnupg 509 KB, about 1.4 MB together.
+
+**Against what stays:** vault 537 MB, terraform 117 MB, packer 108 MB, qemu and
+git around 80 MB. Under one percent, in an image whose size is one large binary
+and a decision no build topology changes. `curl` is also plausibly wanted at job
+time, so removing it is not free.
+
+**Revisit if** the image is ever published ([4.3-1](#43-1--the-toolbox-image-is-built-on-this-host-and-never-published)),
+where pull time starts costing something on every runner, or if a builder-only
+dependency turns large enough to matter on its own.

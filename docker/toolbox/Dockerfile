@@ -265,8 +265,4 @@ RUN set -eux; \
     apt-get install -y --no-install-recommends docker-ce-cli docker-buildx-plugin; \
     rm -rf /var/lib/apt/lists/*
 
-# TODO 4.3-12: make this MULTI-STAGE. curl, unzip, gnupg and every archive exist
-#   only to produce static binaries; a builder stage that downloads and verifies,
-#   then a final stage that COPYs the binaries, drops all of it.
-
 CMD ["/bin/bash"]

@@ -1,0 +1,31 @@
+# Ansible collections baked into the toolbox image — see the ansible layer in
+# Dockerfile. Installed at BUILD time, never at job time: a pipeline that runs
+# `ansible-galaxy install` on every execution is slower on every run and depends
+# on Galaxy being reachable at the moment the job starts.
+#
+# This list is deliberately short. ansible.builtin ships with ansible-core and
+# already covers everything Phase 8 does except the two entries below — apt,
+# copy, template, file, systemd, user, shell, command, get_url, uri, slurp and
+# stat are all builtin. Add a collection only when a task actually fails without
+# it, and say in a comment which task that was.
+#
+# TODO: these are FLOORS, not pins, carried over from the reference lab — `>=`
+#   means a rebuild months from now can resolve to a different version, which is
+#   rule 1 in the Dockerfile ("every version is pinned"). Freeze them after the
+#   first successful build:
+#       docker run --rm <image> ansible-galaxy collection list
+#   then replace each `>=x.y.z` with the exact version it reports.
+collections:
+  # The `cloud.terraform.terraform_state` INVENTORY PLUGIN — not a module. Phase
+  # 8 builds its inventory from Terraform state rather than a static hosts file,
+  # so without this there is no inventory at all. The plugin shells out to the
+  # `terraform` binary, which is why the terraform layer above is a runtime
+  # dependency of this one and not just a build-time neighbour.
+  - name: cloud.terraform
+    version: ">=4.0.0"
+
+  # Exactly one task needs this: `ansible.posix.sysctl`, enabling IPv4
+  # forwarding on the WireGuard tunnel host so it can relay wg0 <-> wg1.
+  # One module, one call — but the tunnel does not route without it.
+  - name: ansible.posix
+    version: ">=1.5.0"

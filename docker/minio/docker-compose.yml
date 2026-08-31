@@ -18,10 +18,21 @@ name: minio
 
 services:
   minio:
-    # Pinned by digest. MinIO tags are date-stamped rather than semver, so
-    # RELEASE.* is a label that can move and the digest is the actual pin —
-    # the same reasoning as the mc pin in docker/toolbox/Dockerfile.
-    image: minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
+    # Chainguard rather than minio/minio. Note this contradicts the note in
+    # docker/toolbox/Dockerfile — that FORBIDDEN was the free tier refusing a
+    # BASE image; the minio image pulls fine, and ships RELEASE.2026-07-17
+    # against Docker Hub's RELEASE.2025-09-07.
+    #
+    # Pinned by digest per the house rule, but the tag has to stay `latest`:
+    # the free tier publishes no version tags. Chainguard also rebuilds these
+    # frequently for CVE patching and does not keep old digests forever, so
+    # unlike the postgres and gitea pins this one can become UNPULLABLE rather
+    # than merely stale. Re-pin when it does; do not drop the digest.
+    #
+    # Entrypoint is /usr/bin/minio directly, not a shell wrapper, so `command:`
+    # below is arguments only — the same form minio/minio wanted, for a
+    # different reason.
+    image: cgr.dev/chainguard/minio:latest@sha256:1e408150bcf1bff07a2e468b9ac91347d4da261258921faeaedbe2ed7f0818b4
     container_name: minio
     restart: unless-stopped
 
@@ -63,17 +74,22 @@ services:
       # the key is 0400 owned by this uid and MinIO never writes here.
       - ./certs:/certs:ro
 
-    # --insecure is deliberate. This probe dials MinIO's own listener from
-    # inside MinIO's own container, so the certificate it declines to verify is
-    # the one it just presented; the lab CA is not in this image, and mounting
-    # it would add a dependency for a check that proves nothing extra. Whether
-    # the certificate is the RIGHT one is asserted from the host instead, by
-    # minio-installer.sh:verify_cert, where the trust store is real.
-    healthcheck:
-      test: ["CMD", "curl", "-f", "--insecure", "https://localhost:9000/minio/health/live"]
-      interval: 10s
-      timeout: 3s
-      retries: 12
+    # NO healthcheck, and that is a decision rather than an omission.
+    #
+    # This image ships neither curl nor wget, so the HTTP probe against
+    # /minio/health/live cannot run here. `mc ready local` is MinIO's documented
+    # substitute and does not work either: with `user:` pinned there is no home
+    # directory, so mc cannot write its config ("mkdir /.mc: permission denied"),
+    # and with MC_CONFIG_DIR pointed somewhere writable it RETRIES FOREVER
+    # printing "The cluster 'local' is not ready" — there is no `local` alias to
+    # resolve, and it blocks rather than failing. That is the worst shape a
+    # healthcheck can have: docker kills it on timeout, every time, forever.
+    #
+    # Making it work needs MC_CONFIG_DIR plus MC_HOST_local carrying the root
+    # credential in a URL — two more environment variables and a second copy of
+    # the password, to prove something minio-installer.sh:wait_for_minio already
+    # proves from the host with a real trust store and a real curl.
+    # Revisit if anything ever needs `depends_on: condition: service_healthy`.
 
     logging:
       options:

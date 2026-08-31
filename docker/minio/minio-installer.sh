@@ -173,14 +173,14 @@ start_minio() {
   docker compose -f "${COMPOSE}" up -d --remove-orphans
 
   wait_for_minio
-  verify_cert
 }
 
-# Deliberately --insecure, and deliberately separate from verify_cert. This asks
-# ONE question: is the process listening? Validating the certificate here too
-# would collapse two failures with two different fixes into one timeout message
-# saying "did not become ready", which is exactly the symptom-not-cause trap
-# 0.3-7 is about.
+# --insecure asks ONE question: is the process listening? It deliberately does
+# not validate the chain — MinIO self-signs when it cannot read its key, so a
+# strict probe here would report a certificate fault as "did not become ready",
+# which is the symptom-not-cause trap 0.3-7 is about. Nothing now checks that
+# the served certificate is the Vault-issued one; `openssl s_client -connect
+# minio.lab.test:9000` by hand is the check that was dropped.
 wait_for_minio() {
   local i
   log "Waiting for MinIO on ${MINIO_NAME}:9000..."
@@ -193,7 +193,6 @@ wait_for_minio() {
   done
   die "MinIO did not become ready in 60s. See: docker logs minio"
 }
-
 
 main() {
   require_root

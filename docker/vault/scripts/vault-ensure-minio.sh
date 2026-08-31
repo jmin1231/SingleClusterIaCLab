@@ -26,9 +26,6 @@ source "${SOURCE_SCRIPT}/../../../lib/vault.sh"
 ROOT_PATH="secret/minio/root"
 MINIO_ROOT_USER="${MINIO_ROOT_USER:-labadmin}"
 
-STATE_BUCKET="lab-tfstate"
-IMAGES_BUCKET="lab-images"
-
 # The root credential and nothing else — not the bucket names, not the scoped
 # service-account keys. 5.1's blast-radius argument is the whole reason those are
 # separate, and this path is where that separation would quietly erode.

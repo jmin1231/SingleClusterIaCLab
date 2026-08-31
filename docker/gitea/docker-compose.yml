@@ -87,33 +87,39 @@ services:
       options:
         tag: gitea
 
-  # The daemon CI jobs build on — never the host's. Rootless: dockerd runs as an
-  # unprivileged user inside, so a container escaped from a job lands as a
-  # nobody in a user namespace rather than as root on the hypervisor. It is
-  # reachable unauthenticated on the ci network, which is deliberate — that is
-  # what jobs use it for — and is exactly why it must not be the host daemon.
+  # The daemon CI jobs build on — never the host's. Reachable unauthenticated on
+  # the ci network, which is deliberate: that is what jobs use it for, and is
+  # exactly why it must not be the host daemon.
   #
   # No /dev/kvm here: packer runs in the JOB container, which the runner creates
-  # on the host daemon, so the device never has to traverse this one.
+  # on the host daemon, so the device never traverses this one.
+  #
+  # ROOT dockerd, not rootless, and that is a downgrade taken on evidence rather
+  # than preference. docker:28-dind-rootless was tried first and cannot run on
+  # this host: Ubuntu 24.04 sets kernel.apparmor_restrict_unprivileged_userns=1,
+  # so RootlessKit dies with
+  #     [rootlesskit:parent] failed to start the child: /proc/self/exe: EPERM
+  # in a restart loop. `privileged: true` does not rescue it — privileged sets
+  # AppArmor to *unconfined*, which is precisely what that restriction targets,
+  # while the entrypoint drops to uid 1000 and so has no CAP_SYS_ADMIN to be
+  # exempted by. The two features are in direct conflict.
+  #
+  # The alternative was disabling that sysctl host-wide, on the machine that is
+  # also the hypervisor — trading a broad host protection for one container's
+  # isolation. Rejected. See 4.4-1 for what this costs.
   dind:
-    image: docker:28-dind-rootless@sha256:7c3e797187e43738220462658f4586572cbd3bf009f728b21e34d9c5c06ce431
+    image: docker:28-dind@sha256:2a232a42256f70d78e3cc5d2b5d6b3276710a0de0596c145f627ecfae90282ac
     container_name: gitea-dind
     restart: unless-stopped
-    # Required, and not negotiable: docker-library's own docs say "just like the
-    # regular dind images, --privileged is required" for the rootless variant
-    # too. Upstream tracks it as a known security issue.
+    # Required: docker-library's docs say --privileged is needed for dind, and
+    # for the rootless variant too. Upstream tracks it as a known security issue.
     #
-    # What rootless changes is not this flag but who runs behind it. Regular
-    # dind runs dockerd as root in a privileged container, which is trivially
-    # escapable. Here dockerd runs as uid 1000: the capabilities are in the
-    # container's bounding set but not held by the process, and containers it
-    # creates sit in a user namespace whose root maps to an unprivileged host
-    # uid. The privilege is available, not wielded.
-    #
-    # The way to remove this container entirely is to stop needing a daemon —
-    # rootless BuildKit builds images without --privileged. It would mean
+    # The way to remove this container entirely is to stop needing a daemon.
+    # Rootless BuildKit builds images without --privileged and without a user
+    # namespace, so it is unaffected by the restriction above. It would mean
     # workflows using `docker buildx --driver remote` rather than plain
-    # `docker build`. Revisit at 6.1 if that trade looks worth it.
+    # `docker build`. That is now the recommended path at 6.1, not merely an
+    # option — it is the only one that gets the privilege back down.
     privileged: true
     environment:
       # Empty disables the entrypoint's cert generation: dockerd listens on

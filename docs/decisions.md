@@ -3106,12 +3106,25 @@ Two residuals, both real:
   correctness — that it honours `docker_host: "-"` and `valid_volumes: []`. A bug
   there, or a later config edit that looks harmless, reopens the path this
   entry exists to close.
-- *dind's container is privileged, and must be.* docker-library's docs state it
-  is required for the rootless variant too. Rootless still helps: `dockerd` runs
-  as uid 1000, so the capabilities sit in the container's bounding set without
-  being held by the process, and nested containers live in a user namespace. But
-  a job that compromises `dockerd` itself, rather than merely using it, has more
-  to work with than it should.
+- *dind's container is privileged, and `dockerd` inside it runs as root.* The
+  rootless variant was built first and does not run on this host: Ubuntu 24.04
+  ships `kernel.apparmor_restrict_unprivileged_userns=1`, and RootlessKit needs
+  exactly the user namespace that blocks — it failed `fork/exec /proc/self/exe:
+  operation not permitted` in a restart loop. `privileged: true` does not help,
+  because privileged sets AppArmor to *unconfined*, which is what the
+  restriction targets, while the entrypoint drops to uid 1000 and so holds no
+  `CAP_SYS_ADMIN` to be exempted by.
+
+  Disabling that sysctl host-wide was rejected: it trades a broad protection on
+  the hypervisor for one container's isolation. So the honest position is that a
+  job which compromises `dockerd` — rather than merely using it — holds root in
+  a privileged container, which is escapable. This is the weakest point in 4.4
+  and it is not mitigated, only bounded by the network the daemon sits on.
+
+  **The fix is to stop needing a daemon.** Rootless BuildKit builds images
+  without `--privileged` and without a user namespace, so the restriction above
+  does not apply to it. At 6.1 that is the recommended path rather than an
+  option, because it is the only one that lowers this privilege.
 
 Job containers reach `gitea` to clone and `dind` to build. They are not attached
 to the network Postgres is on, so Gitea's database is not merely unauthenticated

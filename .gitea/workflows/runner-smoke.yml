@@ -63,6 +63,8 @@ jobs:
       # Not in 4.4's list, but it is the network segmentation the design claims:
       # jobs reach Gitea to clone and dind to build, and cannot see Postgres.
       - name: Gitea is reachable and the database is not
+        # Explicit: /dev/tcp is a bash builtin and silently absent under sh.
+        shell: bash
         run: |
           set -eu
           timeout 5 bash -c '</dev/tcp/gitea/3000' \

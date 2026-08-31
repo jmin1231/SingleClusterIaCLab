@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# gitea-repo-setup.sh — put this repository in Gitea and close the gate (4.2).
+# gitea-repo-setup.sh — put this repository in Gitea (4.2).
 #
 # Usage: sudo ./gitea-repo-setup.sh
 #
@@ -92,21 +92,21 @@ push_committed() {
 }
 
 # Required status checks are named BEFORE any check exists, which is the point of
-# 4.2: the gate closes now and opens later, rather than being added once there is
-# something to gate and never quite tested.
-protect_branch() {
-  if api "${API}/repos/${GITEA_USER}/${REPO_NAME}/branch_protections" |
-    jq -e --arg b "${BRANCH}" 'any(.[]; .branch_name == $b)' >/dev/null 2>&1; then
-    log "Branch protection on ${BRANCH} already present"
-    return 0
-  fi
-  printf '{"branch_name":"%s","enable_push":false,"enable_status_check":true,"status_check_contexts":["lint"]}' "${BRANCH}" |
-    api -X POST -H 'Content-Type: application/json' --data @- \
-      "${API}/repos/${GITEA_USER}/${REPO_NAME}/branch_protections" |
-    jq -e '.branch_name' >/dev/null 2>&1 ||
-    die "Could not enable branch protection on ${BRANCH}."
-  log "Branch protection on ${BRANCH}: direct push disabled, status check 'lint' required"
-}
+# NO BRANCH PROTECTION. This used to set enable_push:false plus a required
+# `lint` status check, which is the enterprise practice and is deliberately not
+# kept: the finished lab ships the code that runs the product, not the gates that
+# policed its development. Lint and format checking stays a local `make lint`.
+#
+# It was also a deadlock in practice. `enable_push:false` blocks every direct
+# push including an admin's, and the required `lint` context could only be
+# satisfied by a pipeline that did not exist yet — so main became unreachable by
+# push AND unmergeable by pull request. The gate closed before anything could
+# open it.
+#
+# If it is ever wanted back: one POST to
+# /repos/{owner}/{repo}/branch_protections with branch_name, enable_push and
+# status_check_contexts. Add a push whitelist at the same time, or it deadlocks
+# again the same way.
 
 main() {
   require_root
@@ -123,7 +123,6 @@ main() {
   ensure_repo
   ensure_remote
   push_committed
-  protect_branch
 }
 
 main "$@"

@@ -32,16 +32,13 @@ GITEA_DB_NAME="gitea"
 GITEA_DB_USER="gitea"
 
 # Present is enough — unlike CloudStack, there is no far side to compare against
-# yet. Gitea does not exist when this first runs; that is the point of running
-# it first.
-has_field() {
-  local v
-  v="$(vault_ kv get -field="$2" "$1" 2>/dev/null || true)"
-  [[ -n "${v}" ]]
-}
+# yet. Gitea does not exist when this first runs; that is the point of running it
+# first. vault_field is what expresses that: it returns empty rather than failing
+# on a missing secret, which its own comment calls the first-run state every
+# ensure script tests for.
 
 ensure_db_secret() {
-  if has_field "${DB_PATH}" password; then
+  if [[ -n "$(vault_field "${DB_PATH}" password)" ]]; then
     log "${DB_PATH} already present"
     return 0
   fi
@@ -52,7 +49,7 @@ ensure_db_secret() {
 }
 
 ensure_admin_secret() {
-  if has_field "${ADMIN_PATH}" password; then
+  if [[ -n "$(vault_field "${ADMIN_PATH}" password)" ]]; then
     log "${ADMIN_PATH} already present"
     return 0
   fi

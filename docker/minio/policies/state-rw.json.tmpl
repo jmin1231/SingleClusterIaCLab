@@ -1,0 +1,13 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "_comment_TODO_1": "Terraform's state account. Needs Get/Put/Delete on OBJECTS in the state bucket, and ListBucket on the BUCKET itself. Those are two different resource ARN shapes and getting them confused is the usual first failure: arn:aws:s3:::bucket vs arn:aws:s3:::bucket/*",
+      "_comment_TODO_2": "5.2 needs locking. Terraform's S3 backend uses a lockfile object alongside the state object, so no separate table is required — but the account must be able to create AND delete it, or a failed apply leaves a lock nothing can clear.",
+      "_comment_TODO_3": "Scope every Resource to ${STATE_BUCKET}. A wildcard here silently re-grants what 5.1's done-when is about to test for.",
+      "Effect": "Allow",
+      "Action": [],
+      "Resource": []
+    }
+  ]
+}

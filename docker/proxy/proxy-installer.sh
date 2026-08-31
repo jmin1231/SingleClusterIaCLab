@@ -29,23 +29,9 @@ PKI_ROLE="lab-server"
 # Every name this proxy serves. One certificate each, one server block each.
 PROXY_NAMES=(cloudstack.lab.test gitea.lab.test)
 
-# Reissue when fewer than this many seconds remain. 7 days against the role's
-# 30-day ceiling: enough slack that a re-run inside the window is a no-op, and
-# enough margin that a lab left alone for a week still comes back working.
-RENEW_BEFORE=$((7 * 24 * 3600))
-
-# Present is not the same as usable: a certificate can exist and be expired, or
-# be for the wrong name. Checked rather than assumed, so a re-run repairs.
-cert_usable() {
-  local crt="${CERT_DIR}/$1.crt"
-  [[ -s "${crt}" && -s "${CERT_DIR}/$1.key" ]] || return 1
-  openssl x509 -in "${crt}" -noout -checkend "${RENEW_BEFORE}" >/dev/null 2>&1 || return 1
-  openssl x509 -in "${crt}" -noout -checkhost "$1" >/dev/null 2>&1
-}
-
 issue_cert() {
   local cn="$1" crt="${CERT_DIR}/$1.crt" key="${CERT_DIR}/$1.key" json
-  if cert_usable "${cn}"; then
+  if cert_usable "${crt}" "${key}" "${cn}"; then
     log "Certificate for ${cn} is current; not reissuing"
     return 0
   fi

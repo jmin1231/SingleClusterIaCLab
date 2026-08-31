@@ -72,6 +72,19 @@ render_config() {
 # Ownership before the container: Docker creates a missing bind-mount source as
 # root, so a compose up first is a failure to repair rather than prevent.
 start_vault() {
+  # The line below assumes "nothing but the container can be 65100". Assert it
+  # rather than trust it: 65100 is outside every allocator's range, so a hit here
+  # means something genuinely unexpected has claimed the number — a much stronger
+  # signal than the uid-100 case this replaced, where a later package install
+  # could claim it AFTER a chown that had already succeeded (3.1-1).
+  local claimed
+  if claimed="$(getent passwd "${VAULT_UID}")"; then
+    die "uid ${VAULT_UID} is already ${claimed%%:*}. Vault's key would be readable by it; see 3.1-1."
+  fi
+  if claimed="$(getent group "${VAULT_GID}")"; then
+    die "gid ${VAULT_GID} is already ${claimed%%:*}. See 3.1-1."
+  fi
+
   # 0400: nothing but the container can be 65100, so the narrowest mode is free.
   # Certificates stay 0444 as issue-leaf.sh wrote them — they are public.
   chown "${VAULT_UID}:${VAULT_GID}" "${LEAF_KEY}"

@@ -128,3 +128,28 @@ docker/gitea/data/
 # a permission bit and the fact that nobody has run `sudo git add -A` yet.
 # `.runner` is on the belt-and-braces list above for the same reason.
 docker/gitea/runner/data/
+
+# MinIO (5.1). All three listed before the directories exist, because
+# `docker compose up` creates them on first run — the same reason Vault's
+# storage is listed early.
+#
+# .env holds the ROOT credential, rendered out of Vault by minio-installer.sh.
+# 5.1 keeps the root keys off every other surface: they exist in Vault and in
+# this file, and nowhere else. The scoped service-account keys are separate and
+# go back into Vault rather than onto disk here.
+docker/minio/.env
+
+# The Vault-issued leaf. MinIO mandates the filenames public.crt and
+# private.key, which is not this repo's tls.crt/tls.key convention — worth
+# knowing because `*.key` on the belt-and-braces list above does still catch
+# private.key, so the belt holds even though the name changed.
+docker/minio/certs/
+
+# The object store itself, and this is category 3 rather than the category 2
+# that a directory called `data/` implies. It holds the Terraform state bucket,
+# and Terraform state records every resource attribute in PLAINTEXT — database
+# passwords, generated keys, tokens. `sensitive = true` hides those from console
+# output and does nothing to state. So this directory is a credential store, and
+# committing it would be committing every secret the lab has, exactly the way
+# docker/vault/data/ would.
+docker/minio/data/

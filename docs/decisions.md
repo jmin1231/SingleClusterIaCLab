@@ -2120,9 +2120,18 @@ than discovered, still duplicated in exactly two places that must agree
 `start_vault` is now a much stronger signal — a hit means something genuinely
 unexpected has claimed 65100, rather than "a package was installed".
 
-**Unverified, and to confirm on the first real run:** that Vault starts cleanly as
-a UID the image never heard of. Reasoned from the entrypoint's own gating and the
-mount layout, not yet executed.
+**Confirmed on the first real run.** Vault starts cleanly as a UID the image
+never heard of: `docker inspect -f '{{.Config.User}}' vault` reports
+`65100:65100` and `id` inside the container agrees, with the bind mounts chowned
+to match. The reasoning above — the entrypoint's root-gated chown and setcap are
+skipped by pinning `user:`, and every path Vault writes is a mount we own — held.
+
+**And the `getent` guard this entry describes is now real.** It was written up
+here before it was written down in code, and `start_vault` asserted nothing for
+several phases. It exists as of 5.1, added when `minio-installer.sh` needed the
+same check and the claim was found to be untrue. The lesson is the one 2.3-6
+already recorded from the other direction: a rule that lives only in prose is a
+rule nothing enforces.
 
 **MinIO at 5.1 inherits the pattern, not the number** — pick another reserved-range
 UID for it rather than reusing 65100, so the two services cannot read each other's

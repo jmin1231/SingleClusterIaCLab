@@ -54,6 +54,32 @@ vault_field() {
   vault_ kv get -field="$2" "$1" 2>/dev/null || true
 }
 
+# Reissue when fewer than this many seconds remain. 7 days against the PKI role's
+# 30-day ceiling: enough slack that a re-run inside the window is a no-op, and
+# enough margin that a lab left alone for a week still comes back working.
+CERT_RENEW_BEFORE="${CERT_RENEW_BEFORE:-$((7 * 24 * 3600))}"
+
+# Is this certificate one we can keep using? Present is NOT usable: it can exist
+# and be expired, or be for the wrong name. Checked rather than assumed, so a
+# re-run repairs rather than trusting whatever is on disk.
+#
+# Paths are explicit rather than derived from the CN, because the two callers
+# disagree on filenames — proxy-installer.sh names them after the vhost, and
+# MinIO mandates public.crt/private.key.
+#
+# Like new_password() below, not strictly a Vault operation. It lives here
+# because both callers exist to decide whether to call pki/issue, and it is
+# guard logic — which is 0.2-5's second factoring trigger, the one about logic
+# that must change in more than one place at once rather than about the count.
+# Move it to common.sh if a caller appears that never talks to Vault.
+cert_usable() {
+  local crt="$1" key="$2" cn="$3" window="${4:-${CERT_RENEW_BEFORE}}"
+
+  [[ -s "${crt}" && -s "${key}" ]] || return 1
+  openssl x509 -in "${crt}" -noout -checkend "${window}" >/dev/null 2>&1 || return 1
+  openssl x509 -in "${crt}" -noout -checkhost "${cn}" >/dev/null 2>&1
+}
+
 # A password to put IN Vault. Not strictly a Vault operation, but every caller is
 # a vault-ensure-* script and the encoding choice below is driven by how
 # Vault-stored values get consumed — move it to common.sh if that stops being

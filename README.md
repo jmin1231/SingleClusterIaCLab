@@ -7,8 +7,9 @@ proxy, its own DNS and certificate authority, a secret store, a git server with
 CI, VMs provisioned by Terraform, a Kubernetes cluster reconciled by GitOps, and
 an application running on top of all of it.
 
-**Written in Python**, with one twenty-line bash file that exists only because
-Ubuntu will not let Python install itself.
+**Written in Python**, with one bash file: `bootstrap.sh` provisions the host up
+to the point Python can run, because Ubuntu will not let Python install itself.
+Everything past that is Python.
 
 ## Start here
 

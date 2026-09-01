@@ -1,0 +1,37 @@
+; lab.test zone file. SKELETON - rendered by Python, never edited in place.
+;
+; TODO 7 -- the SOA record. Every zone starts with one:
+;
+;   $ORIGIN lab.test.
+;   $TTL 60
+;   @   IN  SOA ns.lab.test. admin.lab.test. (
+;               <serial> ; bump on every change
+;               3600     ; refresh
+;               600      ; retry
+;               604800   ; expire
+;               60 )     ; negative TTL
+;
+; The serial is the interesting field. Secondaries refuse to reload a zone whose
+; serial did not increase - you have no secondaries, so nothing will punish you
+; for forgetting, which is exactly why the habit has to come from the renderer.
+; A date-based serial (2026090101) is the convention.
+;
+; TODO 8 -- an NS record. A zone with no NS is malformed even when it answers.
+;
+;   @   IN  NS  ns.lab.test.
+;   ns  IN  A   {{ host_ip }}
+;
+; TODO 9 -- the A records. Every name from network-plan.md's "The names" table
+; that points at the host:
+;
+;   web    IN  A  {{ host_ip }}
+;   git    IN  A  {{ host_ip }}
+;   vault  IN  A  {{ host_ip }}
+;
+; They all point at the HOST, not at containers - the reverse proxy at 3.5 is
+; what will tell them apart. Until then web.lab.test:8080 is the address.
+;
+; TODO 10 -- placeholder syntax. {{ }} above is jinja2's. If you render with
+; str.format or string.Template instead, change it - and either way say which in
+; decisions.md, because the file extension stops being a hint the moment there
+; are two templating styles in the repo.

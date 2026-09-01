@@ -11,8 +11,8 @@ Two kinds of value, and the distinction matters:
 
 | # | Range | Value | Kind |
 |---|---|---|---|
-| 1 | Host LAN subnet | *pending — fill in when the VM exists* | discovered |
-| 2 | Host address on it | *pending* | discovered |
+| 1 | Host LAN subnet | `10.1.0.0/24` | discovered |
+| 2 | Host address on it | `10.1.0.39`, on `cloudbr0` | discovered |
 | 3 | libvirt network for the VMs | `192.168.100.0/24` | chosen |
 | 4 | k3s pod CIDR | `10.42.0.0/16` | k3s default |
 | 5 | k3s service CIDR | `10.43.0.0/16` | k3s default |
@@ -34,6 +34,9 @@ CoreDNS is authoritative for `lab.test` and forwards everything else upstream.
 There is no reverse (`in-addr.arpa`) zone. Nothing in this lab resolves an
 address back to a name, and it is recorded here because a mapping nothing
 configures is a mapping nobody remembers is absent.
+
+Rows 1 and 2 sit on `cloudbr0`, a bridge the previous build created. It is a
+known leftover — see decision 7 — and the addresses move if it is ever undone.
 
 ## Collision check
 

@@ -12,6 +12,10 @@ Numbered sequentially in the order they were made. Do not renumber.
 
 ## 1 · Python, with one bash file
 
+> **Superseded in part by entry 8.** The exception stands; "around twenty lines"
+> does not. `bootstrap.sh` provisions the host. Left as written rather than
+> edited, because what was decided at the time is the useful record.
+
 **Decided:** everything is Python. `bootstrap.sh` is the single exception, around
 twenty lines: install `python3-venv`, build a venv, install dependencies, hand
 over to Python.
@@ -96,3 +100,87 @@ pull-request code runs.
 
 **Cost:** more setup, and a certificate to renew. Decided in advance because the
 socket is the path of least resistance and would never be revisited.
+
+---
+
+## 6 · systemd-timesyncd, not chrony
+
+**Decided:** the host keeps time with `systemd-timesyncd`. `bootstrap.sh` enables
+it with `timedatectl set-ntp true` and waits for `NTPSynchronized`.
+
+**Why:** it is already installed and already enabled on Ubuntu 24.04, so time
+sync costs zero packages. It is also what `timedatectl` drives — with chrony,
+`set-ntp` starts failing while the clock syncs anyway, and the code stops
+describing what actually happens.
+
+**Rejected: chrony.** More accurate, recovers better from long offline periods,
+and can serve time to other machines. Installing it masks timesyncd, so the two
+are a choice rather than a pair.
+
+**Cost:** timesyncd is an SNTP client only. If the lab VMs later need a time
+source on the lab network rather than upstream, it cannot be one — that is the
+point where this gets revisited.
+
+---
+
+## 7 · The old lab is decommissioned on the host, not removed
+
+**Decided:** `cloudstack-management`, `cloudstack-agent` and `cloudstack-usage`
+are stopped and disabled. `libvirtd` stays — entry 2 replaced CloudStack *with*
+libvirt, so Phase 6 needs it. `mysql` is left running for now; it is CloudStack's
+database and nothing in this plan uses it.
+
+**Why:** the management server held ports 8080, 8250 and 9090, and 8080 is the
+port step 1.2 publishes nginx on. Deciding CloudStack was gone did nothing to the
+machine still running it.
+
+**Not done, deliberately: `cloudbr0` stays.** The host's only global address
+(`10.1.0.39/24`) and its default route are on that bridge, which the old
+`prepare-kvm-host.sh` created. Removing it over SSH disconnects the host with no
+route back. It is a known leftover that the host's networking now depends on, and
+undoing it is a console operation, not a step in this plan.
+
+**Cost:** the host is not a clean Ubuntu install and will not be. `cloud0` still
+holds `169.254.0.1/16` — the link-local range `network-plan.md` lists in its own
+collision check — and old Docker bridges occupy `172.20`, `172.21` and `172.24`.
+None collide with the chosen `192.168.100.0/24`, which is why row 3 was chosen
+rather than inherited.
+
+---
+
+## 8 · bootstrap.sh provisions the host; Python runs the lab
+
+**Decided:** `bootstrap.sh` installs everything the host needs before the lab can
+run — time sync, apt prerequisites, the Docker engine and its repository, group
+membership, the venv and the lab package. Everything after that is Python.
+
+The boundary, so this does not sprawl: **bootstrap installs, it never
+configures.** The moment a function there writes a file containing a value — a
+port, a name, a credential — it belongs in `lab/`.
+
+**Why:** it is the split real infrastructure already makes. `bootstrap.sh` is the
+cloud-init user-data or the Packer provisioner: bare host to "can run our
+tooling". `lab install <service>` is the configuration-management layer that
+converges state and reports on it. Two jobs, and the seam is already there —
+bash before Python exists, Python after.
+
+**Rejected: bash shrinks to the venv and Python installs Docker.** Truer to entry
+1's language rule, and it needs Python running as root to apt-install the thing
+it needs in order to do anything. The plan's own step 1.4 assumes it. Not taken
+because the provisioning step is where a host is at its least Python-capable.
+
+**Cost, and it is real:** entry 1's "one bash file, around twenty lines" is now
+false — it is ~140 lines and installs Docker. Bash grows past the point where the
+skipped step 0.4 would have tested it. The install-never-configure rule is what
+caps the damage: install steps are guard-then-act and can be eyeballed, while
+logic and templating stay where `run()` and tests are.
+
+**Consequence: CLI toolchains stay off the host.** Terraform, Ansible, kubectl
+and helm go in the Phase 7 toolbox image, pinned, so the host and CI run
+identical versions. Installing them here would be the same convenience that makes
+every long-lived host drift from every other one.
+
+**Not addressed, deliberately:** patching. Nothing in this lab updates the host
+after bootstrap — no `unattended-upgrades`, no reboot policy. Every real estate
+has an answer; this one teaches building rather than operating, and the absence
+is recorded so it is a choice rather than an oversight.

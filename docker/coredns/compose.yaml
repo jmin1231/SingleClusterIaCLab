@@ -1,0 +1,39 @@
+# docker/coredns/compose.yaml - authoritative DNS for lab.test.
+#
+# SKELETON. Decisions are written down; the values are yours.
+
+name: coredns
+
+services:
+  coredns:
+    # TODO 1 -- image. Pin it, unlike web: this one is not disposable. Nothing
+    #   resolves anything while it is down, so "whatever was pushed today" is a
+    #   bad property for it to have.  coredns/coredns:<version>
+
+    container_name: coredns
+
+    # TODO 2 -- ports. DNS needs UDP *and* TCP on 53: UDP for normal queries,
+    #   TCP for responses over 512 bytes and for zone transfers. Publishing only
+    #   udp works until the day it silently does not.
+    #
+    #   Bind the host LAN address explicitly - "10.1.0.39:53:53/udp" - not
+    #   0.0.0.0. systemd-resolved holds 127.0.0.53 and 127.0.0.54; taking every
+    #   interface means fighting it for loopback and answering for the whole
+    #   network by accident.
+    #
+    #   The address is row 2 of network-plan.md. Hardcoding it here is exactly
+    #   what 2.1 was about, so decide whether it comes from somewhere.
+
+    # TODO 3 -- volumes. Two mounts, both read-only (:ro):
+    #     ./Corefile          -> /etc/coredns/Corefile
+    #     ./zones             -> /etc/coredns/zones
+    #   Read-only because CoreDNS never writes them; the renderer does, on the
+    #   host, before the container starts.
+
+    # TODO 4 -- command. The image defaults to reading /etc/coredns/Corefile,
+    #   so this may be unnecessary. Check before adding it.
+
+    labels:
+      lab: singlecluster
+
+    restart: unless-stopped

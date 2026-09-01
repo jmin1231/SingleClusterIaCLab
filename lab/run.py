@@ -29,6 +29,16 @@ def run(
     type depends on an argument's value is a function you have to read twice —
     callers that want the text write `.stdout.strip()` and it is obvious why.
     """
+    # The type hint says list[str], but nothing enforces it and a string is the
+    # mistake this signature invites. subprocess would not catch it either: cmd[0]
+    # of "timedatectl status" is "t", so the failure reads "t: command not found"
+    # and the echoed line is one character per word. An empty list is the same
+    # problem — subprocess raises IndexError from inside itself, naming nothing.
+    if isinstance(cmd, str):
+        raise TypeError(f"run() takes a list, not a string: {cmd!r}")
+    if not cmd:
+        raise ValueError("run() was given no command to run")
+
     if echo:
         # The $ makes it read as a shell transcript. shlex.join, not " ".join:
         # it quotes anything containing a space, so the line printed here is one

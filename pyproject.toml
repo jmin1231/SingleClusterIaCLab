@@ -16,6 +16,12 @@ requires-python = ">=3.12"
 # are cryptography (3.2), hvac (4.3) and jinja2 when templating starts.
 dependencies = []
 
+# `lab install web` as a bare command, rather than `python -m lab install web`.
+# pip writes a wrapper into .venv/bin/ pointing at this function; bootstrap.sh
+# reinstalls on every run, so it stays in step with the code.
+[project.scripts]
+lab = "lab.__main__:main"
+
 # Libraries the lab itself needs to run, installed with `pip install -e '.[dev]'`
 # — note the quotes, or the shell eats the brackets.
 #

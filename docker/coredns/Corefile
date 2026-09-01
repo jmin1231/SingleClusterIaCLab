@@ -1,0 +1,37 @@
+# CoreDNS configuration. SKELETON.
+#
+# Two blocks, and the split is the lesson: authoritative for one zone, a
+# forwarder for everything else.
+
+# TODO 5 -- the authoritative block.
+#
+#   lab.test:53 {
+#       file /etc/coredns/zones/lab.test.zone
+#       log
+#       errors
+#   }
+#
+# `file` makes CoreDNS authoritative: it answers from the zone and returns
+# NXDOMAIN for names it does not hold, rather than asking anyone else. That
+# refusal is the point - it is what 3.5's "reject names it does not know"
+# depends on.
+
+# TODO 6 -- the forwarder.
+#
+#   . {
+#       forward . 10.1.0.1
+#       cache 30
+#       log
+#       errors
+#   }
+#
+# Everything not in lab.test goes upstream. Get this wrong and the host resolves
+# web.lab.test but not github.com.
+#
+# NEVER forward to 127.0.0.53. That is systemd-resolved, which 2.3 is about to
+# point back at CoreDNS - the loop resolves nothing and is invisible in the logs.
+# 10.1.0.1 is the gateway (network-plan row 1); 8.8.8.8 is what the old build
+# used and is still in 05-cloudstack-bootstrap.conf.
+#
+# `cache 30` is deliberate while iterating: a long TTL means every mistake you
+# make is still being answered five minutes after you fixed it.

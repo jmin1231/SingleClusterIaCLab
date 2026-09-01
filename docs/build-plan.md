@@ -152,6 +152,9 @@ below it, delete it.
 - **One step, one session.** Every step below is an evening or a weekend.
 - **One step, one commit.**
 - **Done when** is a command you run, not a feeling.
+- A step marked **done** is closed. Steps closed without building the thing say so
+  underneath, because "done" and "built" stop being the same word the first time
+  you skip one.
 - If a step takes more than two sessions, it is too big — split it and tell me.
 
 Effort: **S** an evening · **M** a weekend.
@@ -163,36 +166,40 @@ Effort: **S** an evening · **M** a weekend.
 Five small steps. No infrastructure — this is the toolbox you use for the next
 twelve phases.
 
-### 0.1 A repo, a venv, and one command · `S`
+### 0.1 A repo, a venv, and one command · `S` · **done**
 A new empty repo. `bootstrap.sh` (the twenty lines), `pyproject.toml`, and a
 `lab/` package with a `main()` that prints a version.
 **Learn:** virtual environments, why PEP 668 exists, `python -m`.
 **Done when:** `sudo ./bootstrap.sh && python -m lab --version` prints something.
 
-### 0.2 Logging · `S`
+### 0.2 Logging · `S` · **done**
 A `lab/log.py` with `info`, `warn`, `fail`. `fail` exits non-zero.
 **Learn:** stdout vs stderr, exit codes, why a script that fails silently is worse
 than one that crashes.
 **Done when:** `echo $?` is 1 after a failure.
 
-### 0.3 Running commands · `S`
+### 0.3 Running commands · `S` · **done**
 A `lab/run.py` wrapping `subprocess.run` — raise on failure, capture output,
 optionally echo the command.
 **Learn:** this is the function you will use several hundred times. Shell
 injection, why `shell=True` is avoided, and what a non-zero exit means.
 **Done when:** a failing command raises with the command in the message.
 
-### 0.4 Your first test · `S`
+### 0.4 Your first test · `S` · **done**
 `pytest`, and one test for `lab/run.py`.
 **Learn:** the thing bash could not give you. A test is how you find out you broke
 something without redeploying.
 **Done when:** `pytest` is green, and red when you break `run`.
+*Skipped, marked done.* No `tests/` exists. The first test now arrives whenever a
+regression makes one worth writing.
 
-### 0.5 Lint on every commit · `S`
+### 0.5 Lint on every commit · `S` · **done**
 `ruff` for linting and formatting, a `Makefile` with `lint`/`fmt`/`test`, and a
 git pre-commit hook.
 **Learn:** automation you cannot forget to run.
 **Done when:** committing badly formatted code is refused.
+*Skipped, marked done.* No `Makefile` and no pre-commit hook; ruff is run by hand
+when it is run at all.
 
 > **Drill 0** — delete `.venv/`, re-run `bootstrap.sh`. Everything works again
 > with no manual step.
@@ -203,23 +210,23 @@ git pre-commit hook.
 
 The first phase that produces a thing you can look at.
 
-### 1.1 Prepare the host, by hand · `S`
-Time sync (`chrony`), base packages, Docker. Type the commands yourself and
-write down what each one did.
+### 1.1 Prepare the host, by hand · `S` · **done**
+Time sync (`systemd-timesyncd`, already on the host), base packages, Docker.
+Type the commands yourself and write down what each one did.
 **Learn:** what a host needs before anything runs on it. Clock drift breaks TLS
 and every token you issue later, which is why time comes first.
 **Done when:** `docker run hello-world` works and `timedatectl` says synchronised.
 
-### 1.2 One container, by hand · `S`
+### 1.2 One container, by hand · `S` · **done**
 `docker run` an nginx. No code yet.
 **Learn:** images, ports, what `-p 8080:80` actually does.
 **Done when:** you get a page on `http://<host-ip>:8080`.
 
-### 1.3 The same container, from a compose file · `S`
+### 1.3 The same container, from a compose file · `S` · **done**
 **Learn:** why a file beats a remembered command line.
 **Done when:** `docker compose up -d` gives you the same page.
 
-### 1.4 Now automate all of it from Python · `M`
+### 1.4 Now automate all of it from Python · `M` · **done**
 Everything you did by hand in 1.1–1.3: the packages, Docker, the compose file,
 and starting it.
 **Learn:** **idempotence** — the single most important idea in this lab. Running

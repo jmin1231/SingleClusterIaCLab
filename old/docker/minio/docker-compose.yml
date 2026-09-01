@@ -61,6 +61,7 @@ services:
       # carry whatever address the request arrived on — the container's own,
       # which no client outside can resolve.
       - MINIO_SERVER_URL=https://minio.lab.test:9000
+      - SSL_CERT_FILE=/certs/ca.crt
 
     # Bound to the bridge rather than 0.0.0.0, the same reasoning as Vault's
     # publish (3.1-2). MinIO is not behind the proxy, so this IS the way in and

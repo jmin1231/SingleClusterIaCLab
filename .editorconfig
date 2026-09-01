@@ -1,4 +1,5 @@
-# Baseline formatting so shfmt/terraform fmt/ruff output stays consistent.
+# Baseline formatting, so shfmt and ruff agree with each other and with you.
+# shfmt reads this file — without it, it defaults to tabs.
 root = true
 
 [*]
@@ -9,6 +10,11 @@ trim_trailing_whitespace = true
 indent_style = space
 indent_size = 2
 
+# PEP 8, which ruff enforces and will not be argued with.
+[*.py]
+indent_size = 4
+
+# Trailing spaces are a line break in Markdown.
 [*.md]
 trim_trailing_whitespace = false
 

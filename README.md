@@ -1,101 +1,73 @@
 # SingleClusterIaCLab
 
-A single-host infrastructure lab, built from scratch as a learning exercise: a
-private cloud on one Ubuntu host, three network tiers inside it, and a real
-application deployed end to end.
+A single-host infrastructure lab, built from scratch to be understood.
 
-Built by following [`docs/build-order.md`](docs/build-order.md) — a sixteen-phase
-syllabus that puts names, trust and policy in place *before* the services that
-depend on them, so nothing has to be retrofitted.
+One Ubuntu machine becomes a small private estate: containers behind a reverse
+proxy, its own DNS and certificate authority, a secret store, a git server with
+CI, VMs provisioned by Terraform, a Kubernetes cluster reconciled by GitOps, and
+an application running on top of all of it.
 
-## Status
+**Written in Python**, with one twenty-line bash file that exists only because
+Ubuntu will not let Python install itself.
 
-**Phase 2 — names and trust.** CoreDNS is running on the bridge (2.1). The root
-and intermediate CAs are written, and whether they have been *generated* is a
-per-machine fact — see "Working on more than one machine" below. `ca/root/` and
-`ca/intermediate/` are gitignored, so a clone shows nothing either way; check
-the host rather than the repo.
+## Start here
 
-Work in flight, with every decision written up in
-[`docs/decisions.md`](docs/decisions.md) and each numbered `TODO` pointing at the
-entry that settles it:
+[`docs/build-plan.md`](docs/build-plan.md) — thirteen phases, ~50 steps, each an
+evening or a weekend. It is a syllabus, not a runbook: every step says what to
+build, what it teaches, and a *Done when* you can actually run.
 
-| File | State | Next |
-|---|---|---|
-| `ca/scripts/issue-leaf.sh` | key, CSR and signing written; 17 TODOs | `verify_leaf`, then `check_existing` last |
-| `bootstrap.sh` | working; logging complete (L-1, L-2) | run it on the target VM — never tested outside harnesses |
-
-Blocking everything in `ca/` on a machine that has not done it: run
-`sudo ./ca/ca-install-all.sh` once. It is a no-op if the CA is already there. It
-creates the root and the intermediate, and — less obviously — the `index.txt` and
-`newcerts/` that `openssl ca` needs before a leaf can be signed at all.
-
-**The CA issues one certificate, for Vault** (3.4-1). Vault's PKI engine becomes
-the issuing CA at 3.4, and since 3.4 lands before Gitea, MinIO and Grafana, every
-other certificate in the lab comes from Vault. The reverse proxy of 2.5 moves
-after 3.4 for the same reason. `issue-leaf.sh` is a bootstrap step, not a
-general-purpose issuer.
-
-### Working on more than one machine
-
-The CA does not travel. Keys are gitignored and the passphrases live in `/root`
-(2.3-5), so running `ca-install-all.sh` on a second machine mints a **different**
-root, and certificates issued under one will not validate against the other.
-That is the intended behaviour, not a gap — but it means a second machine is for
-writing code and docs, and certificates are issued where they will be used.
+The plan is built on one idea: **make something work, feel what is missing, then
+fix that.** DNS arrives after you have typed too many addresses. A certificate
+authority arrives after a browser has refused your site. Each foundation shows up
+after the problem it solves, so you already know what it is for.
 
 ## Getting started
 
 ```sh
 git clone <this repo> && cd SingleClusterIaCLab
-make setup
+sudo ./bootstrap.sh          # installs python3-venv, builds .venv, installs deps
+python -m lab --version
 ```
 
-`make setup` is **required on every clone**. It enables the git hooks by setting
-`core.hooksPath`, which git cannot carry inside a commit. Skip it and the
-pre-commit hook sits there doing nothing, silently.
-
-```sh
-make            # list the available targets
-make lint       # check formatting and syntax — never writes
-make fmt        # rewrite files into canonical format
-```
-
-## Requirements
+## What the machine needs
 
 | | Minimum |
 |---|---|
 | OS | Ubuntu 24.04 LTS, x86_64 |
-| CPU | 12 cores, VT-x/AMD-V enabled |
-| RAM | **16 GB — a hard ceiling** |
-| Disk | 200 GB, SSD — the floor, with no margin |
-| Virtualization | `/dev/kvm` present; nested virt on if this host is a VM |
+| CPU | 8 cores with VT-x/AMD-V **enabled** |
+| RAM | 16 GB |
+| Disk | 200 GB SSD |
+| Virtualization | `/dev/kvm` present; nested virt on if this host is itself a VM |
 
-Check the two that stop people first:
+The two that stop people first:
 
 ```sh
 egrep -c '(vmx|svm)' /proc/cpuinfo   # must be > 0
 ls -l /dev/kvm                       # must exist
 ```
 
-## Layout
+## The other documents
 
-Organised by tool. Directories appear as the phase that creates them is reached.
-
-```
-docs/           build-order.md (the syllabus), decisions.md, failure-log.md
-.githooks/      versioned git hooks; enabled by `make setup`
-```
+| | |
+|---|---|
+| [`docs/decisions.md`](docs/decisions.md) | What was chosen, what was rejected, why |
+| [`docs/network-plan.md`](docs/network-plan.md) | Every address range, decided before anything claims one |
+| [`docs/resource-budget.md`](docs/resource-budget.md) | What runs in 16 GB |
+| [`docs/failure-log.md`](docs/failure-log.md) | What broke, and where the search should have started |
 
 ## Conventions
 
-- **`lint` never writes; `fmt` does.** The pre-commit hook only ever calls `lint`,
-  so it cannot modify a file and make the second run differ from the first.
-- **Missing tools warn locally, fail in CI.** `STRICT=1` turns a skipped linter
-  into an error; CI sets it.
-- **No suppression without a reason.** Every entry in `.trivyignore` and
-  `.shellcheckrc` carries a comment explaining itself.
-- **Decisions are written down.** See [`docs/decisions.md`](docs/decisions.md) —
-  what was chosen, what was rejected, and why.
-- **So are failures.** See [`docs/failure-log.md`](docs/failure-log.md) — what
-  broke, what it actually was, and where the search should have started.
+- **Everything is idempotent.** Running an installer twice must not break
+  anything, and the second run should say so.
+- **`lint` never writes; `fmt` does.** The pre-commit hook only ever calls `lint`.
+- **A comment explains what the code cannot.** If it restates the line below it,
+  delete it.
+- **Decisions are written down** — briefly. Four paragraphs usually means two
+  decisions.
+
+## History
+
+An earlier build of this lab used CloudStack, MinIO and bash throughout, and
+followed a sixteen-phase plan that ended in SSO and chaos drills. It worked as far
+as it went. It is in git history, along with its 3,148-line decision log, if you
+ever want to see how something was wired up.

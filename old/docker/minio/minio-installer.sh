@@ -23,12 +23,20 @@ source "${SOURCE_SCRIPT}/../../lib/vault.sh"
 COMPOSE="${SOURCE_SCRIPT}/docker-compose.yml"
 CERT_DIR="${SOURCE_SCRIPT}/certs"
 DATA_DIR="${SOURCE_SCRIPT}/data"
-# MinIO mandates these two names and will not read anything else. Notably NOT
-# the tls.crt/tls.key this repo uses elsewhere: that convention comes from
-# kubernetes.io/tls, and MinIO predates caring about it. Get them wrong and MinIO
-# does not fail — it silently generates its own self-signed pair.
+# What MinIO SERVES. It mandates these two names and will not read anything
+# else — notably NOT the tls.crt/tls.key this repo uses elsewhere, which comes
+# from kubernetes.io/tls. Get them wrong and MinIO does not fail; it silently
+# generates its own self-signed pair.
 CERT_FILE="${CERT_DIR}/public.crt"
 KEY_FILE="${CERT_DIR}/private.key"
+
+# What the CLI inside the container TRUSTS, via SSL_CERT_FILE in
+# docker-compose.yml. MinIO neither mandates nor reads this: it is the root on
+# its own, and it is separate from public.crt on purpose. public.crt is rewritten
+# every renewal and a server may legitimately stop sending the root — either
+# would silently empty the trust anchor if the two were one file. Vault learned
+# this as bundle.crt "verifies nothing"; ca.crt is the same fix.
+CA_FILE="${CERT_DIR}/ca.crt"
 ENV_FILE="${SOURCE_SCRIPT}/.env"
 
 PKI_ROLE="lab-server"
@@ -97,7 +105,11 @@ require_root_secret() {
 issue_cert() {
   local json
 
-  if cert_usable "${CERT_FILE}" "${KEY_FILE}" "${MINIO_NAME}"; then
+  # CA_FILE is checked here and not inside cert_usable: that helper is shared
+  # with proxy-installer.sh, which has no ca.crt. Without this clause a missing
+  # or truncated ca.crt would never be repaired — cert_usable would pass on the
+  # other two files and return before the write below is ever reached.
+  if cert_usable "${CERT_FILE}" "${KEY_FILE}" "${MINIO_NAME}" && [[ -s "${CA_FILE}" ]]; then
     log "Certificate for ${MINIO_NAME} is current; not reissuing"
     return 0
   fi
@@ -128,6 +140,22 @@ issue_cert() {
   # the mode has not already given away. Only the key needs an owner.
   jq -r '.data.certificate, .data.ca_chain[]' <<<"${json}" >"${CERT_FILE}"
   chmod 0444 "${CERT_FILE}"
+
+  # The trust anchor, extracted rather than assumed. ca_chain runs leaf-ward to
+  # root-ward, so [-1] is the root — but that is Vault's ordering, not a
+  # guarantee, and anchoring on the intermediate by mistake is exactly the
+  # failure this file exists to prevent. A root is self-signed, so subject and
+  # issuer match; assert that BEFORE writing, so a bad extraction leaves no file
+  # rather than a wrong one the early return above would then skip forever.
+  local root_pem subject issuer
+  root_pem="$(jq -r '.data.ca_chain[-1]' <<<"${json}")"
+  subject="$(openssl x509 -noout -subject <<<"${root_pem}" 2>/dev/null)" || true
+  issuer="$(openssl x509 -noout -issuer <<<"${root_pem}" 2>/dev/null)" || true
+  [[ -n "${subject}" && "${subject#subject=}" == "${issuer#issuer=}" ]] ||
+    die "Last element of ca_chain is not a self-signed root (subject: ${subject:-unparseable}). Anchoring on it would trust the intermediate directly."
+
+  printf '%s\n' "${root_pem}" >"${CA_FILE}"
+  chmod 0444 "${CA_FILE}"
 
   log "Issued ${MINIO_NAME}, valid until $(openssl x509 -in "${CERT_FILE}" -noout -enddate | cut -d= -f2)"
 }

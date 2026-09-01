@@ -2,100 +2,54 @@
 
 Every address range this lab uses, decided before anything claims one.
 
-Three kinds of value appear here and the distinction matters:
+Two kinds of value, and the distinction matters:
 
 - **Discovered** — inherited from the host's network. Not ours to choose.
 - **Chosen** — ours, and recorded so nothing else takes them.
-- **Derived** — computed by a tool at run time. Nobody types these anywhere,
-  which is exactly why they are written down: a range nothing configures is a
-  range nobody remembers is taken.
 
 ## The ranges
 
 | # | Range | Value | Kind |
 |---|---|---|---|
-| 1 | Bridge subnet | *pending — the VM's LAN* | discovered |
-| 2 | Bridge gateway | *pending* | discovered |
-| 3 | Host address on the bridge | *pending — DHCP lease, pinned static by the installer* | discovered |
-| 4 | CloudStack public IPs | ~`.11–.30` of row 1 | **derived** |
-| 5 | CloudStack pod IPs | ~`.31–.50` of row 1 | **derived** |
-| 6 | CloudStack guest CIDR | `172.16.1.0/24` | installer default |
-| 7 | VPC | `10.0.0.0/16` | chosen |
-| 8 | Tier subnets | `10.0.1.0/24` frontend · `10.0.2.0/24` tunnel · `10.0.3.0/24` backend | chosen |
-| 9 | WireGuard wg0 — frontend ↔ tunnel | `10.10.0.0/24` | chosen |
-| 10 | WireGuard wg1 — tunnel ↔ backend | `10.10.1.0/24` | chosen |
-| 11 | k3s pod CIDR | `10.42.0.0/16` | k3s default |
-| 12 | k3s service CIDR | `10.43.0.0/16` | k3s default |
-| 13 | Docker bridges | `172.17.0.0/16` – `172.31.0.0/16` | auto-allocated, on demand |
+| 1 | Host LAN subnet | *pending — fill in when the VM exists* | discovered |
+| 2 | Host address on it | *pending* | discovered |
+| 3 | libvirt network for the VMs | `192.168.100.0/24` | chosen |
+| 4 | k3s pod CIDR | `10.42.0.0/16` | k3s default |
+| 5 | k3s service CIDR | `10.43.0.0/16` | k3s default |
+| 6 | Docker bridges | `172.17.0.0/16` onward | auto-allocated |
 
-Rows 1–3 are filled once the VM exists. Rows 7–10 follow the reference's values,
-which were checked against rows 11–13 rather than inherited on trust.
+Row 3 is deliberately **not** libvirt's `default` network at `192.168.122.0/24`.
+Picking our own means a stock libvirt install on the same host cannot collide
+with it, and it makes the choice visible rather than inherited.
 
-## Rows 4 and 5 are the point of this document
+## The names
 
-CloudStack derives its entire zone from the bridge's own `/24`. It scans for
-addresses that **do not answer** and claims roughly twenty public IPs and twenty
-pod IPs from what it finds free.
+CoreDNS is authoritative for `lab.test` and forwards everything else upstream.
 
-Two consequences:
+| Name | Points at |
+|---|---|
+| `web.lab.test`, `git.lab.test`, `vault.lab.test` | the host, via the reverse proxy |
+| `frontend.lab.test`, `app.lab.test`, `data.lab.test` | the VMs, from Terraform outputs (6.5) |
 
-- Nobody configures those ranges, so nothing in the repository mentions them.
-  Without this table there is no record that `.11–.50` is spoken for.
-- The allocation depends on a **liveness probe**, not a reservation. Anything of
-  ours that happens to be stopped when the installer runs can have its address
-  claimed.
+There is no reverse (`in-addr.arpa`) zone. Nothing in this lab resolves an
+address back to a name, and it is recorded here because a mapping nothing
+configures is a mapping nobody remembers is absent.
 
-The host address (row 3) sits inside that scanned space and is spared only
-because it responds. In practice DHCP pools start well above `.50`, so this
-resolves itself — verified by running the reference stack on a fresh VM with no
-collision. It is recorded because "it works for a reason nobody wrote down" is
-how it stops working later.
+## Collision check
 
-**Check when the VM exists:** does the LAN's DHCP pool overlap `.11–.50`? If it
-does, either shrink the pool or reserve CloudStack's range on the router.
+Three ranges allocate **automatically**, so they collide silently rather than
+loudly:
 
-## What this plan does not contain: reverse DNS
-
-Every row above is a forward mapping. There is no `in-addr.arpa` zone anywhere in
-this lab — CoreDNS is authoritative for `lab.test` and nothing answers a PTR
-query for any address in it.
-
-That has cost nothing so far, and it is worth understanding why: forward-only DNS
-is invisible until something resolves an address back to a name and compares the
-answer to what it expected. Nothing here does that yet. The things that would:
-Kerberos, which derives service principals from hostnames and fails with an error
-naming the *principal* rather than the DNS (see 14.0-1); `sshd`'s `UseDNS`; and
-TLS clients that log peer names.
-
-Recorded for the same reason rows 4 and 5 are: a mapping nothing configures is a
-mapping nobody remembers is absent.
-
-## Overlap check
-
-The three ranges that allocate **automatically**, and therefore collide silently:
-
-- **k3s** takes `10.42.0.0/16` and `10.43.0.0/16` by default. A collision with
-  the VPC or the overlay presents as **DNS failure**, not as a routing problem —
-  which is why it costs hours rather than minutes.
+- **k3s** takes rows 4 and 5 by default. A collision with row 3 shows up as *DNS
+  failure*, not as a routing problem, which is why it costs hours.
 - **Docker** hands itself `172.17.0.0/16` onward as compose stacks are added.
-  Row 6 at `172.16.1.0/24` sits one subnet below that pool: clear, but only
-  just. If the guest CIDR ever changes, this is the range to stay out of.
-- **Link-local** `169.254.0.0/16` is used by CloudStack's `cloud0` bridge.
+- **Link-local** `169.254.0.0/16` is reserved and used by some hypervisors.
 
-Rows 7–10 are clear of all three. Confirmed rather than assumed.
+Row 3 is clear of all three. Confirmed rather than assumed.
 
-## What depends on the bridge address
+## What to fill in when the host exists
 
-Row 3 is the lab's single point of contact — every component reaches the control
-plane on it. It is discovered at run time rather than written down, and fed to
-every consumer from one function (`cloudbr0_ip()` in the reference):
-
-- service bind addresses — though see decision `0.4-1`, we bind `0.0.0.0`
-- the container registry string, in `daemon.json`, k3s `registries.yaml`, Vault
-- `VAULT_ADDR`, for CI and for the cluster's ClusterSecretStore
-- the git URL `flux bootstrap` bakes into `gotk-sync.yaml`
-- DNS records, from Phase 2 onward
-- `cloudstack-setup-databases -i <ip>`, and the zone derivation above
-
-Most of those become names in Phase 2. The address does not stop being needed —
-it is what the names resolve to — but it stops being copied into a dozen places.
+```sh
+ip -4 addr show          # rows 1 and 2
+ip route show default    # the upstream CoreDNS forwards to
+```

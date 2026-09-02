@@ -1676,6 +1676,10 @@ the structure does not.
 
 ## L-2 · Runtime logs land in journald, containers included
 
+> **No longer implemented.** `bootstrap.sh` no longer sets Docker's journald
+> log driver — see L-7. Containers use the default `json-file`, so
+> `journalctl -t <name>` does not work and an agent discovers files instead.
+
 > **AMENDED by [L-5](#l-5--journald-retention-as-built-and-three-findings).** The
 > premise below — "no retention limits are set at all" — is true of the config and
 > false of the behaviour. Defaults are a 4G cap. Two other findings there.
@@ -2560,6 +2564,10 @@ run exits 1 with the `die` message in the file.
 
 ## L-5 · journald retention as built, and three findings
 
+> **No longer implemented.** `bootstrap.sh` no longer writes the journald
+> drop-in — see L-7. Retention is whatever Ubuntu ships, and the host has no
+> configured local sink to fall back on.
+
 **Built** as `configure_journald`, writing `/etc/systemd/journald.conf.d/10-lab.conf`
 with `Storage=persistent`, `SystemMaxUse=2G`, `SystemKeepFree=20G`,
 `MaxRetentionSec=1month`.
@@ -2953,6 +2961,10 @@ acting on the count.
 
 ## L-6 · Loki runs in the backend tier; Alloy runs on both sides; Wazuh is rejected on budget
 
+> **Superseded by L-7** on placement and budget. Its rejection of Wazuh still
+> stands; what changed is that both of its premises were removed from
+> `bootstrap.sh`.
+
 **Decided:** at 13.2, Loki runs **inside the backend tier** in single-binary mode
 with filesystem storage (~0.5 GB, already in the budget). Alloy runs in **two**
 places: one in k3s for pod logs (~0.15 GB, budgeted) and one **on the host VM**
@@ -3189,3 +3201,96 @@ three tiers, two enforcement points, two different rule models — ordered and
 first-match on the VPC, allow-only and additive in Kubernetes. Whichever sits
 closer to the packet is the one that refuses it, which is why the two have to be
 read together rather than assumed to agree.
+
+---
+
+## L-7 · Loki moves to the host; kube-prometheus-stack keeps the cluster
+
+**Decided:** metrics and logs split across the boundary deliberately.
+**kube-prometheus-stack** runs in k3s in the backend tier and owns every metric,
+including the VMs' via node-exporter. **Loki** runs **on the host**, single-binary
+with filesystem storage, as another host service in the pattern already there — a
+compose stack, a Vault-issued certificate, a CoreDNS name, a proxy vhost.
+**Alloy** runs on the host, on each provisioned VM, and as a DaemonSet in k3s.
+Everything pushes to Loki.
+
+**Why L-6 no longer holds.** It put Loki in the backend tier and rested on two
+things since removed from `bootstrap.sh`: L-2's journald log driver, which made the
+host agent nearly free because every container was already in the journal, and
+L-5's journald retention, which was the host's durable sink when the cluster was
+the thing that failed. Without them, keeping Loki inside the cluster leaves the
+only log store living in the thing whose failures you need logs to diagnose.
+Moving it to the host restores 1.3-6 — *a record must not depend on the thing it
+records* — by a different route: not a second copy on the host, but the store
+itself outside the cluster.
+
+**Push out, pull in, and they need opposite rules.** Alloy pushes to Loki, so no VM
+needs an inbound path. Prometheus scrapes, so it needs 9100 inbound on every VM
+from the backend tier. Under 7.2's deny-by-default ACLs that is the awkward half —
+the cluster reaching back into all three tiers. Write the log rules first; they go
+one direction and they work.
+
+**What it costs, as arithmetic rather than a shrug.** The backend tier drops 0.5 GB
+and is resized 5.1 → 4.6. The host gains 0.5 GB, and Alloy on the frontend and
+tunnel tiers adds 0.3 GB never previously budgeted. Net **+0.3 GB against a budget
+with no headroom**, taking the lab to ~16.3 of 16. `resource-budget.md` names three
+ways to close it; dropping Alloy on the tunnel tier is cheapest and loses least —
+it routes, and its journal is sshd and WireGuard.
+
+**The trade accepted rather than discovered later.** Grafana ships inside
+kube-prometheus-stack, so it dies with the cluster while Loki does not. The logs
+survive; the UI for reading them does not. `logcli` is the answer, and 13.2's *Done
+when* now requires proving it with the cluster stopped. A second Grafana on the
+host was rejected: real memory, in a budget already over, for a rare case that has
+a working CLI.
+
+**Unchanged from L-6:** Wazuh stays rejected on the same arithmetic. Loki stays
+single-binary on filesystem storage — the scalable mode wants object storage, and
+although MinIO exists, that is a Phase 5 dependency this does not need.
+
+---
+
+## S-1 · Five cuts, to make the lab fit and to shorten it
+
+**Decided:** five things leave the plan. Together they remove ~3.9 GB and eleven
+steps, and take the budget from 0.3 GB over to ~15.9 GB of 16.
+
+| Cut | Saves | Depended on by |
+|---|---|---|
+| Phase 14, identity (6 steps) | ~2.0 GB | nothing |
+| Kyverno + signature admission (11.3, 11.4) | ~0.4 GB | nothing |
+| The two-tier openssl CA (2.3, 2.4) | 0 GB, ~858 lines | 3.4, rewritten |
+| MinIO (5.1) | ~0.3 GB, 424 lines | 5.2, rewritten |
+| Default multi-node k3s (9.2) | ~1.5 GB | nothing |
+
+**The CA is the interesting one, because the obvious version of it is wrong.**
+Removing "the CA" saves **no memory at all** — it is openssl scripts that run four
+times and exit, not a service. What it would cost is every TLS thread in the lab:
+Vault's serving certificate, the proxy, Gitea, cert-manager at 9.4. So the
+certificates stay and only the *implementation* goes. Vault's PKI becomes a
+self-signed root at 3.4 and issues everything; `ca/`, `root-ca.cnf`,
+`intermediate-ca.cnf`, `index.txt` and the serial file are deleted. What is lost
+is the offline-root lesson — genuinely valuable, and the most ceremonial part of
+the lab.
+
+**MinIO's replacement is not Gitea alone.** Gitea's registries take Terraform
+state and container images. They do **not** take Packer's CloudStack templates
+well: `registerTemplate` pulls by URL, and a private Gitea package needs
+credentials embedded in that URL, which then live in CloudStack's database and its
+logs. Templates are served instead as static files by the proxy that already
+exists — `images.lab.test`, TLS from Vault, a name in CoreDNS. One vhost, no new
+service, no credential in a URL.
+
+**What was considered and kept.** CloudStack is the largest single weight at
+~4.0 GB across the management server, MySQL, two system VMs and the virtual
+router — and it is 73 references, all of Phase 1, Phase 7's provider, and the
+VPC/tier/ACL thread this lab is partly for. Removing it is not a cut but the
+libvirt rewrite, which was tried and reverted. It becomes worth revisiting only on
+an actual 16 GB VM. Vault, DNS, the proxy and Phase 13 stay: they are the
+load-bearing, transferable parts, and cutting them would make a lighter lab that
+teaches less.
+
+**Cost:** the plan loses its identity story entirely, its admission-control story,
+and the offline-root ceremony. Scheduling becomes something you arrange
+deliberately rather than something the cluster shows you by default. Each is a
+real loss and each was chosen over the alternative of not fitting.

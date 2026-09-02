@@ -66,11 +66,8 @@ services:
       - ./config:/vault/config:ro
       - ./data:/vault/data
       # Read-write and separate from data/: the audit device writes here, and
-      # Vault refuses to serve if it cannot. Its retention is its own — L-2 keeps
-      # audit out of the journald story because "what happened" and "who did
-      # what" have different rules.
+      # Vault refuses to serve if it cannot. Its retention is its own, because
+      # "what happened" and "who did what" have different rules — which is why
+      # this is a bind mount rather than container output.
       - ./logs:/vault/logs
 
-    logging:
-      options:
-        tag: vault

@@ -44,6 +44,3 @@ services:
       # Issued by Vault. Read-only: nothing in the container may rewrite them.
       - ./certs:/etc/nginx/certs:ro
 
-    logging:
-      options:
-        tag: proxy

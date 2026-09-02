@@ -42,9 +42,6 @@ services:
       interval: 5s
       timeout: 3s
       retries: 20
-    logging:
-      options:
-        tag: gitea-db
 
   gitea:
     image: gitea/gitea:1.24-rootless@sha256:a664a64d7740ef0db74f090f567040d0e5b34592473aad08ed5e296ccbe00eab
@@ -83,9 +80,6 @@ services:
       - edge
     volumes:
       - ./data/gitea:/var/lib/gitea
-    logging:
-      options:
-        tag: gitea
 
   # The daemon CI jobs build on — never the host's. Reachable unauthenticated on
   # the ci network, which is deliberate: that is what jobs use it for, and is
@@ -139,9 +133,6 @@ services:
       - ci
     volumes:
       - dind-data:/var/lib/docker
-    logging:
-      options:
-        tag: gitea-dind
 
   # Gitea Actions runner. Holds the host docker socket because it creates job
   # containers on the host daemon — that is what keeps /dev/kvm a single hop.
@@ -176,9 +167,6 @@ services:
       - ./runner/config.yaml:/config.yaml:ro
       - ./runner/data:/data
       - /var/run/docker.sock:/var/run/docker.sock
-    logging:
-      options:
-        tag: gitea-runner
 
 volumes:
   # dind's image store. Named rather than a bind mount: it holds a docker

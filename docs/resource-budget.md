@@ -36,15 +36,36 @@ Measure with `free -m`, `docker stats --no-stream`, and `virsh dominfo <vm>`.
 | Cloud | Secondary storage VM + console proxy (512 MB each) | ~1.0 GB | |
 | Cloud | VPC virtual router | ~0.5 GB | |
 | Control plane | Gitea + PostgreSQL, MinIO, Vault, CoreDNS, proxy, runner idle | ~1.5 GB | |
-| Control plane | Alloy on the host, scraping journald (L-6) | ~0.15 GB | |
+| Control plane | Loki, single-binary on the host, + Alloy beside it (L-7) | ~0.65 GB | |
 | Guests | frontend tier (768 MB) + tunnel tier (512 MB — see rule 6) | ~1.25 GB | |
-| **Fixed subtotal** | | **~8.9 GB** | |
-| Guests | backend tier (k3s + workloads) | **5.1 GB** | |
-| **Baseline** | | **~14.0 GB** | |
+| Guests | Alloy on the frontend and tunnel tiers (L-7) | ~0.3 GB | |
+| **Fixed subtotal** | | **~9.7 GB** | |
+| Guests | backend tier (k3s + workloads, Loki and Kyverno removed) | **4.2 GB** | |
+| **Baseline** | | **~13.9 GB** | |
 | Reserve | page cache, kernel, burst | ~2.0 GB | |
-| **Committed** | | **~16.0 GB** | |
+| **Committed** | | **~15.9 GB** | |
 
-There is no headroom. That is the finding, not a formatting accident.
+**It closes again, at ~15.9 GB, because of the cuts in S-1** — Kyverno leaves the
+tier (~0.4 GB), the second and third k3s agents are no longer default (~1.5 GB
+that was never in this table but was in rule 3), and authentik's ~2 GB stops being
+a thing the stop-order has to make room for. The paragraphs below are kept because
+the arithmetic that produced the squeeze is the useful part.
+
+**Before those cuts it was 0.3 GB over.** Moving Loki to the host
+(L-7) frees 0.5 GB inside the backend tier but adds 0.5 GB to the host and 0.3 GB
+of Alloy across the frontend and tunnel tiers. The tier shrank by less than the
+host grew.
+
+Three ways to close it, in the order I would try them:
+
+1. **No Alloy on the tunnel tier.** It routes; it does not run workloads, and its
+   journal is sshd and WireGuard. Saves 0.15 GB and loses little.
+2. **Frontend tier 768 → 640 MB.** It serves static content behind the Gateway.
+3. **Accept it and use the stop-order.** 13.x and authentik already cannot
+   coexist (rule 4); this is the same trade one component smaller.
+
+What does *not* close it is trimming Prometheus further — rule 7 already pins it,
+and the backend tier now has ~0.3 GB of slack it did not have before.
 
 ### What does not fit any more
 
@@ -70,9 +91,10 @@ There is no headroom. That is the finding, not a formatting accident.
    k3s ~0.8, Flux ~0.3, cert-manager ~0.15, ESO ~0.1, Kyverno ~0.4, **NGINX
    Gateway Fabric ~0.2**, Postgres ~0.3, api + web ~0.3, **kube-prometheus-stack
    ~1.4** (Prometheus, Alertmanager, kube-state-metrics, node-exporter and the
-   operator — *not* the ~1.0 a bare Prometheus would cost), Grafana ~0.2, Loki
-   ~0.5, Alloy ~0.15. That totals **~4.8 GB in a 5.1 GB tier**, leaving ~0.3 GB
-   for the guest's own kernel and userland. It closes, and only just.
+   operator — *not* the ~1.0 a bare Prometheus would cost), Grafana ~0.2, Alloy
+   ~0.15. Loki is **no longer here** — it moved to the host at L-7. That totals
+   **~4.3 GB in a 4.6 GB tier**, the same ~0.3 GB of slack as before, because the
+   tier was resized by exactly what left it.
 
    **The correction that made it close:** an earlier version of this list said
    "Prometheus ~1.0" and omitted NGINX Gateway Fabric entirely. 13.1 installs a

@@ -1,5 +1,12 @@
 # Build Order
 
+> **Superseded as the plan by [`build-plan.md`](build-plan.md).** This document
+> was written before any of the lab existed and describes building it from
+> nothing; Phases 0–5 of it are now built, five things were cut (S-1), and three
+> designs changed (L-7, 9.1-1). It is kept because its per-step *Learning* notes
+> are still the best explanation of why each piece is there — but where the two
+> disagree, `build-plan.md` wins. The `CUT` markers below say what left.
+
 A ground-up build of a single-host infrastructure lab, designed for learning rather than speed.
 Sixteen phases, eighty-one steps, each scoped to a single working session — ordered so nothing you
 build later forces you to reopen what you built earlier.
@@ -558,6 +565,11 @@ first".
 
 ### 2.3 Generate an offline root CA · `M`
 
+> **CUT — see S-1.** The offline root and its intermediate go; Vault's PKI
+> becomes a self-signed root at 3.4 and issues everything. Certificates stay —
+> only the two-tier openssl ceremony leaves, with `ca/`, both `.cnf` files,
+> `index.txt` and the serial file.
+
 A root key and self-signed root certificate with a long lifetime, then encrypted and put somewhere
 not casually usable. It signs exactly one thing: an intermediate.
 
@@ -570,6 +582,9 @@ addresses are painful, which is the deeper reason DNS came first.
 unencrypted beside it.
 
 ### 2.4 Issue an intermediate and a first leaf certificate · `M`
+
+> **CUT — see S-1.** Folded into 3.4. Vault's serving certificate is
+> self-signed for the minutes before its own PKI engine exists, then replaced.
 
 The intermediate signs the one leaf it will ever issue: Vault's, at `vault.lab.test`. Decision
 3.4-1 makes Vault the lab's issuing CA from 3.4, and 3.4 lands before Gitea, MinIO and the reverse
@@ -865,6 +880,11 @@ HIGH CVE fails before it is pushed.
 ## Phase 5 · Artifacts, state, and closing the secrets loop
 
 ### 5.1 MinIO with TLS and scoped service accounts · `M`
+
+> **CUT — see S-1.** Gitea's registries take state and container images.
+> Packer templates are served as static files by the existing proxy at
+> `images.lab.test` — CloudStack registers templates by URL, and that is the one
+> job Gitea does badly, because a private package needs credentials in the URL.
 
 MinIO at `minio.lab.test`, root credential generated into Vault, plus separate scoped service
 accounts for Terraform state and image uploads. Enable versioning on both buckets.
@@ -1242,6 +1262,10 @@ with `cilium status` (or `calicoctl node status`) healthy and the per-node memor
 
 ### 9.2 Add two agent nodes · `M`
 
+> **CUT — see S-1.** Single-node k3s. Rule 3 already said these do not
+> coexist with the full estate; this makes that the default rather than the
+> exception. Add them as a scheduled exercise when you want to watch placement.
+
 Two more VMs joining as agents — **sized 2–3 GB each, deliberately smaller than the backend.**
 Create a dedicated small service offering rather than reusing the backend's.
 
@@ -1449,6 +1473,9 @@ one.
 
 ### 11.3 Kyverno admission policies · `M`
 
+> **CUT — see S-1.** Admission policy is configuration of a cluster you
+> already have, and nothing later depends on it.
+
 Enforce in-cluster what CI enforces in the pipeline: no `:latest`, resource requests required, no
 privileged pods, no literal secret values in env vars.
 
@@ -1460,6 +1487,9 @@ be bypassed but only sees things at the door. Start policies in audit mode and p
 merely flagged.
 
 ### 11.4 Verify image signatures at admission · `M`
+
+> **CUT — see S-1.** Goes with 11.3. Signing at 6.3 stays; verifying
+> at admission is the half that needs Kyverno.
 
 A Kyverno policy requiring a valid cosign signature for images from your registry.
 
@@ -1576,17 +1606,26 @@ This is the exact anti-pattern that started this whole line of work.
 
 **Done when:** Grafana loads over HTTPS at a real name and no password appears anywhere in Git.
 
-### 13.2 Logs: Loki and a host agent · `L` — split: pod logs, then host logs
+### 13.2 Logs: Loki on the host, Alloy everywhere · `L` — split: Loki + host agent, then the VMs
 
-Ship pod logs and host logs into Loki, with a dashboard querying both alongside metrics.
+Loki runs **on the host**, as another host service beside CoreDNS, Vault and the proxy — a compose
+stack, a certificate from Vault's PKI, a name in CoreDNS, a vhost on the proxy. Alloy runs on the
+host, on each VM, and as a DaemonSet in k3s. All of them **push** to Loki. See L-7.
 
-**Learning:** why logs and metrics are different tools, and why label consistency between them is
-what lets you pivot. Two design details from the reference worth copying: the host agent pushes
-**through the cluster Gateway over the WireGuard overlay** — the same hop the web tier already uses,
-so no new network path is introduced — and it buffers to a **write-ahead log**, which is what makes
-it safe to start before Loki exists.
+**Learning:** why logs and metrics are different tools, and that they have **opposite network
+requirements** — Alloy pushes *out* to Loki, so nothing needs to reach into a VM, while Prometheus
+pulls *in* and needs 9100 open on every one. Under 7.2's deny-by-default ACLs those are two rules in
+two directions, and the pull is the awkward one.
 
-**Done when:** one dashboard shows metrics and logs for the same host, driven by a shared variable.
+Copy the reference's write-ahead log on the agent regardless: it buffers, which is what makes an
+agent safe to start before Loki exists.
+
+**The trade this placement makes, deliberately:** Loki survives the cluster dying and Grafana does
+not, because Grafana ships inside kube-prometheus-stack. For the failure you most want logs during,
+the UI is gone and you are on `logcli` against Loki directly.
+
+**Done when:** one dashboard shows metrics and logs for the same host driven by a shared variable,
+**and** `logcli` returns the same lines with the cluster stopped.
 
 ### 13.3 Alerts that actually arrive · `M`
 
@@ -1615,6 +1654,10 @@ so its event log is the only record of changes to the zone.
 ---
 
 ## Phase 14 · Identity
+
+> **CUT — see S-1.** The whole phase. Six steps, ~2 GB, and the budget
+> already says authentik cannot coexist with Phase 13's monitoring. Nothing in
+> the plan depends on it, and it is integration rather than construction.
 
 Every prerequisite is in place — names resolve everywhere including inside the cluster, TLS is
 universal, clocks are synchronised since Phase 0.3, and your CA is already in the JVM truststore.

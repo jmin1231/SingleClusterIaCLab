@@ -92,6 +92,3 @@ services:
     # proves from the host with a real trust store and a real curl.
     # Revisit if anything ever needs `depends_on: condition: service_healthy`.
 
-    logging:
-      options:
-        tag: minio

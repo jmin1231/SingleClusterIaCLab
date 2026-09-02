@@ -1,74 +1,28 @@
-# SingleClusterIaCLab
+# The previous build
 
-A single-host infrastructure lab, built from scratch to be understood.
+The first version of this lab: CloudStack, MinIO, and bash throughout, following
+a sixteen-phase plan that ended in SSO and chaos drills. Roughly 3,800 lines of
+working, heavily-commented shell — CoreDNS, a two-tier CA, Vault, Gitea with an
+isolated runner, a reverse proxy — plus a 3,148-line decision log explaining it.
 
-One Ubuntu machine becomes a small private estate: containers behind a reverse
-proxy, its own DNS and certificate authority, a secret store, a git server with
-CI, VMs provisioned by Terraform, a Kubernetes cluster reconciled by GitOps, and
-an application running on top of all of it.
+**Nothing here runs, and nothing in the new tree imports from it.** It is kept to
+be read.
 
-**Written in Python**, with one bash file: `bootstrap.sh` provisions the host up
-to the point Python can run, because Ubuntu will not let Python install itself.
-Everything past that is Python.
+## How to read it
 
-## Start here
+Attempt the step in [`../docs/build-plan.md`](../docs/build-plan.md) first, *then*
+open the equivalent here to check yourself — never to find the answer before you
+have tried. The plan rebuilds every service in this directory, and every step in
+Phases 1–5 needs the absence of the thing it builds.
 
-[`docs/build-plan.md`](docs/build-plan.md) — thirteen phases, ~50 steps, each an
-evening or a weekend. It is a syllabus, not a runbook: every step says what to
-build, what it teaches, and a *Done when* you can actually run.
-
-The plan is built on one idea: **make something work, feel what is missing, then
-fix that.** DNS arrives after you have typed too many addresses. A certificate
-authority arrives after a browser has refused your site. Each foundation shows up
-after the problem it solves, so you already know what it is for.
-
-## Getting started
-
-```sh
-git clone <this repo> && cd SingleClusterIaCLab
-sudo ./bootstrap.sh          # installs python3-venv, builds .venv, installs deps
-python -m lab --version
-```
-
-## What the machine needs
-
-| | Minimum |
-|---|---|
-| OS | Ubuntu 24.04 LTS, x86_64 |
-| CPU | 8 cores with VT-x/AMD-V **enabled** |
-| RAM | 16 GB |
-| Disk | 200 GB SSD |
-| Virtualization | `/dev/kvm` present; nested virt on if this host is itself a VM |
-
-The two that stop people first:
-
-```sh
-egrep -c '(vmx|svm)' /proc/cpuinfo   # must be > 0
-ls -l /dev/kvm                       # must exist
-```
-
-## The other documents
+## Worth reading regardless of the step you are on
 
 | | |
 |---|---|
-| [`docs/decisions.md`](docs/decisions.md) | What was chosen, what was rejected, why |
-| [`docs/network-plan.md`](docs/network-plan.md) | Every address range, decided before anything claims one |
-| [`docs/resource-budget.md`](docs/resource-budget.md) | What runs in 16 GB |
-| [`docs/failure-log.md`](docs/failure-log.md) | What broke, and where the search should have started |
+| `docker/gitea/runner/config.yaml` | Why a CI runner must not hold the host's Docker socket, and what `docker_host: "-"` closes |
+| `ca/scripts/sign-vault-intermediate.sh` | `openssl ca` exits 0 when it *refuses* a CSR — the class of tooling landmine that motivated moving to Python |
+| `docker/proxy/conf/default.conf.tmpl` | Why nginx needs an explicit default server, and what it answers for without one |
+| `docker/vault/scripts/vault-unseal.sh` | 171 lines working around a CLI that refuses a pipe |
 
-## Conventions
-
-- **Everything is idempotent.** Running an installer twice must not break
-  anything, and the second run should say so.
-- **`lint` never writes; `fmt` does.** The pre-commit hook only ever calls `lint`.
-- **A comment explains what the code cannot.** If it restates the line below it,
-  delete it.
-- **Decisions are written down** — briefly. Four paragraphs usually means two
-  decisions.
-
-## History
-
-An earlier build of this lab used CloudStack, MinIO and bash throughout, and
-followed a sixteen-phase plan that ended in SSO and chaos drills. It worked as far
-as it went. It is in git history, along with its 3,148-line decision log, if you
-ever want to see how something was wired up.
+The full decision log is at `docs/decisions.md` in git history — it was removed
+from this directory when the new one replaced it.

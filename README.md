@@ -15,16 +15,17 @@ answering for `lab.test`, a two-tier CA, Vault initialised with its PKI engine,
 Gitea with a registered runner and CI history, MinIO, and the reverse proxy
 terminating TLS for all of it.
 
-**Next is Phase 1 of the current plan — refactoring what exists.** Five things
-were cut (decision S-1) and three designs changed (L-7, 9.1-1), so the first work
-is applying those to a running lab rather than building anything new:
+**Phase 1 of the current plan — refactoring what exists — is mostly done.** Five
+things were cut (decision S-1) and three designs changed (L-7, 9.1-1):
 
 | | |
 |---|---|
-| Vault's PKI becomes the root | the offline openssl root and intermediate go; certificates stay |
-| Gitea takes state and images | MinIO's two jobs, minus the one it did better |
-| The proxy serves templates | `images.lab.test` — CloudStack registers by URL, and a private Gitea package needs a credential in that URL |
-| MinIO is deleted | after the two above prove out |
+| Vault's PKI is the root | done — one self-signed CA issuing leaves directly; `ca/` deleted |
+| Every live certificate reissued | done — proxy and Vault, chaining to the new CA; old root out of the trust store |
+| MinIO deleted | done — its secret removed from Vault too |
+| The scripts stand alone | done — `lib/` deleted, 26 scripts down to 11 |
+| Gitea takes state and images | **not yet** — Terraform state and the container registry |
+| The proxy serves templates | **not yet** — `images.lab.test`, because CloudStack registers by URL and a private Gitea package needs a credential in that URL |
 
 Nothing from Phase 6 onward exists yet: no Packer, Terraform, Ansible, k3s or
 Flux.
@@ -36,10 +37,10 @@ its own temporary server. That one cost an hour; see `docs/failure-log.md`.
 
 ### Working on more than one machine
 
-The CA does not travel. Keys are gitignored and the passphrases live in `/root`
-(2.3-5), so running `ca-install-all.sh` on a second machine mints a **different**
-root, and certificates issued under one will not validate against the other.
-That is the intended behaviour, not a gap — but it means a second machine is for
+The CA does not travel. It lives inside Vault, whose storage is gitignored and
+whose unseal key is a single file on this host, so bringing the lab up on a second
+machine mints a **different** CA — and certificates issued under one will not
+validate against the other. That is intended, not a gap: a second machine is for
 writing code and docs, and certificates are issued where they will be used.
 
 ## Getting started

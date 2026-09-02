@@ -127,3 +127,47 @@ a working deployment. Rebuilding the database therefore means dropping it first;
 the tracker alone cannot express that intent.
 
 Phase 1.3 covers both traps.
+
+---
+
+## bootstrap.sh could never cold-start: the proxy came after the code that needed it
+
+**What was seen.** `sudo ./bootstrap.sh` on a lab whose containers had all been
+stopped. CoreDNS, Vault and Gitea came up, then the run exited **7** immediately
+after `Runner already registered`. No error message, no failing command named.
+
+**What it actually was.** Exit 7 is curl's *failed to connect*.
+`ensure_gitea_token` and `setup_gitea_repo` reach Gitea's API at
+`https://gitea.lab.test` — and Gitea deliberately publishes no ports, so the
+**proxy is the only listener for that name**. `install_proxy` was the last step in
+`main()`, after both of them.
+
+It had worked every previous time because the proxy was already running from an
+earlier run. Only a cold start could expose it.
+
+**Why it was not obvious.** `docker/proxy/docker-compose.yml` documents half the
+constraint and concludes the wrong thing:
+
+> *"This makes Gitea a start-order dependency of the proxy, which bootstrap.sh
+> already satisfies — install_gitea runs before install_proxy."*
+
+That is true. The proxy joins Gitea's `edge` network and `proxy_pass`es to the
+`gitea` container name, which nginx resolves at startup, so the proxy genuinely
+must come after Gitea. What nobody noticed is that **two steps in between needed
+the proxy** — a cycle, with the dependency documented and the cycle invisible.
+
+**What changed.** `install_proxy` moved to sit between `install_gitea` and
+`ensure_gitea_token` — the only point that breaks the cycle. Every other
+constraint still holds: the proxy's certificate still comes from a configured
+Vault (3.4-1), and both API steps now have something listening.
+
+**The lesson worth carrying.** A dependency comment that says "already satisfied"
+is an assertion about the *whole* order, not the two steps it names. This one was
+correct about its own pair and wrong about the file.
+
+**And a second, smaller trap from the same session.** Running the installer with
+`TERM=dumb` makes it exit 1 on a completely successful run:
+`cloudstack-install.sh` is `set -euo pipefail`, its `cleanup()` calls `clear`,
+and `clear` exits 1 when the terminal has no clear capability — aborting the
+function before it reaches `exit $exit_code`. A successful install reports
+failure. Use a real `TERM`, or none.

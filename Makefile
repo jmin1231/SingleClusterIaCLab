@@ -42,7 +42,7 @@ YAML  := $(filter-out $(VENDORED),$(wildcard $(filter %.yml %.yaml,$(FILES))))
 
 # From git like the rest, and that is the whole point. `terraform fmt -recursive`
 # walks the FILESYSTEM instead, so on a host that has actually run bootstrap it
-# descends into ca/intermediate, docker/vault/data and docker/vault/secrets —
+# descends into docker/vault/data and docker/vault/secrets —
 # root-owned 0700 directories — and fails with "Cannot read directory". Those are
 # all gitignored, so taking the list from git skips them for free, exactly as the
 # header above claims for the linters. Verified: terraform fmt accepts file paths
@@ -57,8 +57,7 @@ TF    := $(filter-out $(VENDORED),$(wildcard $(filter %.tf %.tfvars,$(FILES))))
 # so the assertion is "this key cannot be committed" whichever rule covers it.
 # The third is Vault's bootstrap key (3.4-1) — the only leaf this lab issues
 # from openssl, and the only unencrypted private key in the tree.
-CA_KEYS := ca/root/root-ca.key.enc ca/intermediate/intermediate-ca.key.enc \
-           docker/vault/certs/tls.key
+CA_KEYS := docker/vault/certs/tls.key
 
 # ---------------------------------------------------------------------------
 

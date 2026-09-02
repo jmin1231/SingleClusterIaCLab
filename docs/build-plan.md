@@ -48,7 +48,7 @@ CloudStack is up under systemd. Step 0.1 is bringing them back.
 
 Before changing anything, prove what exists still works.
 
-### 0.1 Bring the service layer up · `S`
+### 0.1 Bring the service layer up · `S` · **done**
 `sudo SKIP_HOST_PREP=1 ./bootstrap.sh`, from a terminal **outside VS Code** — or
 via `systemd-run`, which lands outside the `vscode` AppArmor profile. That
 confinement is what blocked MySQL's postinst during the last attempt; the symptom
@@ -70,7 +70,7 @@ Not everything survives a stop. Vault comes back **sealed** by design; CoreDNS's
 The cuts from S-1 applied to a running lab. Each step removes something that
 works, so each one ends by proving the thing it replaced is not missed.
 
-### 1.1 Vault's PKI becomes the root · `M`
+### 1.1 Vault's PKI becomes the root · `M` · **done**
 Today the chain is: offline openssl root → intermediate → Vault's PKI. Replace it
 with a **self-signed root inside Vault**, issuing directly.
 **Learn:** what the two-tier design bought, by removing it — an offline root is
@@ -80,13 +80,13 @@ breaks until something renews, which is the worst way to find out.
 **Done when:** `vault write pki/issue/...` returns a certificate that verifies
 against the new root, and the old root is out of the host trust store.
 
-### 1.2 Re-issue every live certificate · `M`
+### 1.2 Re-issue every live certificate · `M` · **done**
 The proxy's vhosts and Vault's own serving certificate, from the new root. Then
 distribute the new root and remove the old.
 **Done when:** `curl https://git.lab.test` succeeds with **no** `-k`, and
 `openssl s_client` shows a chain ending at the Vault root.
 
-### 1.3 Delete the openssl CA · `S`
+### 1.3 Delete the openssl CA · `S` · **done**
 `ca/` entirely — scripts, `root-ca.cnf`, `intermediate-ca.cnf`, `index.txt`, the
 serial file, `newcerts/`. Remove `install_ca` from `bootstrap.sh`.
 **Done when:** `git rm` is committed, `bootstrap.sh` runs clean, and 1.2's checks
@@ -105,7 +105,7 @@ and logs. See S-1.
 **Done when:** CloudStack registers a template from an `https://images.lab.test/`
 URL with no credential in it.
 
-### 1.6 Delete MinIO · `S`
+### 1.6 Delete MinIO · `S` · **done**
 The compose stack, the installer, the provisioner, the policies, the data. Remove
 its wrappers from `bootstrap.sh` and its secrets from Vault.
 **Done when:** `bootstrap.sh` has no MinIO step and 1.4 and 1.5 still pass.

@@ -8,10 +8,12 @@
 # pulled, so it can be built before Gitea exists. 4.4 is what consumes it, by
 # registering a runner whose label names the tag below.
 #
-# It does depend on Phase 2. The last Dockerfile layer bakes in the lab root CA,
-# which reaches the build through a second named context rooted at ca/root/, so
-# ca-install-all.sh has to have run on this machine first. preflight() checks
-# that: .gitignore keeps the cert out of git, so a fresh clone never has one.
+# It does depend on Vault. The last Dockerfile layer bakes in the lab CA, which
+# reaches the build through a second named context rooted at the Vault service's
+# certs/ directory - that is where the CA lands when Vault issues itself a
+# certificate. So vault-installer.sh has to have run on this machine first.
+# preflight() checks that: .gitignore keeps certificates out of git, so a fresh
+# clone never has one.
 #
 # Safe to re-run. An unchanged Dockerfile is all cache hits; a changed ARG
 # rebuilds from that layer down.
@@ -19,13 +21,11 @@
 set -euo pipefail
 
 SOURCE_SCRIPT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=/dev/null
-source "${SOURCE_SCRIPT}/../../lib/common.sh"
 
 # Two levels up, and resolved rather than left as a literal `../..`:
 # --build-context takes its path relative to the CLI's working directory, not to
 # this script, so only an absolute path keeps the script runnable from anywhere.
-LAB_CA_DIR="$(cd -- "${SOURCE_SCRIPT}/../.." && pwd)/ca/root"
+LAB_CA_DIR="$(cd -- "${SOURCE_SCRIPT}/.." && pwd)/vault/certs"
 DOCKERFILE="${SOURCE_SCRIPT}/Dockerfile"
 REQUIREMENTS="${SOURCE_SCRIPT}/requirements.yml"
 
@@ -40,22 +40,40 @@ IMAGE="${TOOLBOX_IMAGE:-toolbox:latest}"
 # missing COPY source as a solve error with no filename in it.
 preflight() {
   command -v docker >/dev/null 2>&1 ||
-    die "docker is not installed. bootstrap.sh installs it; see its docker step."
+    {
+      echo "docker is not installed. bootstrap.sh installs it; see its docker step." >&2
+      exit 1
+    }
   docker info >/dev/null 2>&1 ||
-    die "Cannot reach the Docker daemon. Is it running, and are you root?"
-  [[ -f "${DOCKERFILE}" ]] || die "No Dockerfile at ${DOCKERFILE}"
+    {
+      echo "Cannot reach the Docker daemon. Is it running, and are you root?" >&2
+      exit 1
+    }
+  [[ -f "${DOCKERFILE}" ]] || {
+    echo "No Dockerfile at ${DOCKERFILE}" >&2
+    exit 1
+  }
   [[ -f "${REQUIREMENTS}" ]] ||
-    die "No requirements.yml at ${REQUIREMENTS}; the ansible layer COPYs it."
-  [[ -f "${LAB_CA_DIR}/root-ca.crt" ]] ||
-    die "No root CA at ${LAB_CA_DIR}/root-ca.crt. Run: sudo ./ca/ca-install-all.sh"
+    {
+      echo "No requirements.yml at ${REQUIREMENTS}; the ansible layer COPYs it." >&2
+      exit 1
+    }
+  [[ -f "${LAB_CA_DIR}/ca.crt" ]] ||
+    {
+      echo "No CA at ${LAB_CA_DIR}/ca.crt. Run: sudo ./docker/vault/vault-installer.sh" >&2
+      exit 1
+    }
 }
 
 build_image() {
-  log "Building ${IMAGE} — the first run downloads roughly a gigabyte of tools."
+  echo "[+] Building ${IMAGE} — the first run downloads roughly a gigabyte of tools."
   docker build --build-context "labca=${LAB_CA_DIR}" \
     -t "${IMAGE}" "${SOURCE_SCRIPT}" ||
-    die "Build failed; the failing step's output is above."
-  log "Built ${IMAGE}"
+    {
+      echo "Build failed; the failing step's output is above." >&2
+      exit 1
+    }
+  echo "[+] Built ${IMAGE}"
 }
 
 # 4.3's acceptance test, run once here rather than as a layer inside the image:
@@ -68,20 +86,29 @@ verify_image() {
   local out
 
   if ! out="$(docker run --rm "${IMAGE}" terraform version 2>&1)"; then
-    die "terraform does not run in ${IMAGE}: $(printf '%s' "${out}" | head -n1)"
+    {
+      echo "terraform does not run in ${IMAGE}: $(printf '%s' "${out}" | head -n1)" >&2
+      exit 1
+    }
   fi
-  log "  $(printf '%s' "${out}" | head -n1)"
+  echo "[+]   $(printf '%s' "${out}" | head -n1)"
 
   if ! out="$(docker run --rm "${IMAGE}" trivy --version 2>&1)"; then
-    die "trivy does not run in ${IMAGE}: $(printf '%s' "${out}" | head -n1)"
+    {
+      echo "trivy does not run in ${IMAGE}: $(printf '%s' "${out}" | head -n1)" >&2
+      exit 1
+    }
   fi
-  log "  $(printf '%s' "${out}" | head -n1)"
+  echo "[+]   $(printf '%s' "${out}" | head -n1)"
 
-  log "${IMAGE} passes 4.3: both tools run with no downloads at job time."
+  echo "[+] ${IMAGE} passes 4.3: both tools run with no downloads at job time."
 }
 
 main() {
-  require_root
+  [[ ${EUID} -eq 0 ]] || {
+    echo "toolbox-installer.sh must be run as root:  sudo $0" >&2
+    exit 1
+  }
   preflight
   build_image
   verify_image

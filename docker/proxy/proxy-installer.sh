@@ -15,10 +15,8 @@
 set -euo pipefail
 
 SOURCE_SCRIPT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=/dev/null
-source "${SOURCE_SCRIPT}/../../lib/common.sh"
-# shellcheck source=/dev/null
-source "${SOURCE_SCRIPT}/../../lib/vault.sh"
+VAULT_COMPOSE="${SOURCE_SCRIPT}/../vault/docker-compose.yml"
+VAULT_INIT="${SOURCE_SCRIPT}/../vault/secrets/vault-init.json"
 
 COMPOSE="${SOURCE_SCRIPT}/docker-compose.yml"
 CONF_TMPL="${SOURCE_SCRIPT}/conf/default.conf.tmpl"
@@ -31,13 +29,21 @@ PROXY_NAMES=(cloudstack.lab.test gitea.lab.test)
 
 issue_cert() {
   local cn="$1" crt="${CERT_DIR}/$1.crt" key="${CERT_DIR}/$1.key" json
-  if cert_usable "${crt}" "${key}" "${cn}"; then
-    log "Certificate for ${cn} is current; not reissuing"
+  # Present is not usable: a certificate can exist and be expired, or be for the
+  # wrong name. Reissue when fewer than 7 days remain, so a re-run inside the
+  # window is a no-op and a lab left alone for a week still comes back working.
+  if [[ -s "${crt}" && -s "${key}" ]] &&
+    openssl x509 -in "${crt}" -noout -checkend "$((7 * 24 * 3600))" >/dev/null 2>&1 &&
+    openssl x509 -in "${crt}" -noout -checkhost "${cn}" >/dev/null 2>&1; then
+    echo "[+] Certificate for ${cn} is current; not reissuing"
     return 0
   fi
 
-  json="$(vault_ write -format=json "pki/issue/${PKI_ROLE}" common_name="${cn}" 2>/dev/null)" ||
-    die "Vault would not issue for ${cn}. Is the ${PKI_ROLE} role present? Run docker/vault/scripts/vault-configure.sh."
+  json="$(docker compose -f "${SOURCE_SCRIPT}/../vault/docker-compose.yml" exec -T -e VAULT_TOKEN vault vault write -format=json "pki/issue/${PKI_ROLE}" common_name="${cn}" 2>/dev/null)" ||
+    {
+      echo "Vault would not issue for ${cn}. Is the ${PKI_ROLE} role present? Run docker/vault/vault-installer.sh." >&2
+      exit 1
+    }
 
   install -d -m 0755 "${CERT_DIR}"
   # Key first and restrictive: it must never exist world-readable, not even
@@ -53,7 +59,7 @@ issue_cert() {
   jq -r '.data.certificate, .data.ca_chain[]' <<<"${json}" >"${crt}"
   chmod 0444 "${crt}"
 
-  log "Issued ${cn}, valid until $(openssl x509 -in "${crt}" -noout -enddate | cut -d= -f2)"
+  echo "[+] Issued ${cn}, valid until $(openssl x509 -in "${crt}" -noout -enddate | cut -d= -f2)"
 }
 
 issue_certs() {
@@ -63,13 +69,13 @@ issue_certs() {
 
 render_conf() {
   local bridge
-  bridge="$(bridge_ip)"
+  bridge="$(ip -4 addr show cloudbr0 | awk '/inet /{print $2}' | cut -d/ -f1)"
   # The allow-list keeps envsubst away from nginx's own $host, $scheme and
   # $remote_addr, and the value must be in the environment — envsubst cannot see
   # a shell local. Same pattern as coredns-installer.sh:41.
   # shellcheck disable=SC2016  # the quotes are intentional: this is the allow-list
   CLOUDBR0_IP="${bridge}" envsubst '${CLOUDBR0_IP}' <"${CONF_TMPL}" >"${CONF}"
-  log "Rendered vhosts for ${#PROXY_NAMES[@]} names against ${bridge}"
+  echo "[+] Rendered vhosts for ${#PROXY_NAMES[@]} names against ${bridge}"
 }
 
 start_proxy() {
@@ -78,7 +84,10 @@ start_proxy() {
   # nginx exits on a bad config rather than serving a broken one, so a running
   # container is the assertion. Ask it directly rather than trusting `up`.
   docker compose -f "${COMPOSE}" exec -T proxy nginx -t >/dev/null 2>&1 ||
-    die "nginx rejected its configuration. See: docker logs proxy"
+    {
+      echo "nginx rejected its configuration. See: docker logs proxy" >&2
+      exit 1
+    }
 
   # Issuing is not enough — the server has to be told. nginx reads its config
   # once at start, and `compose up -d` leaves a running container alone when the
@@ -88,14 +97,34 @@ start_proxy() {
   # only reached once `nginx -t` has passed, so a bad config cannot take the
   # proxy down.
   docker compose -f "${COMPOSE}" exec -T proxy nginx -s reload >/dev/null 2>&1 ||
-    die "nginx would not reload. See: docker logs proxy"
+    {
+      echo "nginx would not reload. See: docker logs proxy" >&2
+      exit 1
+    }
 
-  log "Proxy up for: ${PROXY_NAMES[*]}"
+  echo "[+] Proxy up for: ${PROXY_NAMES[*]}"
 }
 
 main() {
-  require_root
-  vault_authenticate
+  [[ ${EUID} -eq 0 ]] || {
+    echo "proxy-installer.sh must be run as root:  sudo $0" >&2
+    exit 1
+  }
+  [[ -r "${VAULT_INIT}" ]] || {
+    echo "Cannot read ${VAULT_INIT}. Run docker/vault/vault-installer.sh first." >&2
+    exit 1
+  }
+  VAULT_TOKEN="$(jq -r '.root_token // empty' "${VAULT_INIT}")"
+  [[ -n "${VAULT_TOKEN}" ]] || {
+    echo "${VAULT_INIT} holds no root_token." >&2
+    exit 1
+  }
+  export VAULT_TOKEN
+  docker compose -f "${VAULT_COMPOSE}" exec -T -e VAULT_TOKEN vault vault status >/dev/null 2>&1 ||
+    {
+      echo "Vault is not answering, or is sealed. Run docker/vault/scripts/vault-unseal.sh." >&2
+      exit 1
+    }
   issue_certs
   render_conf
   start_proxy

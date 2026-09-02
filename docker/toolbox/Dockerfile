@@ -282,7 +282,8 @@ RUN set -eux; \
 #
 # The build context is this directory, and COPY may not escape it, so the cert
 # arrives through a second named context — see toolbox-installer.sh, which binds
-# labca to ca/root/. `root-ca.crt` is relative to THAT context's root. Enterprise
+# labca to the Vault service's certs/. `ca.crt` is relative to THAT context's
+# root. Enterprise
 # equivalent: the same flag pointed at an internal PKI URL rather than a path;
 # here the CA is generated on this host and never published, so a path is honest.
 #
@@ -292,7 +293,7 @@ RUN set -eux; \
 # at — Node compiles in its own root store and never reads the bundle below, so
 # the trust store alone fixes curl, git and trivy while leaving JS actions
 # failing exactly as they did before.
-COPY --from=labca root-ca.crt /usr/local/share/ca-certificates/lab-root.crt
+COPY --from=labca ca.crt /usr/local/share/ca-certificates/lab-ca.crt
 RUN update-ca-certificates
 
 CMD ["/bin/bash"]

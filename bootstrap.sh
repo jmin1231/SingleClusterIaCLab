@@ -12,8 +12,6 @@ set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 
 SOURCE_SCRIPT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=/dev/null
-source "${SOURCE_SCRIPT}/lib/common.sh"
 
 # 2.1-1's mitigation, named there and never built. Host preparation runs on every
 # invocation, and from Phase 3 on the service layer is re-run far more often than
@@ -27,41 +25,53 @@ source "${SOURCE_SCRIPT}/lib/common.sh"
 # being silently ignored — which would look exactly like the flag not working.
 SKIP_HOST_PREP="${SKIP_HOST_PREP:-0}"
 [[ "${SKIP_HOST_PREP}" == "0" || "${SKIP_HOST_PREP}" == "1" ]] ||
-  die "SKIP_HOST_PREP must be 0 or 1, got '${SKIP_HOST_PREP}'."
+  {
+    echo "SKIP_HOST_PREP must be 0 or 1, got '${SKIP_HOST_PREP}'." >&2
+    exit 1
+  }
 
 # --- Steps ------------------------------------------------------------------
 
 # Enable NTP and wait up to 60s for the clock to synchronise. Runs first because
 # a skewed clock breaks apt and TLS.
 sync_clock() {
-  log "Clock before sync: $(date)"
+  echo "[+] Clock before sync: $(date)"
 
-  timedatectl set-ntp true 2>/dev/null || warn "Could not enable NTP via timedatectl."
+  timedatectl set-ntp true 2>/dev/null || echo "[!] Could not enable NTP via timedatectl."
   systemctl restart systemd-timesyncd 2>/dev/null || true
 
-  log "Waiting for the clock to synchronise..."
+  echo "[+] Waiting for the clock to synchronise..."
   local i
   for ((i = 0; i < 60; i++)); do
     if [[ "$(timedatectl show -p NTPSynchronized --value)" == "yes" ]]; then
-      log "Clock synchronised: $(date)"
+      echo "[+] Clock synchronised: $(date)"
       return 0
     fi
     sleep 1
   done
 
-  die "Clock did not synchronise within 60s — apt signature validation will fail."
+  {
+    echo "Clock did not synchronise within 60s — apt signature validation will fail." >&2
+    exit 1
+  }
 }
 
 # Verify-only, and fatal: later phases boot VMs.
 check_kvm() {
-  log "Checking hardware virtualization..."
+  echo "[+] Checking hardware virtualization..."
 
   grep -Eq '(vmx|svm)' /proc/cpuinfo ||
-    die "CPU reports no vmx/svm flag — if this host is itself a VM, enable nested virtualization on the hypervisor."
+    {
+      echo "CPU reports no vmx/svm flag — if this host is itself a VM, enable nested virtualization on the hypervisor." >&2
+      exit 1
+    }
   [[ -c /dev/kvm ]] ||
-    die "/dev/kvm is missing — the kvm_intel/kvm_amd module did not load. Check 'lsmod | grep kvm' and 'dmesg | grep -i kvm'."
+    {
+      echo "/dev/kvm is missing — the kvm_intel/kvm_amd module did not load. Check 'lsmod | grep kvm' and 'dmesg | grep -i kvm'." >&2
+      exit 1
+    }
 
-  log "KVM available: $(grep -Eom1 '(vmx|svm)' /proc/cpuinfo) flag present, /dev/kvm ready"
+  echo "[+] KVM available: $(grep -Eom1 '(vmx|svm)' /proc/cpuinfo) flag present, /dev/kvm ready"
 }
 
 install_cli_tools() {
@@ -77,14 +87,17 @@ install_cli_tools() {
   fi
 
   if [[ ${#missing[@]} -eq 0 ]]; then
-    log "CLI tools are installed"
+    echo "[+] CLI tools are installed"
     return
   fi
-  log "Installing CLI tools: ${missing[*]}..."
-  apt_get update
-  apt_get install -y "${missing[@]}" ||
-    die "Failed to install ${missing[*]}. If this reports a dpkg lock, another package manager held it for longer than ${APT_LOCK_TIMEOUT}s — wait for unattended-upgrades to finish and re-run."
-  log "CLI tools ready"
+  echo "[+] Installing CLI tools: ${missing[*]}..."
+  apt-get -o DPkg::Lock::Timeout=300 update
+  apt-get -o DPkg::Lock::Timeout=300 install -y "${missing[@]}" ||
+    {
+      echo "Failed to install ${missing[*]}. If this reports a dpkg lock, another package manager held it for longer than ${APT_LOCK_TIMEOUT}s — wait for unattended-upgrades to finish and re-run." >&2
+      exit 1
+    }
+  echo "[+] CLI tools ready"
 }
 
 # Assert Docker is usable, not merely present. Called on BOTH paths of
@@ -95,22 +108,28 @@ install_cli_tools() {
 # line at the top of this file claiming more than it delivers.
 verify_docker() {
   docker info >/dev/null 2>&1 ||
-    die "Docker is installed but the daemon is not responding — check 'systemctl status docker'."
+    {
+      echo "Docker is installed but the daemon is not responding — check 'systemctl status docker'." >&2
+      exit 1
+    }
   docker compose version >/dev/null 2>&1 ||
-    die "Docker is installed but the compose plugin is missing — install docker-compose-plugin."
+    {
+      echo "Docker is installed but the compose plugin is missing — install docker-compose-plugin." >&2
+      exit 1
+    }
 
-  log "Docker ready: $(docker --version)"
+  echo "[+] Docker ready: $(docker --version)"
 }
 
 # From Docker's own apt repository, not Ubuntu's.
 install_docker() {
   if command -v docker >/dev/null 2>&1; then
-    log "Docker already installed: $(docker --version)"
+    echo "[+] Docker already installed: $(docker --version)"
     verify_docker
     return
   fi
 
-  log "Installing Docker..."
+  echo "[+] Installing Docker..."
 
   local codename
   codename="$(. /etc/os-release && echo "${UBUNTU_CODENAME:-$VERSION_CODENAME}")"
@@ -118,7 +137,10 @@ install_docker() {
   install -d -m 0755 /etc/apt/keyrings
   curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
     -o /etc/apt/keyrings/docker.asc ||
-    die "Could not fetch Docker's signing key — check egress to download.docker.com."
+    {
+      echo "Could not fetch Docker's signing key — check egress to download.docker.com." >&2
+      exit 1
+    }
   chmod a+r /etc/apt/keyrings/docker.asc
 
   tee /etc/apt/sources.list.d/docker.sources >/dev/null <<EOF
@@ -130,14 +152,17 @@ Architectures: $(dpkg --print-architecture)
 Signed-By: /etc/apt/keyrings/docker.asc
 EOF
 
-  apt_get update
-  apt_get install -y \
+  apt-get -o DPkg::Lock::Timeout=300 update
+  apt-get -o DPkg::Lock::Timeout=300 install -y \
     docker-ce \
     docker-ce-cli \
     containerd.io \
     docker-buildx-plugin \
     docker-compose-plugin ||
-    die "Failed to install Docker packages — check 'apt-get update' output above for the docker.sources repository."
+    {
+      echo "Failed to install Docker packages — check 'apt-get update' output above for the docker.sources repository." >&2
+      exit 1
+    }
 
   systemctl enable --now docker
   verify_docker
@@ -145,51 +170,40 @@ EOF
 
 # ---- Services --------------------------------------------------------------
 
-# Resolve every installer before running any of them, as ca-install-all.sh and
-# cloudstack-install-all.sh already do. This replaces a guard that was repeated
+# Resolve every installer before running any of them, as cloudstack-install-all.sh
+# already does. This replaces a guard that was repeated
 # in each wrapper — 0.2-5's revisit trigger, which fired at the fifth copy — and
 # it is strictly better than factoring that guard into a helper: a per-call check
-# fails at the point of use, so a missing vault-configure.sh would surface only
+# fails at the point of use, so a missing gitea-installer.sh would surface only
 # after CloudStack had installed and the CA existed. This stops while the host is
 # still untouched.
-CA_INSTALLER="${SOURCE_SCRIPT}/ca/ca-install-all.sh"
 CLOUDSTACK_INSTALLER="${SOURCE_SCRIPT}/cloudstack/cloudstack-install-all.sh"
 COREDNS_INSTALLER="${SOURCE_SCRIPT}/docker/coredns/coredns-installer.sh"
 VAULT_INSTALLER="${SOURCE_SCRIPT}/docker/vault/vault-installer.sh"
-VAULT_CONFIGURE="${SOURCE_SCRIPT}/docker/vault/scripts/vault-configure.sh"
 VAULT_ENSURE_CS="${SOURCE_SCRIPT}/docker/vault/scripts/vault-ensure-cloudstack.sh"
-VAULT_ENSURE_GITEA="${SOURCE_SCRIPT}/docker/vault/scripts/vault-ensure-gitea.sh"
 GITEA_INSTALLER="${SOURCE_SCRIPT}/docker/gitea/gitea-installer.sh"
-VAULT_ENSURE_GITEA_TOKEN="${SOURCE_SCRIPT}/docker/vault/scripts/vault-ensure-gitea-token.sh"
 GITEA_REPO_SETUP="${SOURCE_SCRIPT}/docker/gitea/gitea-repo-setup.sh"
 TOOLBOX_INSTALLER="${SOURCE_SCRIPT}/docker/toolbox/toolbox-installer.sh"
 PROXY_INSTALLER="${SOURCE_SCRIPT}/docker/proxy/proxy-installer.sh"
-for script in "${CA_INSTALLER}" "${CLOUDSTACK_INSTALLER}" "${COREDNS_INSTALLER}" \
-  "${VAULT_INSTALLER}" "${VAULT_CONFIGURE}" "${VAULT_ENSURE_CS}" \
-  "${VAULT_ENSURE_GITEA}" "${GITEA_INSTALLER}" \
-  "${VAULT_ENSURE_GITEA_TOKEN}" "${GITEA_REPO_SETUP}" \
+for script in "${CLOUDSTACK_INSTALLER}" "${COREDNS_INSTALLER}" \
+  "${VAULT_INSTALLER}" "${VAULT_ENSURE_CS}" "${GITEA_INSTALLER}" \
+  "${GITEA_REPO_SETUP}" \
   "${TOOLBOX_INSTALLER}" "${PROXY_INSTALLER}"; do
-  [[ -x "${script}" ]] || die "Missing or not executable: ${script}"
+  [[ -x "${script}" ]] || {
+    echo "Missing or not executable: ${script}" >&2
+    exit 1
+  }
 done
 
 # The wrappers below stay one-liners rather than collapsing into main(): each
 # carries the reason it runs where it does, and main() reads as a dependency
 # order rather than a list of paths.
 
-# Run the CA installer: the offline root, the intermediate, and Vault's leaf —
-# the only certificate this CA issues, since Vault's PKI engine takes over at
-# 3.4 (3.4-1). Before CloudStack — it is seconds of local openssl work, so a bad
-# path fails here rather than after a long install, which is also why issuance
-# sits inside the CA installer rather than beside the service that reads it.
-install_ca() {
-  "${CA_INSTALLER}"
-}
-
 # The all-in-one installer also creates the cloudbr0 bridge.
 install_cloudstack() {
-  log "Running the CloudStack all-in-one installer (this takes a while)..."
+  echo "[+] Running the CloudStack all-in-one installer (this takes a while)..."
   "${CLOUDSTACK_INSTALLER}"
-  log "CloudStack installed; cloudbr0 is up."
+  echo "[+] CloudStack installed; cloudbr0 is up."
 }
 
 # After CloudStack, whose bridge it binds to.
@@ -205,17 +219,7 @@ install_vault() {
   "${VAULT_INSTALLER}"
 }
 
-# Configure the running Vault: audit device, KV v2, and the PKI engine (3.2-3.4).
-# Separate from install_vault because of an ordering it cannot escape — the PKI
-# engine emits a CSR the offline root signs, so Vault must already be up and
-# unsealed. That is the reference lab's server-phase / secrets-phase split, one
-# phase earlier. Safe to re-run: it tests each outcome rather than re-issuing
-# each command.
-configure_vault() {
-  "${VAULT_CONFIGURE}"
-}
-
-# Seed CloudStack's API credentials into Vault (3.6). After configure_vault
+# Seed CloudStack's API credentials into Vault. After install_vault
 # because it needs the KV mount, and after install_cloudstack because it reads
 # the keys from a running management server. Never rotates: it captures what
 # CloudStack already holds, and refuses if Vault's copy has gone stale.
@@ -227,22 +231,9 @@ ensure_cloudstack_secret() {
   "${VAULT_ENSURE_CS}"
 }
 
-# Generate Gitea's database and admin passwords IN Vault, before Gitea exists —
-# 4.1's other direction, where Vault is the origin rather than the capturer.
-ensure_gitea_secret() {
-  "${VAULT_ENSURE_GITEA}"
-}
-
 # Gitea and its database, reading those credentials back out of Vault.
 install_gitea() {
   "${GITEA_INSTALLER}"
-}
-
-# A Gitea API token, minted once and kept in Vault. After install_gitea, because
-# it needs the API answering — the other half of 4.1's split, where the service
-# mints a credential that cannot be read back.
-ensure_gitea_token() {
-  "${VAULT_ENSURE_GITEA_TOKEN}"
 }
 
 # Push this repository to Gitea and close the gate: direct pushes to main are
@@ -265,7 +256,7 @@ install_toolbox() {
 
 # Run the proxy installer: issue a certificate from Vault's PKI engine, render
 # the vhost against the discovered bridge address, start nginx. Last, and after
-# configure_vault, because the certificate comes from pki/issue/lab-server —
+# install_vault, because the certificate comes from pki/issue/lab-server —
 # which is 3.4-1's reordering of 2.5. Vault is NOT behind this proxy; it
 # terminates its own TLS on :8200.
 install_proxy() {
@@ -273,11 +264,14 @@ install_proxy() {
 }
 
 main() {
-  require_root
+  [[ ${EUID} -eq 0 ]] || {
+    echo "bootstrap.sh must be run as root:  sudo $0" >&2
+    exit 1
+  }
   check_kvm
 
   if [[ "${SKIP_HOST_PREP}" == "1" ]]; then
-    warn "SKIP_HOST_PREP=1 — skipping clock, CLI tools and Docker."
+    echo "[!] SKIP_HOST_PREP=1 — skipping clock, CLI tools and Docker."
     # Asserted anyway, for the same reason check_kvm runs early: install_coredns
     # and install_vault both need Docker, and failing here names the cause where
     # failing there names a container.
@@ -288,18 +282,19 @@ main() {
     install_docker
   fi
 
-  install_ca
   install_cloudstack
   install_coredns
   install_vault
-  configure_vault
   ensure_cloudstack_secret
-  ensure_gitea_secret
   install_gitea
-  ensure_gitea_token
+  # Between starting Gitea and talking to it. Gitea publishes no ports, so the
+  # two API steps below reach it only through the proxy — and the proxy joins
+  # Gitea's `edge` network and proxy_passes to the `gitea` container name, which
+  # nginx resolves at startup. That is a cycle, and this is the only point that
+  # breaks it: after Gitea exists, before anything curls its API.
+  install_proxy
   setup_gitea_repo
   install_toolbox
-  install_proxy
 }
 
 main "$@"

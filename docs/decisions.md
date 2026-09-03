@@ -3294,3 +3294,53 @@ teaches less.
 and the offline-root ceremony. Scheduling becomes something you arrange
 deliberately rather than something the cluster shows you by default. Each is a
 real loss and each was chosen over the alternative of not fitting.
+
+---
+
+## 3.4-5 · One self-signed CA in Vault, as built
+
+**Decided:** `pki/` holds a single self-signed CA, `lab.test CA`, issuing leaves
+directly. `ca/` is deleted — the openssl root, the intermediate, both `.cnf`
+files, `index.txt` and the serial database. Supersedes
+[2.3-1](#23-1--the-root-ca-is-generated-by-hand-once-and-refuses-to-run-twice)
+through 2.4-6 and [3.4-1](#34-1--vault-is-the-issuing-ca-the-openssl-intermediate-issues-exactly-one-certificate);
+those entries describe a design that no longer exists and are kept as the record
+of what was decided at the time.
+
+**What was actually there, which was worse than "two-tier".** Three CA
+certificates existed and two chains ran in parallel: the openssl root signed both
+an openssl intermediate (which issued exactly one leaf, Vault's) and Vault's
+issuing CA (which issued everything else). Two sibling CAs under one root, one of
+them existing to solve a bootstrap problem the other created.
+
+**Why one tier is honest here.** A two-tier PKI exists so the root can be kept
+**offline**. Both tiers inside the same Vault is not that — it is the shape
+without the property. 2.3-3 already conceded the point in its title: *"offline is
+the passphrase, not the location."* What two tiers would still have bought is
+rotation without redistribution, and 4.2's Ansible base role owns the trust store
+on every VM, which turns redistribution into a play to re-run.
+
+**The chicken-and-egg, and how it is broken.** Vault needs a certificate to start;
+Vault is what issues certificates. `vault-installer.sh` does two passes: a
+self-signed certificate brings the listener up, then once the PKI exists Vault
+issues itself a real one and restarts. TLS is on from the first start either way,
+which is what 3.1 requires. Both halves are guarded on the issuer CN, so a re-run
+neither regenerates the bootstrap certificate nor reissues every time.
+
+**Two roles, because one TTL does not fit both.** `lab-server` caps at 720h, which
+is right for the proxy's leaves. Vault's own certificate uses `lab-vault` at
+8760h: renewal automation does not exist yet, and a 30-day certificate on the
+thing every other service authenticates to would expire unattended.
+
+**Migration, and the trap in it.** The new CA was created alongside the old, both
+roots trusted, certificates reissued, and only then was the old root removed from
+the trust store. The trap is that **nothing breaks at the moment of the change** —
+every existing certificate keeps working until it renews, so a mistake surfaces
+weeks later. Reissuing immediately rather than waiting is what makes it visible.
+
+**Cleanup that a migration leaves behind.** Deleting an issuer does **not** delete
+its private key, and the orphaned key here was the mount's *default* key —
+deleting it warned that operations without an explicit key would fail. The mount
+now holds exactly one issuer, one key, and both defaults pointing at it. Check
+with `vault list pki/issuers` and `vault list pki/keys`: more than one of either
+means a migration was left half-finished.

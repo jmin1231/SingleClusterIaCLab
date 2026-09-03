@@ -22,6 +22,13 @@
 
 set -euo pipefail
 
+log() { printf '\033[1;32m[+]\033[0m %s\n' "$*"; }
+warn() { printf '\033[1;33m[!]\033[0m %s\n' "$*" >&2; }
+die() {
+  printf '\033[1;31m[x]\033[0m %s\n' "$*" >&2
+  exit 1
+}
+
 SOURCE_SCRIPT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 VAULT_COMPOSE="${SOURCE_SCRIPT}/../vault/docker-compose.yml"
 VAULT_INIT="${SOURCE_SCRIPT}/../vault/secrets/vault-init.json"
@@ -47,17 +54,16 @@ api() {
 
 ensure_repo() {
   if api "${API}/repos/${GITEA_USER}/${REPO_NAME}" | jq -e '.id' >/dev/null 2>&1; then
-    echo "[+] Repository ${GITEA_USER}/${REPO_NAME} already exists"
+    log "Repository ${GITEA_USER}/${REPO_NAME} already exists"
     return 0
   fi
   printf '{"name":"%s","private":true,"auto_init":false}' "${REPO_NAME}" |
     api -X POST -H 'Content-Type: application/json' --data @- "${API}/user/repos" |
     jq -e '.id' >/dev/null 2>&1 ||
     {
-      echo "Could not create ${REPO_NAME} in Gitea." >&2
-      exit 1
+      die "Could not create ${REPO_NAME} in Gitea."
     }
-  echo "[+] Created ${GITEA_USER}/${REPO_NAME} (private)"
+  log "Created ${GITEA_USER}/${REPO_NAME} (private)"
 }
 
 # The remote carries no credential — see the header. Reset rather than added, so
@@ -75,13 +81,13 @@ ensure_remote() {
   else
     as_owner_git remote add "${REMOTE_NAME}" "${url}"
   fi
-  echo "[+] Remote '${REMOTE_NAME}' -> ${url}"
+  log "Remote '${REMOTE_NAME}' -> ${url}"
 }
 
 push_committed() {
   local dirty
   dirty="$(as_owner_git status --porcelain | wc -l)"
-  ((dirty == 0)) || echo "[!] ${dirty} uncommitted change(s) will NOT be pushed."
+  ((dirty == 0)) || warn "${dirty} uncommitted change(s) will NOT be pushed."
 
   # GIT_CONFIG_* passes the header through the environment. --preserve-env is
   # what carries it across sudo; without it sudo resets the environment and the
@@ -93,11 +99,10 @@ push_committed() {
     GIT_CONFIG_VALUE_0="Authorization: token ${GITEA_TOKEN}" \
     git -C "${REPO_ROOT}" push "${REMOTE_NAME}" "${BRANCH}" >/dev/null 2>&1 ||
     {
-      echo "Push to ${REMOTE_NAME}/${BRANCH} failed." >&2
-      exit 1
+      die "Push to ${REMOTE_NAME}/${BRANCH} failed."
     }
 
-  echo "[+] Pushed committed history to ${REMOTE_NAME}/${BRANCH}"
+  log "Pushed committed history to ${REMOTE_NAME}/${BRANCH}"
 }
 
 # Required status checks are named BEFORE any check exists, which is the point of
@@ -118,32 +123,21 @@ push_committed() {
 # again the same way.
 
 main() {
-  [[ ${EUID} -eq 0 ]] || {
-    echo "gitea-repo-setup.sh must be run as root:  sudo $0" >&2
-    exit 1
-  }
-  [[ -r "${VAULT_INIT}" ]] || {
-    echo "Cannot read ${VAULT_INIT}. Run docker/vault/vault-installer.sh first." >&2
-    exit 1
-  }
+  [[ ${EUID} -eq 0 ]] || die "gitea-repo-setup.sh must be run as root:  sudo $0"
+  [[ -r "${VAULT_INIT}" ]] || die "Cannot read ${VAULT_INIT}. Run docker/vault/vault-installer.sh first."
   VAULT_TOKEN="$(jq -r '.root_token // empty' "${VAULT_INIT}")"
-  [[ -n "${VAULT_TOKEN}" ]] || {
-    echo "${VAULT_INIT} holds no root_token." >&2
-    exit 1
-  }
+  [[ -n "${VAULT_TOKEN}" ]] || die "${VAULT_INIT} holds no root_token."
   export VAULT_TOKEN
   docker compose -f "${VAULT_COMPOSE}" exec -T -e VAULT_TOKEN vault vault status >/dev/null 2>&1 ||
     {
-      echo "Vault is not answering, or is sealed. Run docker/vault/scripts/vault-unseal.sh." >&2
-      exit 1
+      die "Vault is not answering, or is sealed. Run docker/vault/scripts/vault-unseal.sh."
     }
 
   GITEA_USER="$(docker compose -f "${VAULT_COMPOSE}" exec -T -e VAULT_TOKEN vault vault kv get -field=username "${ADMIN_PATH}" 2>/dev/null || true)"
   GITEA_PASS="$(docker compose -f "${VAULT_COMPOSE}" exec -T -e VAULT_TOKEN vault vault kv get -field=password "${ADMIN_PATH}" 2>/dev/null || true)"
   [[ -n "${GITEA_USER}" && -n "${GITEA_PASS}" ]] ||
     {
-      echo "${ADMIN_PATH} is missing. Run docker/gitea/gitea-installer.sh." >&2
-      exit 1
+      die "${ADMIN_PATH} is missing. Run docker/gitea/gitea-installer.sh."
     }
 
   # --- the API token -------------------------------------------------------
@@ -161,14 +155,14 @@ main() {
 
   if [[ -n "${GITEA_TOKEN}" ]] && [[ "$(curl -s -o /dev/null -w '%{http_code}' \
     -H "Authorization: token ${GITEA_TOKEN}" "${API}/user")" == "200" ]]; then
-    echo "[+] ${TOKEN_PATH} already present and authenticating"
+    log "${TOKEN_PATH} already present and authenticating"
   else
     # Either there is no token, or the stored one no longer works. Both mean the
     # named token on Gitea's side is dead weight - remove it, or the create below
     # fails on a duplicate name and leaves the account with a token nobody holds.
     if curl -s -u "${GITEA_USER}:${GITEA_PASS}" "${API}/users/${GITEA_USER}/tokens" |
       jq -e --arg n "${TOKEN_NAME}" 'any(.[]; .name == $n)' >/dev/null 2>&1; then
-      echo "[!] Deleting the stale '${TOKEN_NAME}' token before minting a replacement." >&2
+      warn "Deleting the stale '${TOKEN_NAME}' token before minting a replacement."
       curl -s -u "${GITEA_USER}:${GITEA_PASS}" -X DELETE -o /dev/null \
         "${API}/users/${GITEA_USER}/tokens/${TOKEN_NAME}"
     fi
@@ -180,32 +174,26 @@ main() {
     GITEA_TOKEN="$(jq -r '.sha1 // empty' <<<"${created}")"
     [[ -n "${GITEA_TOKEN}" ]] ||
       {
-        echo "Gitea did not return a token: $(jq -r '.message // .' <<<"${created}" | head -1)" >&2
-        exit 1
+        die "Gitea did not return a token: $(jq -r '.message // .' <<<"${created}" | head -1)"
       }
 
     # Stored immediately. This value is unreadable from Gitea from here on - a
     # failed write does not lose access, but it does orphan a live credential.
     docker compose -f "${VAULT_COMPOSE}" exec -T -e VAULT_TOKEN vault vault kv put "${TOKEN_PATH}" name="${TOKEN_NAME}" token="${GITEA_TOKEN}" >/dev/null ||
       {
-        echo "Minted a Gitea token but could not store it at ${TOKEN_PATH}. Delete it in Gitea under Settings > Applications, then re-run." >&2
-        exit 1
+        die "Minted a Gitea token but could not store it at ${TOKEN_PATH}. Delete it in Gitea under Settings > Applications, then re-run."
       }
 
     [[ "$(curl -s -o /dev/null -w '%{http_code}' \
       -H "Authorization: token ${GITEA_TOKEN}" "${API}/user")" == "200" ]] ||
       {
-        echo "The new token does not authenticate." >&2
-        exit 1
+        die "The new token does not authenticate."
       }
-    echo "[+] Minted and stored ${TOKEN_PATH}"
+    log "Minted and stored ${TOKEN_PATH}"
   fi
 
   REPO_OWNER="$(stat -c %U "${REPO_ROOT}")"
-  [[ -n "${REPO_OWNER}" ]] || {
-    echo "Could not determine the owner of ${REPO_ROOT}." >&2
-    exit 1
-  }
+  [[ -n "${REPO_OWNER}" ]] || die "Could not determine the owner of ${REPO_ROOT}."
 
   ensure_repo
   ensure_remote

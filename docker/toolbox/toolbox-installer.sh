@@ -20,6 +20,13 @@
 
 set -euo pipefail
 
+log() { printf '\033[1;32m[+]\033[0m %s\n' "$*"; }
+warn() { printf '\033[1;33m[!]\033[0m %s\n' "$*" >&2; }
+die() {
+  printf '\033[1;31m[x]\033[0m %s\n' "$*" >&2
+  exit 1
+}
+
 SOURCE_SCRIPT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
 # Two levels up, and resolved rather than left as a literal `../..`:
@@ -41,39 +48,31 @@ IMAGE="${TOOLBOX_IMAGE:-toolbox:latest}"
 preflight() {
   command -v docker >/dev/null 2>&1 ||
     {
-      echo "docker is not installed. bootstrap.sh installs it; see its docker step." >&2
-      exit 1
+      die "docker is not installed. bootstrap.sh installs it; see its docker step."
     }
   docker info >/dev/null 2>&1 ||
     {
-      echo "Cannot reach the Docker daemon. Is it running, and are you root?" >&2
-      exit 1
+      die "Cannot reach the Docker daemon. Is it running, and are you root?"
     }
-  [[ -f "${DOCKERFILE}" ]] || {
-    echo "No Dockerfile at ${DOCKERFILE}" >&2
-    exit 1
-  }
+  [[ -f "${DOCKERFILE}" ]] || die "No Dockerfile at ${DOCKERFILE}"
   [[ -f "${REQUIREMENTS}" ]] ||
     {
-      echo "No requirements.yml at ${REQUIREMENTS}; the ansible layer COPYs it." >&2
-      exit 1
+      die "No requirements.yml at ${REQUIREMENTS}; the ansible layer COPYs it."
     }
   [[ -f "${LAB_CA_DIR}/ca.crt" ]] ||
     {
-      echo "No CA at ${LAB_CA_DIR}/ca.crt. Run: sudo ./docker/vault/vault-installer.sh" >&2
-      exit 1
+      die "No CA at ${LAB_CA_DIR}/ca.crt. Run: sudo ./docker/vault/vault-installer.sh"
     }
 }
 
 build_image() {
-  echo "[+] Building ${IMAGE} — the first run downloads roughly a gigabyte of tools."
+  log "Building ${IMAGE} — the first run downloads roughly a gigabyte of tools."
   docker build --build-context "labca=${LAB_CA_DIR}" \
     -t "${IMAGE}" "${SOURCE_SCRIPT}" ||
     {
-      echo "Build failed; the failing step's output is above." >&2
-      exit 1
+      die "Build failed; the failing step's output is above."
     }
-  echo "[+] Built ${IMAGE}"
+  log "Built ${IMAGE}"
 }
 
 # 4.3's acceptance test, run once here rather than as a layer inside the image:
@@ -87,28 +86,23 @@ verify_image() {
 
   if ! out="$(docker run --rm "${IMAGE}" terraform version 2>&1)"; then
     {
-      echo "terraform does not run in ${IMAGE}: $(printf '%s' "${out}" | head -n1)" >&2
-      exit 1
+      die "terraform does not run in ${IMAGE}: $(printf '%s' "${out}" | head -n1)"
     }
   fi
-  echo "[+]   $(printf '%s' "${out}" | head -n1)"
+  log "  $(printf '%s' "${out}" | head -n1)"
 
   if ! out="$(docker run --rm "${IMAGE}" trivy --version 2>&1)"; then
     {
-      echo "trivy does not run in ${IMAGE}: $(printf '%s' "${out}" | head -n1)" >&2
-      exit 1
+      die "trivy does not run in ${IMAGE}: $(printf '%s' "${out}" | head -n1)"
     }
   fi
-  echo "[+]   $(printf '%s' "${out}" | head -n1)"
+  log "  $(printf '%s' "${out}" | head -n1)"
 
-  echo "[+] ${IMAGE} passes 4.3: both tools run with no downloads at job time."
+  log "${IMAGE} passes 4.3: both tools run with no downloads at job time."
 }
 
 main() {
-  [[ ${EUID} -eq 0 ]] || {
-    echo "toolbox-installer.sh must be run as root:  sudo $0" >&2
-    exit 1
-  }
+  [[ ${EUID} -eq 0 ]] || die "toolbox-installer.sh must be run as root:  sudo $0"
   preflight
   build_image
   verify_image

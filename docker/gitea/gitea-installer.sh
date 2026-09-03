@@ -13,6 +13,13 @@
 
 set -euo pipefail
 
+log() { printf '\033[1;32m[+]\033[0m %s\n' "$*"; }
+warn() { printf '\033[1;33m[!]\033[0m %s\n' "$*" >&2; }
+die() {
+  printf '\033[1;31m[x]\033[0m %s\n' "$*" >&2
+  exit 1
+}
+
 SOURCE_SCRIPT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 COMPOSE="${SOURCE_SCRIPT}/docker-compose.yml"
 VAULT_COMPOSE="${SOURCE_SCRIPT}/../vault/docker-compose.yml"
@@ -30,10 +37,7 @@ GITEA_ADMIN_EMAIL="${GITEA_ADMIN_EMAIL:-labadmin@lab.test}"
 # cannot write its own data directory. Ownership is the host's job.
 GITEA_UID=1000
 
-[[ ${EUID} -eq 0 ]] || {
-  echo "gitea-installer.sh must be run as root:  sudo $0" >&2
-  exit 1
-}
+[[ ${EUID} -eq 0 ]] || die "gitea-installer.sh must be run as root:  sudo $0"
 
 # --- talk to Vault ----------------------------------------------------------
 #
@@ -41,21 +45,12 @@ GITEA_UID=1000
 # -e VAULT_TOKEN=$TOKEN would put the token in argv, where ps shows it to every
 # user on the host.
 
-[[ -r "${VAULT_INIT}" ]] || {
-  echo "Cannot read ${VAULT_INIT}. Run docker/vault/vault-installer.sh first." >&2
-  exit 1
-}
+[[ -r "${VAULT_INIT}" ]] || die "Cannot read ${VAULT_INIT}. Run docker/vault/vault-installer.sh first."
 VAULT_TOKEN="$(jq -r '.root_token // empty' "${VAULT_INIT}")"
-[[ -n "${VAULT_TOKEN}" ]] || {
-  echo "${VAULT_INIT} holds no root_token." >&2
-  exit 1
-}
+[[ -n "${VAULT_TOKEN}" ]] || die "${VAULT_INIT} holds no root_token."
 export VAULT_TOKEN
 
-docker compose -f "${VAULT_COMPOSE}" exec -T -e VAULT_TOKEN vault vault status >/dev/null 2>&1 || {
-  echo "Vault is not answering, or is sealed. Run docker/vault/scripts/vault-unseal.sh." >&2
-  exit 1
-}
+docker compose -f "${VAULT_COMPOSE}" exec -T -e VAULT_TOKEN vault vault status >/dev/null 2>&1 || die "Vault is not answering, or is sealed. Run docker/vault/scripts/vault-unseal.sh."
 
 # --- credentials, generated in Vault before Gitea exists --------------------
 #
@@ -68,22 +63,22 @@ docker compose -f "${VAULT_COMPOSE}" exec -T -e VAULT_TOKEN vault vault status >
 
 if [[ -n "$(docker compose -f "${VAULT_COMPOSE}" exec -T -e VAULT_TOKEN vault \
   vault kv get -field=password "${DB_PATH}" 2>/dev/null)" ]]; then
-  echo "[+] ${DB_PATH} already present"
+  log "${DB_PATH} already present"
 else
   docker compose -f "${VAULT_COMPOSE}" exec -T -e VAULT_TOKEN vault \
     vault kv put "${DB_PATH}" database=gitea username=gitea \
     password="$(openssl rand -hex 24)" >/dev/null
-  echo "[+] Generated ${DB_PATH}"
+  log "Generated ${DB_PATH}"
 fi
 
 if [[ -n "$(docker compose -f "${VAULT_COMPOSE}" exec -T -e VAULT_TOKEN vault \
   vault kv get -field=password "${ADMIN_PATH}" 2>/dev/null)" ]]; then
-  echo "[+] ${ADMIN_PATH} already present"
+  log "${ADMIN_PATH} already present"
 else
   docker compose -f "${VAULT_COMPOSE}" exec -T -e VAULT_TOKEN vault \
     vault kv put "${ADMIN_PATH}" username="${GITEA_ADMIN_USER}" \
     email="${GITEA_ADMIN_EMAIL}" password="$(openssl rand -hex 24)" >/dev/null
-  echo "[+] Generated ${ADMIN_PATH}"
+  log "Generated ${ADMIN_PATH}"
 fi
 
 # --- render .env ------------------------------------------------------------
@@ -97,27 +92,18 @@ db_user="$(docker compose -f "${VAULT_COMPOSE}" exec -T -e VAULT_TOKEN vault \
   vault kv get -field=username "${DB_PATH}" 2>/dev/null)"
 db_pass="$(docker compose -f "${VAULT_COMPOSE}" exec -T -e VAULT_TOKEN vault \
   vault kv get -field=password "${DB_PATH}" 2>/dev/null)"
-[[ -n "${db_name}" && -n "${db_user}" && -n "${db_pass}" ]] || {
-  echo "${DB_PATH} is missing or incomplete." >&2
-  exit 1
-}
+[[ -n "${db_name}" && -n "${db_user}" && -n "${db_pass}" ]] || die "${DB_PATH} is missing or incomplete."
 
 # The host address, discovered rather than written down: it differs per host.
 bridge="$(ip -4 addr show cloudbr0 2>/dev/null | awk '/inet /{print $2}' | cut -d/ -f1)"
-[[ -n "${bridge}" ]] || {
-  echo "cloudbr0 has no IPv4 address; is it up?" >&2
-  exit 1
-}
+[[ -n "${bridge}" ]] || die "cloudbr0 has no IPv4 address; is it up?"
 
 # The GID that owns the docker socket, for the runner's group_add. Read from the
 # socket, not from `getent group docker` - what grants access is the group that
 # OWNS the socket, not one that happens to carry that name. Ubuntu allocates it
 # descending from 999, so it differs per host.
 docker_gid="$(stat -c '%g' /var/run/docker.sock 2>/dev/null)"
-[[ -n "${docker_gid}" ]] || {
-  echo "/var/run/docker.sock not found. Is Docker running?" >&2
-  exit 1
-}
+[[ -n "${docker_gid}" ]] || die "/var/run/docker.sock not found. Is Docker running?"
 
 (
   umask 077
@@ -125,7 +111,7 @@ docker_gid="$(stat -c '%g' /var/run/docker.sock 2>/dev/null)"
     "${bridge}" "${docker_gid}" "${db_name}" "${db_user}" "${db_pass}" >"${ENV_FILE}"
 )
 chmod 0600 "${ENV_FILE}"
-echo "[+] Rendered ${ENV_FILE} from Vault"
+log "Rendered ${ENV_FILE} from Vault"
 
 # --- start Gitea ------------------------------------------------------------
 
@@ -142,11 +128,8 @@ for ((i = 0; i < 60; i++)); do
   docker compose -f "${COMPOSE}" exec -T gitea gitea --version >/dev/null 2>&1 && break
   sleep 2
 done
-docker compose -f "${COMPOSE}" exec -T gitea gitea --version >/dev/null 2>&1 || {
-  echo "Gitea did not become ready in 120s. See: docker logs gitea" >&2
-  exit 1
-}
-echo "[+] Gitea is up, reachable only via the proxy at https://gitea.lab.test"
+docker compose -f "${COMPOSE}" exec -T gitea gitea --version >/dev/null 2>&1 || die "Gitea did not become ready in 120s. See: docker logs gitea"
+log "Gitea is up, reachable only via the proxy at https://gitea.lab.test"
 
 # --- the admin user ---------------------------------------------------------
 #
@@ -162,15 +145,12 @@ admin_email="$(docker compose -f "${VAULT_COMPOSE}" exec -T -e VAULT_TOKEN vault
 
 if docker compose -f "${COMPOSE}" exec -T gitea gitea admin user list 2>/dev/null |
   awk 'NR>1 {print $2}' | grep -qx "${admin_user}"; then
-  echo "[+] Gitea admin '${admin_user}' already exists"
+  log "Gitea admin '${admin_user}' already exists"
 else
   docker compose -f "${COMPOSE}" exec -T gitea \
     gitea admin user create --admin --username "${admin_user}" --password "${admin_pass}" \
-    --email "${admin_email}" --must-change-password=false >/dev/null || {
-    echo "Could not create the Gitea admin user." >&2
-    exit 1
-  }
-  echo "[+] Created Gitea admin '${admin_user}' with the password from Vault"
+    --email "${admin_email}" --must-change-password=false >/dev/null || die "Could not create the Gitea admin user."
+  log "Created Gitea admin '${admin_user}' with the password from Vault"
 fi
 
 # --- the runner and the daemon its jobs build on ----------------------------
@@ -184,14 +164,11 @@ install -d -m 0750 "${RUNNER_DIR}/data"
 
 if [[ -f "${RUNNER_DIR}/data/.runner" ]]; then
   docker compose -f "${COMPOSE}" up -d dind runner
-  echo "[+] Runner already registered; started it and dind."
+  log "Runner already registered; started it and dind."
 else
   runner_token="$(docker compose -f "${COMPOSE}" exec -T gitea \
     gitea actions generate-runner-token 2>/dev/null | tr -d '\r\n[:space:]')"
-  [[ -n "${runner_token}" ]] || {
-    echo "Could not mint a runner token. Check GITEA__actions__ENABLED and: docker logs gitea" >&2
-    exit 1
-  }
+  [[ -n "${runner_token}" ]] || die "Could not mint a runner token. Check GITEA__actions__ENABLED and: docker logs gitea"
   RUNNER_TOKEN="${runner_token}" docker compose -f "${COMPOSE}" up -d dind runner
-  echo "[+] Runner registered against http://gitea:3000, jobs build on dind."
+  log "Runner registered against http://gitea:3000, jobs build on dind."
 fi

@@ -57,8 +57,9 @@ services:
     environment:
       # What the CLI inside the container dials. Not api_addr.
       - VAULT_ADDR=https://vault.lab.test:8200
-      # bundle.crt is leaf + intermediate and verifies nothing; a client needs
-      # the root. issue-leaf.sh writes it as ca.crt, per kubernetes.io/tls.
+      # bundle.crt is what Vault SERVES — the leaf and its chain — and verifies
+      # nothing; a client needs the CA on its own. vault-installer.sh writes that
+      # as ca.crt, the name kubernetes.io/tls uses.
       - VAULT_CACERT=/vault/certs/ca.crt
 
     volumes:

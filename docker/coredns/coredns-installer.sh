@@ -10,6 +10,13 @@
 
 set -euo pipefail
 
+log() { printf '\033[1;32m[+]\033[0m %s\n' "$*"; }
+warn() { printf '\033[1;33m[!]\033[0m %s\n' "$*" >&2; }
+die() {
+  printf '\033[1;31m[x]\033[0m %s\n' "$*" >&2
+  exit 1
+}
+
 SOURCE_SCRIPT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
 TMPL="${SOURCE_SCRIPT}/zones/lab.test.zone.tmpl"
@@ -26,12 +33,9 @@ render_config() {
   cloudbr0_ip="$(ip -4 addr show cloudbr0 | awk '/inet /{print $2}' | cut -d/ -f1)"
   gateway="$(ip -j -4 route show default | jq -r '.[0].gateway // empty')"
 
-  [[ -f "${TMPL}" ]] || {
-    echo "Missing zone template: ${TMPL}" >&2
-    exit 1
-  }
+  [[ -f "${TMPL}" ]] || die "Missing zone template: ${TMPL}"
 
-  echo "[+] Rendering CoreDNS config for ${cloudbr0_ip} (upstream ${gateway})..."
+  log "Rendering CoreDNS config for ${cloudbr0_ip} (upstream ${gateway})..."
 
   # Discovered values only; the image pin lives in docker-compose.yml.
   printf 'CLOUDBR0_IP=%s\nGATEWAY_IP=%s\n' "${cloudbr0_ip}" "${gateway}" >"${SOURCE_SCRIPT}/.env"
@@ -41,13 +45,13 @@ render_config() {
   # shellcheck disable=SC2016  # the quotes are intentional: this is the allow-list
   CLOUDBR0_IP="${cloudbr0_ip}" envsubst '${CLOUDBR0_IP}' <"${TMPL}" >"${ZONE}"
 
-  echo "[+] CoreDNS config rendered: $(basename "${ZONE}") and .env"
+  log "CoreDNS config rendered: $(basename "${ZONE}") and .env"
 }
 
 # Start the container. --remove-orphans so a renamed service does not leave an
 # old container holding port 53.
 start_coredns() {
-  echo "[+] Starting CoreDNS..."
+  log "Starting CoreDNS..."
   docker compose -f "${COMPOSE}" up -d --remove-orphans
 }
 
@@ -59,15 +63,14 @@ configure_resolver() {
   local bridge
   bridge="$(ip -4 addr show cloudbr0 | awk '/inet /{print $2}' | cut -d/ -f1)"
 
-  echo "[+] Pointing systemd-resolved at ${bridge} for lab.test..."
+  log "Pointing systemd-resolved at ${bridge} for lab.test..."
 
   # Deleted, not left to lose on sort order: `DNS=` accumulates across drop-ins.
   if [[ -f "${BOOTSTRAP_DROPIN}" ]]; then
-    echo "[+] Retiring the bootstrap resolver floor ${BOOTSTRAP_DROPIN}..."
+    log "Retiring the bootstrap resolver floor ${BOOTSTRAP_DROPIN}..."
     rm -f "${BOOTSTRAP_DROPIN}" ||
       {
-        echo "Failed to remove ${BOOTSTRAP_DROPIN}; it would keep answering alongside CoreDNS." >&2
-        exit 1
+        die "Failed to remove ${BOOTSTRAP_DROPIN}; it would keep answering alongside CoreDNS."
       }
   fi
 
@@ -76,10 +79,7 @@ configure_resolver() {
   # extends: without the header, resolved logs "Assignment outside of section"
   # and ignores every key — the file looks correct and does nothing.
   printf '[Resolve]\nDNS=%s\nDomains=~lab.test\n' "${bridge}" >"${RESOLVED_DROPIN}"
-  systemctl restart systemd-resolved || {
-    echo "Failed to restart systemd-resolved." >&2
-    exit 1
-  }
+  systemctl restart systemd-resolved || die "Failed to restart systemd-resolved."
 
   # resolved accepts a drop-in it ignored, so assert on what it concluded rather
   # than on the file. Retried: systemctl returns once the unit has started, but
@@ -93,26 +93,22 @@ configure_resolver() {
   for ((i = 0; i < 10; i++)); do
     status="$(resolvectl status 2>/dev/null || true)"
     if grep -q "DNS Servers:.*${bridge}" <<<"${status}"; then
-      echo "[+] systemd-resolved is routing lab.test to ${bridge}."
+      log "systemd-resolved is routing lab.test to ${bridge}."
       return 0
     fi
     sleep 1
   done
   {
-    echo "systemd-resolved did not pick up ${RESOLVED_DROPIN}; check 'journalctl -u systemd-resolved'." >&2
-    exit 1
+    die "systemd-resolved did not pick up ${RESOLVED_DROPIN}; check 'journalctl -u systemd-resolved'."
   }
 }
 
 main() {
-  [[ ${EUID} -eq 0 ]] || {
-    echo "coredns-installer.sh must be run as root:  sudo $0" >&2
-    exit 1
-  }
+  [[ ${EUID} -eq 0 ]] || die "coredns-installer.sh must be run as root:  sudo $0"
   render_config
   start_coredns
   configure_resolver
-  echo "[+] CoreDNS ready. Check with: getent hosts gitea.lab.test"
+  log "CoreDNS ready. Check with: getent hosts gitea.lab.test"
 }
 
 main "$@"

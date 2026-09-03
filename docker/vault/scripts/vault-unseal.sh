@@ -15,35 +15,30 @@
 
 set -euo pipefail
 
+log() { printf '\033[1;32m[+]\033[0m %s\n' "$*"; }
+warn() { printf '\033[1;33m[!]\033[0m %s\n' "$*" >&2; }
+die() {
+  printf '\033[1;31m[x]\033[0m %s\n' "$*" >&2
+  exit 1
+}
+
 SOURCE_SCRIPT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 VAULT_DIR="${SOURCE_SCRIPT}/.."
 COMPOSE="${VAULT_DIR}/docker-compose.yml"
 LEAF_CA="${VAULT_DIR}/certs/ca.crt"
 INIT_FILE="${VAULT_DIR}/secrets/vault-init.json"
 
-[[ ${EUID} -eq 0 ]] || {
-  echo "vault-unseal.sh must be run as root:  sudo $0" >&2
-  exit 1
-}
+[[ ${EUID} -eq 0 ]] || die "vault-unseal.sh must be run as root:  sudo $0"
 
 # Usable, not present - this runs standalone, months later, against a file that
 # could have been edited or truncated. The message carries both meanings because
 # it runs before Vault is asked anything and cannot yet tell them apart.
-[[ -e "${INIT_FILE}" ]] || {
-  echo "${INIT_FILE} is missing. Run docker/vault/vault-installer.sh - or, if Vault is already initialised, this held its only key." >&2
-  exit 1
-}
-jq -e '.unseal_keys_b64[0]' "${INIT_FILE}" >/dev/null 2>&1 || {
-  echo "${INIT_FILE} has no unseal key. Restore it; do NOT re-initialise - that abandons this Vault's data." >&2
-  exit 1
-}
+[[ -e "${INIT_FILE}" ]] || die "${INIT_FILE} is missing. Run docker/vault/vault-installer.sh - or, if Vault is already initialised, this held its only key."
+jq -e '.unseal_keys_b64[0]' "${INIT_FILE}" >/dev/null 2>&1 || die "${INIT_FILE} has no unseal key. Restore it; do NOT re-initialise - that abandons this Vault's data."
 
 # The host address, discovered rather than written down: it differs per host.
 BRIDGE="$(ip -4 addr show cloudbr0 2>/dev/null | awk '/inet /{print $2}' | cut -d/ -f1)"
-[[ -n "${BRIDGE}" ]] || {
-  echo "cloudbr0 has no IPv4 address; is it up?" >&2
-  exit 1
-}
+[[ -n "${BRIDGE}" ]] || die "cloudbr0 has no IPv4 address; is it up?"
 
 # --- wait for Vault to answer -----------------------------------------------
 #
@@ -51,7 +46,7 @@ BRIDGE="$(ip -4 addr show cloudbr0 2>/dev/null | awk '/inet /{print $2}' | cut -
 # than the installer's 60: an install has already proved Docker is up, and this
 # has not.
 
-echo "[+] Waiting for Vault to answer on ${BRIDGE}:8200..."
+log "Waiting for Vault to answer on ${BRIDGE}:8200..."
 for ((i = 0; i < 120; i++)); do
   code="$(curl -s -o /dev/null -w '%{http_code}' \
     --cacert "${LEAF_CA}" \
@@ -69,13 +64,11 @@ if [[ "${code}" == "000" ]]; then
   # may not exist.
   state="$(docker inspect -f '{{.State.Status}}' vault 2>/dev/null)" || state="absent"
   if [[ "${state}" != "running" ]]; then
-    echo "The vault container is ${state}. Start it:  docker compose -f ${COMPOSE} up -d" >&2
-    exit 1
+    die "The vault container is ${state}. Start it:  docker compose -f ${COMPOSE} up -d"
   fi
-  echo "Last lines from the container:" >&2
+  warn "Last lines from the container:"
   docker logs vault --tail 20 2>&1 | sed 's/^/    /' >&2 || true
-  echo "Vault is running but did not answer on ${BRIDGE}:8200 in 120s. See the log above." >&2
-  exit 1
+  die "Vault is running but did not answer on ${BRIDGE}:8200 in 120s. See the log above."
 fi
 
 # --- is it actually sealed? -------------------------------------------------
@@ -90,19 +83,17 @@ response="$(curl -s -o /dev/null -w '%{http_code}' \
 
 case "${response}" in
 501)
-  echo "Vault is not initialised, so there is nothing to unseal. Run docker/vault/vault-installer.sh." >&2
-  exit 1
+  die "Vault is not initialised, so there is nothing to unseal. Run docker/vault/vault-installer.sh."
   ;;
 200 | 429 | 473)
-  echo "[+] Vault is already unsealed."
+  log "Vault is already unsealed."
   exit 0
   ;;
 503) ;;
 *)
   # Not silently treated as sealed: an unexpected code means an assumption here
   # is wrong, and unsealing on a guess is the wrong way to find out.
-  echo "Vault answered HTTP ${response}, which this script does not know how to read." >&2
-  exit 1
+  die "Vault answered HTTP ${response}, which this script does not know how to read."
   ;;
 esac
 
@@ -113,7 +104,7 @@ esac
 # into a script that unseals nothing and reports success.
 
 threshold="$(jq -r '.unseal_threshold' "${INIT_FILE}")"
-echo "[+] Unsealing Vault (${threshold} share(s))..."
+log "Unsealing Vault (${threshold} share(s))..."
 
 for ((i = 0; i < threshold; i++)); do
   # The key travels in the request BODY, read from stdin by `--data @-`. Never in
@@ -129,10 +120,7 @@ for ((i = 0; i < threshold; i++)); do
       --cacert "${LEAF_CA}" \
       --resolve "vault.lab.test:8200:${BRIDGE}" \
       --data @- \
-      "https://vault.lab.test:8200/v1/sys/unseal")" || {
-    echo "Could not reach Vault to submit share $((i + 1)) of ${threshold}." >&2
-    exit 1
-  }
+      "https://vault.lab.test:8200/v1/sys/unseal")" || die "Could not reach Vault to submit share $((i + 1)) of ${threshold}."
 
   # A 400 still returns a body, so the transport succeeding proves nothing.
   jq -e 'has("sealed")' <<<"${body}" >/dev/null 2>&1 || {
@@ -151,22 +139,15 @@ done
 body="$(curl -s \
   --cacert "${LEAF_CA}" \
   --resolve "vault.lab.test:8200:${BRIDGE}" \
-  "https://vault.lab.test:8200/v1/sys/seal-status")" || {
-  echo "Could not reach Vault on ${BRIDGE}:8200 to confirm it unsealed." >&2
-  exit 1
-}
+  "https://vault.lab.test:8200/v1/sys/seal-status")" || die "Could not reach Vault on ${BRIDGE}:8200 to confirm it unsealed."
 
 # jq -e exits non-zero for null exactly as for false, so an unparseable body
 # would otherwise read as "unsealed, all good".
-jq -e 'has("sealed")' <<<"${body}" >/dev/null 2>&1 || {
-  echo "Vault did not return a seal status. Check that the container is running." >&2
-  exit 1
-}
+jq -e 'has("sealed")' <<<"${body}" >/dev/null 2>&1 || die "Vault did not return a seal status. Check that the container is running."
 
 if jq -e '.sealed == false' <<<"${body}" >/dev/null 2>&1; then
-  echo "[+] Vault is unsealed."
+  log "Vault is unsealed."
   exit 0
 fi
 
-echo "Vault is still sealed: $(jq -r '.progress' <<<"${body}") of $(jq -r '.t' <<<"${body}") shares accepted." >&2
-exit 1
+die "Vault is still sealed: $(jq -r '.progress' <<<"${body}") of $(jq -r '.t' <<<"${body}") shares accepted."

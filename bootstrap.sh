@@ -9,6 +9,13 @@
 # Safe to re-run: every step is a no-op once its work is done.
 
 set -euo pipefail
+
+log() { printf '\033[1;32m[+]\033[0m %s\n' "$*"; }
+warn() { printf '\033[1;33m[!]\033[0m %s\n' "$*" >&2; }
+die() {
+  printf '\033[1;31m[x]\033[0m %s\n' "$*" >&2
+  exit 1
+}
 export DEBIAN_FRONTEND=noninteractive
 
 SOURCE_SCRIPT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -26,8 +33,7 @@ SOURCE_SCRIPT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 SKIP_HOST_PREP="${SKIP_HOST_PREP:-0}"
 [[ "${SKIP_HOST_PREP}" == "0" || "${SKIP_HOST_PREP}" == "1" ]] ||
   {
-    echo "SKIP_HOST_PREP must be 0 or 1, got '${SKIP_HOST_PREP}'." >&2
-    exit 1
+    die "SKIP_HOST_PREP must be 0 or 1, got '${SKIP_HOST_PREP}'."
   }
 
 # --- Steps ------------------------------------------------------------------
@@ -35,43 +41,40 @@ SKIP_HOST_PREP="${SKIP_HOST_PREP:-0}"
 # Enable NTP and wait up to 60s for the clock to synchronise. Runs first because
 # a skewed clock breaks apt and TLS.
 sync_clock() {
-  echo "[+] Clock before sync: $(date)"
+  log "Clock before sync: $(date)"
 
-  timedatectl set-ntp true 2>/dev/null || echo "[!] Could not enable NTP via timedatectl."
+  timedatectl set-ntp true 2>/dev/null || warn "Could not enable NTP via timedatectl."
   systemctl restart systemd-timesyncd 2>/dev/null || true
 
-  echo "[+] Waiting for the clock to synchronise..."
+  log "Waiting for the clock to synchronise..."
   local i
   for ((i = 0; i < 60; i++)); do
     if [[ "$(timedatectl show -p NTPSynchronized --value)" == "yes" ]]; then
-      echo "[+] Clock synchronised: $(date)"
+      log "Clock synchronised: $(date)"
       return 0
     fi
     sleep 1
   done
 
   {
-    echo "Clock did not synchronise within 60s — apt signature validation will fail." >&2
-    exit 1
+    die "Clock did not synchronise within 60s — apt signature validation will fail."
   }
 }
 
 # Verify-only, and fatal: later phases boot VMs.
 check_kvm() {
-  echo "[+] Checking hardware virtualization..."
+  log "Checking hardware virtualization..."
 
   grep -Eq '(vmx|svm)' /proc/cpuinfo ||
     {
-      echo "CPU reports no vmx/svm flag — if this host is itself a VM, enable nested virtualization on the hypervisor." >&2
-      exit 1
+      die "CPU reports no vmx/svm flag — if this host is itself a VM, enable nested virtualization on the hypervisor."
     }
   [[ -c /dev/kvm ]] ||
     {
-      echo "/dev/kvm is missing — the kvm_intel/kvm_amd module did not load. Check 'lsmod | grep kvm' and 'dmesg | grep -i kvm'." >&2
-      exit 1
+      die "/dev/kvm is missing — the kvm_intel/kvm_amd module did not load. Check 'lsmod | grep kvm' and 'dmesg | grep -i kvm'."
     }
 
-  echo "[+] KVM available: $(grep -Eom1 '(vmx|svm)' /proc/cpuinfo) flag present, /dev/kvm ready"
+  log "KVM available: $(grep -Eom1 '(vmx|svm)' /proc/cpuinfo) flag present, /dev/kvm ready"
 }
 
 install_cli_tools() {
@@ -80,6 +83,10 @@ install_cli_tools() {
   command -v jq >/dev/null 2>&1 || missing+=(jq)
   command -v envsubst >/dev/null 2>&1 || missing+=(gettext-base)
   command -v openssl >/dev/null 2>&1 || missing+=(openssl)
+  # cloudstack-install-all.sh dearmours the CloudStack signing key with it. apt
+  # itself only needs gpgv, so a minimal image can have the verifier and not the
+  # full tool - and the failure lands five minutes into Phase 1, not here.
+  command -v gpg >/dev/null 2>&1 || missing+=(gnupg)
 
   # ca-certificates ships no binary, so ask dpkg instead of the shell.
   if ! dpkg -s ca-certificates >/dev/null 2>&1; then
@@ -87,17 +94,16 @@ install_cli_tools() {
   fi
 
   if [[ ${#missing[@]} -eq 0 ]]; then
-    echo "[+] CLI tools are installed"
+    log "CLI tools are installed"
     return
   fi
-  echo "[+] Installing CLI tools: ${missing[*]}..."
+  log "Installing CLI tools: ${missing[*]}..."
   apt-get -o DPkg::Lock::Timeout=300 update
   apt-get -o DPkg::Lock::Timeout=300 install -y "${missing[@]}" ||
     {
-      echo "Failed to install ${missing[*]}. If this reports a dpkg lock, another package manager held it for longer than ${APT_LOCK_TIMEOUT}s — wait for unattended-upgrades to finish and re-run." >&2
-      exit 1
+      die "Failed to install ${missing[*]}. If this reports a dpkg lock, another package manager held it for longer than ${APT_LOCK_TIMEOUT}s — wait for unattended-upgrades to finish and re-run."
     }
-  echo "[+] CLI tools ready"
+  log "CLI tools ready"
 }
 
 # Assert Docker is usable, not merely present. Called on BOTH paths of
@@ -109,27 +115,25 @@ install_cli_tools() {
 verify_docker() {
   docker info >/dev/null 2>&1 ||
     {
-      echo "Docker is installed but the daemon is not responding — check 'systemctl status docker'." >&2
-      exit 1
+      die "Docker is installed but the daemon is not responding — check 'systemctl status docker'."
     }
   docker compose version >/dev/null 2>&1 ||
     {
-      echo "Docker is installed but the compose plugin is missing — install docker-compose-plugin." >&2
-      exit 1
+      die "Docker is installed but the compose plugin is missing — install docker-compose-plugin."
     }
 
-  echo "[+] Docker ready: $(docker --version)"
+  log "Docker ready: $(docker --version)"
 }
 
 # From Docker's own apt repository, not Ubuntu's.
 install_docker() {
   if command -v docker >/dev/null 2>&1; then
-    echo "[+] Docker already installed: $(docker --version)"
+    log "Docker already installed: $(docker --version)"
     verify_docker
     return
   fi
 
-  echo "[+] Installing Docker..."
+  log "Installing Docker..."
 
   local codename
   codename="$(. /etc/os-release && echo "${UBUNTU_CODENAME:-$VERSION_CODENAME}")"
@@ -138,8 +142,7 @@ install_docker() {
   curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
     -o /etc/apt/keyrings/docker.asc ||
     {
-      echo "Could not fetch Docker's signing key — check egress to download.docker.com." >&2
-      exit 1
+      die "Could not fetch Docker's signing key — check egress to download.docker.com."
     }
   chmod a+r /etc/apt/keyrings/docker.asc
 
@@ -160,8 +163,7 @@ EOF
     docker-buildx-plugin \
     docker-compose-plugin ||
     {
-      echo "Failed to install Docker packages — check 'apt-get update' output above for the docker.sources repository." >&2
-      exit 1
+      die "Failed to install Docker packages — check 'apt-get update' output above for the docker.sources repository."
     }
 
   systemctl enable --now docker
@@ -189,10 +191,7 @@ for script in "${CLOUDSTACK_INSTALLER}" "${COREDNS_INSTALLER}" \
   "${VAULT_INSTALLER}" "${VAULT_ENSURE_CS}" "${GITEA_INSTALLER}" \
   "${GITEA_REPO_SETUP}" \
   "${TOOLBOX_INSTALLER}" "${PROXY_INSTALLER}"; do
-  [[ -x "${script}" ]] || {
-    echo "Missing or not executable: ${script}" >&2
-    exit 1
-  }
+  [[ -x "${script}" ]] || die "Missing or not executable: ${script}"
 done
 
 # The wrappers below stay one-liners rather than collapsing into main(): each
@@ -201,9 +200,9 @@ done
 
 # The all-in-one installer also creates the cloudbr0 bridge.
 install_cloudstack() {
-  echo "[+] Running the CloudStack all-in-one installer (this takes a while)..."
+  log "Running the CloudStack all-in-one installer (this takes a while)..."
   "${CLOUDSTACK_INSTALLER}"
-  echo "[+] CloudStack installed; cloudbr0 is up."
+  log "CloudStack installed; cloudbr0 is up."
 }
 
 # After CloudStack, whose bridge it binds to.
@@ -264,14 +263,11 @@ install_proxy() {
 }
 
 main() {
-  [[ ${EUID} -eq 0 ]] || {
-    echo "bootstrap.sh must be run as root:  sudo $0" >&2
-    exit 1
-  }
+  [[ ${EUID} -eq 0 ]] || die "bootstrap.sh must be run as root:  sudo $0"
   check_kvm
 
   if [[ "${SKIP_HOST_PREP}" == "1" ]]; then
-    echo "[!] SKIP_HOST_PREP=1 — skipping clock, CLI tools and Docker."
+    warn "SKIP_HOST_PREP=1 — skipping clock, CLI tools and Docker."
     # Asserted anyway, for the same reason check_kvm runs early: install_coredns
     # and install_vault both need Docker, and failing here names the cause where
     # failing there names a container.

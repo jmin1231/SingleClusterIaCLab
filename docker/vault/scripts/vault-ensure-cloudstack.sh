@@ -27,6 +27,13 @@
 
 set -euo pipefail
 
+log() { printf '\033[1;32m[+]\033[0m %s\n' "$*"; }
+warn() { printf '\033[1;33m[!]\033[0m %s\n' "$*" >&2; }
+die() {
+  printf '\033[1;31m[x]\033[0m %s\n' "$*" >&2
+  exit 1
+}
+
 SOURCE_SCRIPT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
 VAULT_DIR="${SOURCE_SCRIPT}/.."
@@ -48,36 +55,24 @@ CLOUDSTACK_ADMIN_PASS="${CLOUDSTACK_ADMIN_PASS:-password}"
 # Point cmk at this host and log it in by password. This is the only thing that
 # writes a credential to ~/.cmk/config.
 cmk_configure() {
-  command -v cmk >/dev/null 2>&1 || {
-    echo "cmk is not installed. Run cloudstack/cloudstack-install-all.sh." >&2
-    exit 1
-  }
+  command -v cmk >/dev/null 2>&1 || die "cmk is not installed. Run cloudstack/cloudstack-install-all.sh."
 
   local bridge
   bridge="$(ip -4 addr show cloudbr0 2>/dev/null | awk '/inet /{print $2}' | cut -d/ -f1)"
-  [[ -n "${bridge}" ]] || {
-    echo "cloudbr0 has no IPv4 address; is it up?" >&2
-    exit 1
-  }
+  [[ -n "${bridge}" ]] || die "cloudbr0 has no IPv4 address; is it up?"
 
   CLOUDSTACK_URL="http://${bridge}:8080/client/api"
   cmk set url "${CLOUDSTACK_URL}" >/dev/null
   cmk set username "${CLOUDSTACK_ADMIN_USER}" >/dev/null
   cmk set password "${CLOUDSTACK_ADMIN_PASS}" >/dev/null
-  cmk sync >/dev/null || {
-    echo "cmk sync failed - is the management server up?" >&2
-    exit 1
-  }
+  cmk sync >/dev/null || die "cmk sync failed - is the management server up?"
   export CLOUDSTACK_URL
 }
 
 admin_user_id() {
   local uid
   uid="$(cmk -o json list users username="${CLOUDSTACK_ADMIN_USER}" | jq -r '.user[0].id')"
-  [[ -n "${uid}" && "${uid}" != "null" ]] || {
-    echo "Could not find CloudStack user '${CLOUDSTACK_ADMIN_USER}'." >&2
-    exit 1
-  }
+  [[ -n "${uid}" && "${uid}" != "null" ]] || die "Could not find CloudStack user '${CLOUDSTACK_ADMIN_USER}'."
   printf '%s' "${uid}"
 }
 
@@ -93,17 +88,11 @@ ensure_cloudstack_api_keys() {
   CLOUDSTACK_SECRET_KEY="$(jq -r '.userkeys.secretkey // empty' <<<"${keys}" 2>/dev/null)"
 
   if [[ -z "${CLOUDSTACK_API_KEY}" || -z "${CLOUDSTACK_SECRET_KEY}" ]]; then
-    echo "[!] Registering NEW API keys for '${CLOUDSTACK_ADMIN_USER}' - any previously issued key stops working." >&2
-    keys="$(cmk -o json register userkeys id="$(admin_user_id)")" || {
-      echo "cmk register userkeys failed." >&2
-      exit 1
-    }
+    warn "Registering NEW API keys for '${CLOUDSTACK_ADMIN_USER}' - any previously issued key stops working."
+    keys="$(cmk -o json register userkeys id="$(admin_user_id)")" || die "cmk register userkeys failed."
     CLOUDSTACK_API_KEY="$(jq -r '.userkeys.apikey // empty' <<<"${keys}")"
     CLOUDSTACK_SECRET_KEY="$(jq -r '.userkeys.secretkey // empty' <<<"${keys}")"
-    [[ -n "${CLOUDSTACK_API_KEY}" && -n "${CLOUDSTACK_SECRET_KEY}" ]] || {
-      echo "cmk did not return a usable key pair." >&2
-      exit 1
-    }
+    [[ -n "${CLOUDSTACK_API_KEY}" && -n "${CLOUDSTACK_SECRET_KEY}" ]] || die "cmk did not return a usable key pair."
   fi
 
   export CLOUDSTACK_API_KEY CLOUDSTACK_SECRET_KEY
@@ -151,7 +140,7 @@ ensure_api_key() {
   live="$(live_key)"
 
   if [[ -z "${stored}" ]]; then
-    echo "[+] ${API_PATH} is absent; seeding from CloudStack"
+    log "${API_PATH} is absent; seeding from CloudStack"
     ensure_cloudstack_api_keys
 
     # The URL travels with the credential deliberately: a consumer needs both,
@@ -162,20 +151,18 @@ ensure_api_key() {
       api_key="${CLOUDSTACK_API_KEY}" \
       secret_key="${CLOUDSTACK_SECRET_KEY}" >/dev/null ||
       {
-        echo "Could not write ${API_PATH} to Vault." >&2
-        exit 1
+        die "Could not write ${API_PATH} to Vault."
       }
   elif [[ "${stored}" == "${live}" ]]; then
-    echo "[+] ${API_PATH} already matches CloudStack; leaving it alone"
+    log "${API_PATH} already matches CloudStack; leaving it alone"
     return 0
   else
     {
-      echo "${API_PATH} holds a key CloudStack no longer accepts — its database was probably redeployed. Vault will keep serving the stale key and every consumer will fail with a 401 that does not say why. To reseed deliberately:  vault kv delete ${API_PATH}  then re-run." >&2
-      exit 1
+      die "${API_PATH} holds a key CloudStack no longer accepts — its database was probably redeployed. Vault will keep serving the stale key and every consumer will fail with a 401 that does not say why. To reseed deliberately:  vault kv delete ${API_PATH}  then re-run."
     }
   fi
 
-  echo "[+] Seeded ${API_PATH}"
+  log "Seeded ${API_PATH}"
 }
 
 # --- svc-terraform -----------------------------------------------------------
@@ -197,18 +184,12 @@ svc_keys() {
   SVC_SECRET_KEY="$(jq -r '.userkeys.secretkey // empty' <<<"${keys}" 2>/dev/null)"
 
   if [[ -z "${SVC_API_KEY}" ]]; then
-    echo "[!] Registering API keys for '${SVC_USER}' — it has none yet."
-    keys="$(cmk -o json register userkeys id="${uid}")" || {
-      echo "register userkeys failed for ${SVC_USER}." >&2
-      exit 1
-    }
+    warn "Registering API keys for '${SVC_USER}' — it has none yet."
+    keys="$(cmk -o json register userkeys id="${uid}")" || die "register userkeys failed for ${SVC_USER}."
     SVC_API_KEY="$(jq -r '.userkeys.apikey // empty' <<<"${keys}")"
     SVC_SECRET_KEY="$(jq -r '.userkeys.secretkey // empty' <<<"${keys}")"
   fi
-  [[ -n "${SVC_API_KEY}" && -n "${SVC_SECRET_KEY}" ]] || {
-    echo "Could not obtain API keys for ${SVC_USER}." >&2
-    exit 1
-  }
+  [[ -n "${SVC_API_KEY}" && -n "${SVC_SECRET_KEY}" ]] || die "Could not obtain API keys for ${SVC_USER}."
 }
 
 # createAccount, not createUser. The ROLE lives on the account, and so does
@@ -216,16 +197,13 @@ svc_keys() {
 # account is a second key to the same identity, not a separate one.
 ensure_svc_account() {
   if [[ -n "$(docker compose -f "${VAULT_COMPOSE}" exec -T -e VAULT_TOKEN vault vault kv get -field=api_key "${SVC_PATH}" 2>/dev/null || true)" ]]; then
-    echo "[+] ${SVC_PATH} already present; ${SVC_USER} has its own credentials"
+    log "${SVC_PATH} already present; ${SVC_USER} has its own credentials"
     return 0
   fi
 
   local roleid uid pass
   roleid="$(cmk -o json list roles name="${SVC_ROLE}" 2>/dev/null | jq -r '.role[0].id // empty')"
-  [[ -n "${roleid}" ]] || {
-    echo "No CloudStack role named '${SVC_ROLE}'." >&2
-    exit 1
-  }
+  [[ -n "${roleid}" ]] || die "No CloudStack role named '${SVC_ROLE}'."
 
   uid="$(svc_user_id)"
   if [[ -z "${uid}" ]]; then
@@ -234,26 +212,21 @@ ensure_svc_account() {
     # write loses for good.
     docker compose -f "${VAULT_COMPOSE}" exec -T -e VAULT_TOKEN vault vault kv put "${SVC_PATH}" username="${SVC_USER}" password="${pass}" >/dev/null ||
       {
-        echo "Could not write ${SVC_PATH}; CloudStack is unchanged." >&2
-        exit 1
+        die "Could not write ${SVC_PATH}; CloudStack is unchanged."
       }
 
     cmk create account username="${SVC_USER}" password="${pass}" \
       firstname=terraform lastname=service email="${SVC_USER}@lab.test" \
       accounttype=1 roleid="${roleid}" >/dev/null ||
       {
-        echo "createAccount failed. ${SVC_PATH} holds a password for an account that does not exist. Recover with:  vault kv delete ${SVC_PATH}  then re-run." >&2
-        exit 1
+        die "createAccount failed. ${SVC_PATH} holds a password for an account that does not exist. Recover with:  vault kv delete ${SVC_PATH}  then re-run."
       }
-    echo "[+] Created CloudStack account '${SVC_USER}' with role ${SVC_ROLE}"
+    log "Created CloudStack account '${SVC_USER}' with role ${SVC_ROLE}"
 
     uid="$(svc_user_id)"
-    [[ -n "${uid}" ]] || {
-      echo "createAccount reported success but ${SVC_USER} does not exist." >&2
-      exit 1
-    }
+    [[ -n "${uid}" ]] || die "createAccount reported success but ${SVC_USER} does not exist."
   else
-    echo "[+] CloudStack account '${SVC_USER}' already exists; capturing its keys"
+    log "CloudStack account '${SVC_USER}' already exists; capturing its keys"
   fi
 
   svc_keys "${uid}"
@@ -261,11 +234,10 @@ ensure_svc_account() {
   docker compose -f "${VAULT_COMPOSE}" exec -T -e VAULT_TOKEN vault vault kv patch "${SVC_PATH}" \
     url="${CLOUDSTACK_URL}" api_key="${SVC_API_KEY}" secret_key="${SVC_SECRET_KEY}" >/dev/null ||
     {
-      echo "Could not write ${SVC_USER}'s API keys to ${SVC_PATH}." >&2
-      exit 1
+      die "Could not write ${SVC_USER}'s API keys to ${SVC_PATH}."
     }
 
-  echo "[+] Stored ${SVC_USER} credentials at ${SVC_PATH}"
+  log "Stored ${SVC_USER} credentials at ${SVC_PATH}"
 }
 
 # --- admin password ----------------------------------------------------------
@@ -287,21 +259,17 @@ cs_login() {
 # caches it in a profile written at cmk_configure time.
 ensure_admin_password() {
   if [[ -n "$(docker compose -f "${VAULT_COMPOSE}" exec -T -e VAULT_TOKEN vault vault kv get -field=password "${ADMIN_PATH}" 2>/dev/null || true)" ]]; then
-    echo "[+] ${ADMIN_PATH} already present; admin is off its default"
+    log "${ADMIN_PATH} already present; admin is off its default"
     return 0
   fi
 
-  COOKIE_JAR="$(mktemp)" || {
-    echo "Could not create a cookie jar." >&2
-    exit 1
-  }
+  COOKIE_JAR="$(mktemp)" || die "Could not create a cookie jar."
 
   local session uid new
   session="$(cs_login "${CLOUDSTACK_ADMIN_PASS}")"
   [[ -n "${session}" ]] ||
     {
-      echo "Could not log in as ${ADMIN_USER} with the expected current password. If it was changed by hand, re-run with CLOUDSTACK_ADMIN_PASS=<current>." >&2
-      exit 1
+      die "Could not log in as ${ADMIN_USER} with the expected current password. If it was changed by hand, re-run with CLOUDSTACK_ADMIN_PASS=<current>."
     }
 
   uid="$(admin_user_id)"
@@ -313,8 +281,7 @@ ensure_admin_password() {
   # CloudStack has not accepted yet, and the fix is a delete and a re-run.
   docker compose -f "${VAULT_COMPOSE}" exec -T -e VAULT_TOKEN vault vault kv put "${ADMIN_PATH}" username="${ADMIN_USER}" password="${new}" >/dev/null ||
     {
-      echo "Could not write ${ADMIN_PATH}; CloudStack is unchanged." >&2
-      exit 1
+      die "Could not write ${ADMIN_PATH}; CloudStack is unchanged."
     }
 
   printf 'command=updateUser&id=%s&password=%s&currentpassword=%s&response=json&sessionkey=%s' \
@@ -322,41 +289,29 @@ ensure_admin_password() {
     curl -s -b "${COOKIE_JAR}" --data @- "${CLOUDSTACK_URL}" |
     jq -e '.updateuserresponse.user.username' >/dev/null 2>&1 ||
     {
-      echo "updateUser failed. ${ADMIN_PATH} now holds a password CloudStack has not accepted. Recover with:  vault kv delete ${ADMIN_PATH}  then re-run." >&2
-      exit 1
+      die "updateUser failed. ${ADMIN_PATH} now holds a password CloudStack has not accepted. Recover with:  vault kv delete ${ADMIN_PATH}  then re-run."
     }
 
   # Prove it, rather than trusting a 200.
   [[ -n "$(cs_login "${new}")" ]] ||
     {
-      echo "CloudStack accepted updateUser but the new password does not log in. Recover with:  vault kv delete ${ADMIN_PATH}  then re-run." >&2
-      exit 1
+      die "CloudStack accepted updateUser but the new password does not log in. Recover with:  vault kv delete ${ADMIN_PATH}  then re-run."
     }
 
-  echo "[+] CloudStack admin password moved off the default and stored at ${ADMIN_PATH}"
+  log "CloudStack admin password moved off the default and stored at ${ADMIN_PATH}"
 }
 
 main() {
-  [[ ${EUID} -eq 0 ]] || {
-    echo "vault-ensure-cloudstack.sh must be run as root:  sudo $0" >&2
-    exit 1
-  }
+  [[ ${EUID} -eq 0 ]] || die "vault-ensure-cloudstack.sh must be run as root:  sudo $0"
 
-  [[ -r "${VAULT_INIT}" ]] || {
-    echo "Cannot read ${VAULT_INIT}. Run docker/vault/vault-installer.sh first." >&2
-    exit 1
-  }
+  [[ -r "${VAULT_INIT}" ]] || die "Cannot read ${VAULT_INIT}. Run docker/vault/vault-installer.sh first."
   VAULT_TOKEN="$(jq -r '.root_token // empty' "${VAULT_INIT}")"
-  [[ -n "${VAULT_TOKEN}" ]] || {
-    echo "${VAULT_INIT} holds no root_token." >&2
-    exit 1
-  }
+  [[ -n "${VAULT_TOKEN}" ]] || die "${VAULT_INIT} holds no root_token."
   export VAULT_TOKEN
 
   docker compose -f "${VAULT_COMPOSE}" exec -T -e VAULT_TOKEN vault vault status >/dev/null 2>&1 ||
     {
-      echo "Vault is not answering, or is sealed. Run docker/vault/scripts/vault-unseal.sh." >&2
-      exit 1
+      die "Vault is not answering, or is sealed. Run docker/vault/scripts/vault-unseal.sh."
     }
 
   # Prefer Vault's copy, falling back to the shipped default so a fresh host

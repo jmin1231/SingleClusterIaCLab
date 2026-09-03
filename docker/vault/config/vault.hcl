@@ -8,8 +8,13 @@
 # are what it ADVERTISES; raft requires both, and getting them wrong sends
 # clients somewhere they cannot reach.
 #
-# tls_cert_file is bundle.crt — leaf + intermediate. A bare tls.crt works in a
-# browser that cached the intermediate and fails in curl on a clean machine.
+# tls_cert_file is bundle.crt — the leaf plus its chain, which is what a server
+# is supposed to send. With one self-signed CA (3.4-5) that chain is just the CA
+# itself, so a bare tls.crt would in fact work for any client that already trusts
+# it. The bundle stays because the rule is about what a server sends, not about
+# what today's clients happen to tolerate — and because a second tier would make
+# a bare leaf fail in curl on a clean machine while working in a browser that had
+# cached the issuer.
 #
 # Nothing secret belongs here. This file is readable by the container and has no
 # reason to be protected; a value that needs protecting does not belong in a

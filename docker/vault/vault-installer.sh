@@ -21,6 +21,13 @@
 
 set -euo pipefail
 
+log() { printf '\033[1;32m[+]\033[0m %s\n' "$*"; }
+warn() { printf '\033[1;33m[!]\033[0m %s\n' "$*" >&2; }
+die() {
+  printf '\033[1;31m[x]\033[0m %s\n' "$*" >&2
+  exit 1
+}
+
 SOURCE_SCRIPT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 COMPOSE="${SOURCE_SCRIPT}/docker-compose.yml"
 CERT_DIR="${SOURCE_SCRIPT}/certs"
@@ -44,22 +51,16 @@ VAULT_GID=65100
 
 CA_CN="lab.test CA"
 
-[[ ${EUID} -eq 0 ]] || {
-  echo "vault-installer.sh must be run as root:  sudo $0" >&2
-  exit 1
-}
+[[ ${EUID} -eq 0 ]] || die "vault-installer.sh must be run as root:  sudo $0"
 
 # The host address, discovered rather than written down: it differs per host.
 BRIDGE="$(ip -4 addr show cloudbr0 2>/dev/null | awk '/inet /{print $2}' | cut -d/ -f1)"
-[[ -n "${BRIDGE}" ]] || {
-  echo "cloudbr0 has no IPv4 address; is it up?" >&2
-  exit 1
-}
+[[ -n "${BRIDGE}" ]] || die "cloudbr0 has no IPv4 address; is it up?"
 
 # Discovered values only; everything fixed lives in docker-compose.yml and the
 # committed vault.hcl. Overwrites, so a re-run corrects a stale address.
 printf 'CLOUDBR0_IP=%s\n' "${BRIDGE}" >"${SOURCE_SCRIPT}/.env"
-echo "[+] Vault will publish on ${BRIDGE}:8200; wrote .env"
+log "Vault will publish on ${BRIDGE}:8200; wrote .env"
 
 # --- a certificate to start with --------------------------------------------
 #
@@ -70,9 +71,9 @@ echo "[+] Vault will publish on ${BRIDGE}:8200; wrote .env"
 
 install -d -m 0755 "${CERT_DIR}"
 if [[ -s "${TLS_CRT}" && -s "${TLS_KEY}" ]]; then
-  echo "[+] Certificate already present: $(openssl x509 -in "${TLS_CRT}" -noout -issuer | sed 's/^issuer=//')"
+  log "Certificate already present: $(openssl x509 -in "${TLS_CRT}" -noout -issuer | sed 's/^issuer=//')"
 else
-  echo "[+] No certificate yet - generating a self-signed one to get Vault listening"
+  log "No certificate yet - generating a self-signed one to get Vault listening"
   openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
     -keyout "${TLS_KEY}" -out "${TLS_CRT}" \
     -subj "/O=SingleClusterIaCLab/CN=vault.lab.test" \
@@ -109,7 +110,7 @@ install -d -o root -g root -m 0700 "${SECRETS_DIR}"
 
 # --remove-orphans: a renamed service otherwise holds 8200, and the bind error
 # reads like something else is installed.
-echo "[+] Starting Vault..."
+log "Starting Vault..."
 docker compose -f "${COMPOSE}" up -d --remove-orphans
 
 # --- wait for it to listen ---------------------------------------------------
@@ -118,7 +119,7 @@ docker compose -f "${COMPOSE}" up -d --remove-orphans
 # status counts - 501 uninitialised and 503 sealed are what init and unseal need
 # to find. --resolve because the certificate's only SAN is a name.
 
-echo "[+] Waiting for Vault to answer on ${BRIDGE}:8200..."
+log "Waiting for Vault to answer on ${BRIDGE}:8200..."
 for ((i = 0; i < 60; i++)); do
   code="$(curl -s -o /dev/null -w '%{http_code}' \
     --cacert "${CA_CRT}" \
@@ -132,10 +133,9 @@ if [[ "${code}" == "000" ]]; then
   # cause is Vault unable to read tls.key - it dies loading its listener.
   echo "Last lines from the container:" >&2
   docker logs vault --tail 20 2>&1 | sed 's/^/    /' >&2 || true
-  echo "Vault did not answer on ${BRIDGE}:8200 within 60s. See the log above." >&2
-  exit 1
+  die "Vault did not answer on ${BRIDGE}:8200 within 60s. See the log above."
 fi
-echo "[+] Vault is answering (HTTP ${code})."
+log "Vault is answering (HTTP ${code})."
 
 # --- initialise, which happens exactly once ----------------------------------
 #
@@ -145,18 +145,16 @@ echo "[+] Vault is answering (HTTP ${code})."
 # Storage was destroyed under a Vault that existed. Re-minting is made a thing
 # you choose rather than one that happens.
 if [[ "${code}" == "501" && -e "${INIT_FILE}" ]]; then
-  echo "${DATA_DIR} was emptied but ${INIT_FILE} remains - that Vault's data is gone. To mint a new one:  sudo rm -f ${INIT_FILE}" >&2
-  exit 1
+  die "${DATA_DIR} was emptied but ${INIT_FILE} remains - that Vault's data is gone. To mint a new one:  sudo rm -f ${INIT_FILE}"
 fi
 
 # Works now; comes back sealed with nothing to open it. No repair exists.
 if [[ "${code}" != "501" && ! -e "${INIT_FILE}" ]]; then
-  echo "Vault is initialised but ${INIT_FILE} is gone - it cannot survive a restart. To start over:  docker compose -f ${COMPOSE} down && sudo rm -rf ${DATA_DIR}" >&2
-  exit 1
+  die "Vault is initialised but ${INIT_FILE} is gone - it cannot survive a restart. To start over:  docker compose -f ${COMPOSE} down && sudo rm -rf ${DATA_DIR}"
 fi
 
 if [[ "${code}" == "501" ]]; then
-  echo "[+] Initialising Vault. This happens once and cannot be repeated."
+  log "Initialising Vault. This happens once and cannot be repeated."
 
   # -T or Compose allocates a TTY and the JSON arrives with control bytes jq
   # rejects and cat hides. 1/1 is the degenerate case of Shamir, not threshold
@@ -166,22 +164,16 @@ if [[ "${code}" == "501" ]]; then
     docker compose -f "${COMPOSE}" exec -T vault \
       vault operator init -key-shares=1 -key-threshold=1 -format=json \
       >"${INIT_FILE}"
-  ) || {
-    echo "operator init failed." >&2
-    exit 1
-  }
+  ) || die "operator init failed."
   chmod 0400 "${INIT_FILE}"
 
   # Cannot be repeated: once init returned Vault was initialised, and a truncated
   # redirect means the unseal key exists nowhere.
-  jq -e '.unseal_keys_b64[0] and .root_token' "${INIT_FILE}" >/dev/null 2>&1 || {
-    echo "${INIT_FILE} lacks the unseal key or root token, and Vault is initialised - the only path is a fresh init." >&2
-    exit 1
-  }
+  jq -e '.unseal_keys_b64[0] and .root_token' "${INIT_FILE}" >/dev/null 2>&1 || die "${INIT_FILE} lacks the unseal key or root token, and Vault is initialised - the only path is a fresh init."
   # The path, never the contents: this stdout is read by a person.
-  echo "[+] Vault initialised. Unseal key and root token: ${INIT_FILE} (the only copy)."
+  log "Vault initialised. Unseal key and root token: ${INIT_FILE} (the only copy)."
 else
-  echo "[+] Vault is already initialised; leaving it alone."
+  log "Vault is already initialised; leaving it alone."
 fi
 
 # Delegated, because the same command has to work after a reboot and in a drill,
@@ -195,10 +187,7 @@ fi
 # the token in argv, where ps shows it to every user on the host.
 
 VAULT_TOKEN="$(jq -r '.root_token // empty' "${INIT_FILE}")"
-[[ -n "${VAULT_TOKEN}" ]] || {
-  echo "${INIT_FILE} holds no root_token." >&2
-  exit 1
-}
+[[ -n "${VAULT_TOKEN}" ]] || die "${INIT_FILE} holds no root_token."
 export VAULT_TOKEN
 
 # --- audit device -----------------------------------------------------------
@@ -209,22 +198,22 @@ export VAULT_TOKEN
 
 if docker compose -f "${COMPOSE}" exec -T -e VAULT_TOKEN vault \
   vault audit list -format=json | jq -e 'has("file/")' >/dev/null; then
-  echo "[+] Audit device already enabled"
+  log "Audit device already enabled"
 else
   docker compose -f "${COMPOSE}" exec -T -e VAULT_TOKEN vault \
     vault audit enable -path=file file file_path=/vault/logs/audit.log
-  echo "[+] Audit device enabled at file/"
+  log "Audit device enabled at file/"
 fi
 
 # --- KV v2 ------------------------------------------------------------------
 
 if docker compose -f "${COMPOSE}" exec -T -e VAULT_TOKEN vault \
   vault secrets list -format=json | jq -e 'has("secret/")' >/dev/null; then
-  echo "[+] KV v2 already mounted at secret/"
+  log "KV v2 already mounted at secret/"
 else
   docker compose -f "${COMPOSE}" exec -T -e VAULT_TOKEN vault \
     vault secrets enable -path=secret kv-v2
-  echo "[+] KV v2 mounted at secret/"
+  log "KV v2 mounted at secret/"
 fi
 
 # --- PKI --------------------------------------------------------------------
@@ -236,11 +225,11 @@ fi
 
 if docker compose -f "${COMPOSE}" exec -T -e VAULT_TOKEN vault \
   vault secrets list -format=json | jq -e 'has("pki/")' >/dev/null; then
-  echo "[+] PKI already mounted at pki/"
+  log "PKI already mounted at pki/"
 else
   docker compose -f "${COMPOSE}" exec -T -e VAULT_TOKEN vault \
     vault secrets enable -path=pki -max-lease-ttl=87600h pki
-  echo "[+] PKI mounted at pki/"
+  log "PKI mounted at pki/"
 fi
 
 # `read pki/cert/ca` succeeds only when the mount has an issuer. Without this,
@@ -249,7 +238,7 @@ fi
 # certificate trusts which.
 if docker compose -f "${COMPOSE}" exec -T -e VAULT_TOKEN vault \
   vault read -field=certificate pki/cert/ca >/dev/null 2>&1; then
-  echo "[+] PKI already has a CA"
+  log "PKI already has a CA"
 else
   docker compose -f "${COMPOSE}" exec -T -e VAULT_TOKEN vault \
     vault write -field=certificate pki/root/generate/internal \
@@ -258,7 +247,7 @@ else
     issuer_name="lab-ca" \
     key_type=rsa key_bits=4096 \
     ttl=87600h >/dev/null
-  echo "[+] Generated the lab's CA inside Vault"
+  log "Generated the lab's CA inside Vault"
 fi
 
 # Where a client fetches the issuer and the CRL. Written every run; overwriting
@@ -267,7 +256,7 @@ docker compose -f "${COMPOSE}" exec -T -e VAULT_TOKEN vault \
   vault write pki/config/urls \
   issuing_certificates="https://vault.lab.test:8200/v1/pki/ca" \
   crl_distribution_points="https://vault.lab.test:8200/v1/pki/crl" >/dev/null
-echo "[+] PKI AIA URLs set"
+log "PKI AIA URLs set"
 
 # What this CA will and will not issue, enforced server-side: a caller cannot ask
 # for a name outside lab.test or a lifetime beyond the ceiling, whatever it sends.
@@ -284,7 +273,7 @@ docker compose -f "${COMPOSE}" exec -T -e VAULT_TOKEN vault \
   key_usage="DigitalSignature,KeyEncipherment" \
   ext_key_usage="ServerAuth" \
   ttl=720h max_ttl=720h >/dev/null
-echo "[+] PKI role lab-server: *.lab.test, ttl 720h"
+log "PKI role lab-server: *.lab.test, ttl 720h"
 
 # Vault's own serving certificate, which cannot use lab-server: 720h with no
 # renewal automation would expire the thing every other service authenticates to.
@@ -298,7 +287,7 @@ docker compose -f "${COMPOSE}" exec -T -e VAULT_TOKEN vault \
   key_type=rsa key_bits=2048 \
   server_flag=true client_flag=false \
   ttl=8760h max_ttl=8760h >/dev/null
-echo "[+] PKI role lab-vault: *.lab.test, ttl 8760h"
+log "PKI role lab-vault: *.lab.test, ttl 8760h"
 
 # --- issue Vault its real certificate ----------------------------------------
 #
@@ -308,16 +297,13 @@ echo "[+] PKI role lab-vault: *.lab.test, ttl 8760h"
 
 current_issuer="$(openssl x509 -in "${TLS_CRT}" -noout -issuer | sed 's/.*CN *= *//')"
 if [[ "${current_issuer}" == "${CA_CN}" ]]; then
-  echo "[+] Vault's certificate is already issued by ${CA_CN}"
+  log "Vault's certificate is already issued by ${CA_CN}"
 else
-  echo "[+] Replacing the self-signed certificate with one from Vault's own PKI"
+  log "Replacing the self-signed certificate with one from Vault's own PKI"
   issued="$(docker compose -f "${COMPOSE}" exec -T -e VAULT_TOKEN vault \
     vault write -format=json pki/issue/lab-vault common_name=vault.lab.test ttl=8760h)"
 
-  jq -e '.data.certificate and .data.private_key' <<<"${issued}" >/dev/null || {
-    echo "Vault did not return a usable certificate for itself." >&2
-    exit 1
-  }
+  jq -e '.data.certificate and .data.private_key' <<<"${issued}" >/dev/null || die "Vault did not return a usable certificate for itself."
 
   jq -r '.data.certificate' <<<"${issued}" >"${TLS_CRT}"
   jq -r '.data.certificate, .data.ca_chain[]' <<<"${issued}" >"${BUNDLE}"
@@ -331,9 +317,9 @@ else
   # A restart re-reads the listener config, and comes back sealed.
   docker compose -f "${COMPOSE}" up -d --force-recreate
   "${SOURCE_SCRIPT}/scripts/vault-unseal.sh"
-  echo "[+] Vault is serving a certificate issued by its own PKI"
+  log "Vault is serving a certificate issued by its own PKI"
 fi
 
-echo "[+] Vault is up, unsealed and configured. Verify with no -k and no --cacert:"
+log "Vault is up, unsealed and configured. Verify with no -k and no --cacert:"
 echo "      curl https://vault.lab.test:8200/v1/sys/seal-status"
 echo "    Exit 60 means the CA is not in the host trust store yet."

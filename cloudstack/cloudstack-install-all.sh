@@ -18,6 +18,13 @@
 
 set -euo pipefail
 
+log() { printf '\033[1;32m[+]\033[0m %s\n' "$*"; }
+warn() { printf '\033[1;33m[!]\033[0m %s\n' "$*" >&2; }
+die() {
+  printf '\033[1;31m[x]\033[0m %s\n' "$*" >&2
+  exit 1
+}
+
 SOURCE_SCRIPT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 CS_INSTALLER="${SOURCE_SCRIPT}/scripts/cloudstack-install.sh"
 
@@ -46,17 +53,11 @@ CHECK_BRIDGE_NETFILTER="${CHECK_BRIDGE_NETFILTER:-true}"
 # first boots, when unattended-upgrades is still running.
 APT="apt-get -o DPkg::Lock::Timeout=300"
 
-[[ ${EUID} -eq 0 ]] || {
-  echo "cloudstack-install-all.sh must be run as root:  sudo $0" >&2
-  exit 1
-}
+[[ ${EUID} -eq 0 ]] || die "cloudstack-install-all.sh must be run as root:  sudo $0"
 
 # Resolved before anything runs. Step 3 sets the root password and opens SSH, so
 # a wrong path has to stop us here, while the host is still untouched.
-[[ -x "${CS_INSTALLER}" ]] || {
-  echo "Missing or not executable: ${CS_INSTALLER}" >&2
-  exit 1
-}
+[[ -x "${CS_INSTALLER}" ]] || die "Missing or not executable: ${CS_INSTALLER}"
 
 # --- Step 1/6 · the bootstrap resolver floor --------------------------------
 #
@@ -64,7 +65,7 @@ APT="apt-get -o DPkg::Lock::Timeout=300"
 # rebuilds host networking and no link yet supplies DNS. Removed by
 # coredns-installer.sh.
 
-echo "[+] Step 1/6: installing the bootstrap resolver floor..."
+log "Step 1/6: installing the bootstrap resolver floor..."
 if systemctl is-active --quiet systemd-resolved; then
   mkdir -p "$(dirname "${RESOLVED_DROPIN}")"
   cat >"${RESOLVED_DROPIN}" <<EOF
@@ -73,18 +74,12 @@ if systemctl is-active --quiet systemd-resolved; then
 DNS=${BOOTSTRAP_DNS}
 EOF
   chmod 644 "${RESOLVED_DROPIN}"
-  systemctl restart systemd-resolved || {
-    echo "Failed to restart systemd-resolved after writing ${RESOLVED_DROPIN}." >&2
-    exit 1
-  }
+  systemctl restart systemd-resolved || die "Failed to restart systemd-resolved after writing ${RESOLVED_DROPIN}."
   # Assert on resolution, not on the file: ask for the name the installer fetches.
-  resolvectl query download.cloudstack.org >/dev/null 2>&1 || {
-    echo "Wrote ${RESOLVED_DROPIN} but download.cloudstack.org still does not resolve. The host has no working DNS or no route out. Check 'resolvectl status' and that ${BOOTSTRAP_DNS} is reachable." >&2
-    exit 1
-  }
-  echo "[+] Resolver floor in place: global DNS=${BOOTSTRAP_DNS}"
+  resolvectl query download.cloudstack.org >/dev/null 2>&1 || die "Wrote ${RESOLVED_DROPIN} but download.cloudstack.org still does not resolve. The host has no working DNS or no route out. Check 'resolvectl status' and that ${BOOTSTRAP_DNS} is reachable."
+  log "Resolver floor in place: global DNS=${BOOTSTRAP_DNS}"
 else
-  echo "[!] systemd-resolved is not active; skipping the resolver floor. If the installer fails to resolve download.cloudstack.org right after configuring cloudbr0, this is why." >&2
+  warn "systemd-resolved is not active; skipping the resolver floor. If the installer fails to resolve download.cloudstack.org right after configuring cloudbr0, this is why."
 fi
 
 # --- Step 2/6 · the apt repository ------------------------------------------
@@ -92,37 +87,25 @@ fi
 # Seeding the list file is how the installer's silent-mode path lets us pin the
 # version without patching the vendored file.
 
-echo "[+] Step 2/6: seeding the CloudStack apt repository..."
+log "Step 2/6: seeding the CloudStack apt repository..."
 codename="$(. /etc/os-release && echo "${UBUNTU_CODENAME:-${VERSION_CODENAME}}")"
 keytmp="$(mktemp)"
 trap 'rm -f "${keytmp}"' EXIT
 
-curl -fsS "${CS_REPO_URL%/ubuntu}/release.asc" | gpg --dearmor >"${keytmp}" || {
-  echo "Could not fetch or dearmour the CloudStack signing key. Check DNS and outbound HTTPS." >&2
-  exit 1
-}
-[[ -s "${keytmp}" ]] || {
-  echo "The CloudStack signing key dearmoured to an empty file; refusing to install it." >&2
-  exit 1
-}
+curl -fsS "${CS_REPO_URL%/ubuntu}/release.asc" | gpg --dearmor >"${keytmp}" || die "Could not fetch or dearmour the CloudStack signing key. Check DNS and outbound HTTPS."
+[[ -s "${keytmp}" ]] || die "The CloudStack signing key dearmoured to an empty file; refusing to install it."
 install -D -m 0644 "${keytmp}" "${CS_KEYRING}"
 printf 'deb [signed-by=%s] %s %s %s\n' \
   "${CS_KEYRING}" "${CS_REPO_URL}" "${codename}" "${CS_REPO_VERSION}" >"${CS_LIST}"
-echo "[+] Seeded ${CS_LIST} -> ${codename} ${CS_REPO_VERSION}"
+log "Seeded ${CS_LIST} -> ${codename} ${CS_REPO_VERSION}"
 
 # Prove the repo yields an installable package before the installer runs on it.
-${APT} update >/dev/null || {
-  echo "apt-get update failed against ${CS_LIST}. A size or hash mismatch means component ${CS_REPO_VERSION} is broken upstream - try CS_REPO_VERSION=4.xx." >&2
-  exit 1
-}
+${APT} update >/dev/null || die "apt-get update failed against ${CS_LIST}. A size or hash mismatch means component ${CS_REPO_VERSION} is broken upstream - try CS_REPO_VERSION=4.xx."
 # Captured, not piped: `| grep -q` under pipefail reports 141 on a match. Match a
 # digit, because an unavailable package prints `Candidate: (none)`.
 policy="$(apt-cache policy cloudstack-management 2>/dev/null || true)"
-grep -qE 'Candidate: [0-9]' <<<"${policy}" || {
-  echo "The repository updated but cloudstack-management has no installation candidate; ${CS_REPO_VERSION} may not publish for ${codename}." >&2
-  exit 1
-}
-echo "[+] CloudStack repo ready: $(awk '/Candidate:/{print $2}' <<<"${policy}")"
+grep -qE 'Candidate: [0-9]' <<<"${policy}" || die "The repository updated but cloudstack-management has no installation candidate; ${CS_REPO_VERSION} may not publish for ${codename}."
+log "CloudStack repo ready: $(awk '/Candidate:/{print $2}' <<<"${policy}")"
 
 # --- Step 3/6 · prepare the KVM host ----------------------------------------
 #
@@ -133,53 +116,32 @@ echo "[+] CloudStack repo ready: $(awk '/Candidate:/{print $2}' <<<"${policy}")"
 # Close it with:
 #   sudo rm /etc/ssh/sshd_config.d/01-cloudstack.conf && sudo systemctl restart ssh
 
-echo "[+] Step 3/6: preparing the KVM host..."
+log "Step 3/6: preparing the KVM host..."
 if ! dpkg -s openssh-server >/dev/null 2>&1; then
-  echo "[+] Installing openssh-server..."
-  ${APT} update || {
-    echo "apt-get update failed." >&2
-    exit 1
-  }
+  log "Installing openssh-server..."
+  ${APT} update || die "apt-get update failed."
   # --force-confnew: take the package's canonical sshd_config.
-  ${APT} install -y -o Dpkg::Options::=--force-confnew openssh-server || {
-    echo "Failed to install openssh-server." >&2
-    exit 1
-  }
+  ${APT} install -y -o Dpkg::Options::=--force-confnew openssh-server || die "Failed to install openssh-server."
 fi
 
-printf 'root:%s\n' "${ROOT_PASSWORD}" | chpasswd || {
-  echo "Failed to set root password." >&2
-  exit 1
-}
+printf 'root:%s\n' "${ROOT_PASSWORD}" | chpasswd || die "Failed to set root password."
 
-grep -qE '^\s*Include\s+/etc/ssh/sshd_config\.d/' /etc/ssh/sshd_config || {
-  echo "sshd_config has no Include for sshd_config.d/ - the drop-in would be ignored." >&2
-  exit 1
-}
+grep -qE '^\s*Include\s+/etc/ssh/sshd_config\.d/' /etc/ssh/sshd_config || die "sshd_config has no Include for sshd_config.d/ - the drop-in would be ignored."
 cat >"${SSHD_DROPIN}" <<'EOF'
 PermitRootLogin yes
 PasswordAuthentication yes
 EOF
 chmod 644 "${SSHD_DROPIN}"
-systemctl restart ssh || {
-  echo "Failed to restart ssh." >&2
-  exit 1
-}
+systemctl restart ssh || die "Failed to restart ssh."
 
 # Assert on what sshd concluded, not on the file we wrote. `sshd -T` prints the
 # effective config after every drop-in is merged, and it uses the FIRST value it
 # obtains for each keyword - so a lower-numbered drop-in silently outranks ours.
-effective="$(sshd -T 2>/dev/null)" || {
-  echo "sshd -T failed; the config is invalid." >&2
-  exit 1
-}
+effective="$(sshd -T 2>/dev/null)" || die "sshd -T failed; the config is invalid."
 for directive in "permitrootlogin yes" "passwordauthentication yes"; do
-  grep -qi "^${directive}$" <<<"${effective}" || {
-    echo "sshd reports '${directive%% *}' is not '${directive##* }'. Check that sshd_config Includes sshd_config.d/, and that no drop-in sorting before ${SSHD_DROPIN##*/} overrides it." >&2
-    exit 1
-  }
+  grep -qi "^${directive}$" <<<"${effective}" || die "sshd reports '${directive%% *}' is not '${directive##* }'. Check that sshd_config Includes sshd_config.d/, and that no drop-in sorting before ${SSHD_DROPIN##*/} overrides it."
 done
-echo "[+] Host prepared: root + password SSH enabled"
+log "Host prepared: root + password SSH enabled"
 
 # --- Step 4/6 · cloudmonkey --------------------------------------------------
 #
@@ -187,16 +149,15 @@ echo "[+] Host prepared: root + password SSH enabled"
 # docker/vault/scripts/vault-ensure-cloudstack.sh, beside the code that stores
 # them - this script runs before Vault exists.
 
-echo "[+] Step 4/6: installing cloudmonkey..."
+log "Step 4/6: installing cloudmonkey..."
 if command -v cmk >/dev/null 2>&1; then
-  echo "[+] Cloudmonkey already installed"
+  log "Cloudmonkey already installed"
 else
   case "$(uname -m)" in
   x86_64 | amd64) arch="x86-64" ;;
   aarch64 | arm64) arch="arm64" ;;
   *)
-    echo "Unsupported architecture: $(uname -m)" >&2
-    exit 1
+    die "Unsupported architecture: $(uname -m)"
     ;;
   esac
   cmktmp="$(mktemp)"
@@ -208,12 +169,12 @@ else
   }
   install -m 0755 "${cmktmp}" /usr/local/bin/cmk
   rm -f "${cmktmp}"
-  echo "[+] CloudMonkey ${CMK_VERSION} installed"
+  log "CloudMonkey ${CMK_VERSION} installed"
 fi
 
 # --- Step 5/6 · the vendored installer ---------------------------------------
 
-echo "[+] Step 5/6: running the vendored CloudStack installer..."
+log "Step 5/6: running the vendored CloudStack installer..."
 "${CS_INSTALLER}"
 
 # --- Step 6/6 · bridge netfilter ---------------------------------------------
@@ -223,7 +184,7 @@ echo "[+] Step 5/6: running the vendored CloudStack installer..."
 # vanish. That invisibility is why this is checked rather than assumed, and why
 # it is worth re-checking before anything that depends on VPC networking.
 
-echo "[+] Step 6/6: disabling KVM bridge netfilter..."
+log "Step 6/6: disabling KVM bridge netfilter..."
 cat >/etc/sysctl.d/99-cloudstack-bridge.conf <<'EOF'
 net.bridge.bridge-nf-call-iptables = 0
 net.bridge.bridge-nf-call-ip6tables = 0
@@ -246,18 +207,14 @@ true)
         enabled="${enabled:+${enabled} }${path#/proc/sys/}"
       fi
     done
-    [[ -z "${enabled}" ]] || {
-      echo "KVM bridge netfilter is still enabled (${enabled}). Disable these host sysctls before relying on VPC networking, or set CHECK_BRIDGE_NETFILTER=false." >&2
-      exit 1
-    }
+    [[ -z "${enabled}" ]] || die "KVM bridge netfilter is still enabled (${enabled}). Disable these host sysctls before relying on VPC networking, or set CHECK_BRIDGE_NETFILTER=false."
   fi
-  echo "[+] Bridge netfilter is disabled."
+  log "Bridge netfilter is disabled."
   ;;
-false) echo "[+] CHECK_BRIDGE_NETFILTER=false - skipping the bridge netfilter check." ;;
+false) log "CHECK_BRIDGE_NETFILTER=false - skipping the bridge netfilter check." ;;
 *)
-  echo "CHECK_BRIDGE_NETFILTER must be 'true' or 'false', got '${CHECK_BRIDGE_NETFILTER}'." >&2
-  exit 1
+  die "CHECK_BRIDGE_NETFILTER must be 'true' or 'false', got '${CHECK_BRIDGE_NETFILTER}'."
   ;;
 esac
 
-echo "[+] CloudStack all-in-one setup complete."
+log "CloudStack all-in-one setup complete."

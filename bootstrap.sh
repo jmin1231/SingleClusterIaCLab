@@ -16,7 +16,8 @@ die() {
 export DEBIAN_FRONTEND=noninteractive
 
 SOURCE_SCRIPT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-PACKAGES=(curl jq gettext-base openssl gnupg ca-certificates)
+CLI_PACKAGES=(curl jq gettext-base openssl gnupg ca-certificates)
+DOCKER_PACKAGES=(docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin)
 
 verify_root() {
     if [[ $EUID -ne 0 ]]; then
@@ -59,16 +60,48 @@ wait_for_time_sync() {
 }
 
 install_cli_tools() {
-    if dpkg -s "${PACKAGES[@]}" >/dev/null 2>&1; then
+    if dpkg -s "${CLI_PACKAGES[@]}" >/dev/null 2>&1; then
         log "CLI tools already installed"
         return 0
     fi
 
-    log "Installing CLI tools: ${PACKAGES[*]}..."
+    log "Installing CLI tools: ${CLI_PACKAGES[*]}..."
     apt-get -o DPkg::lock::Timeout=300 update
-    apt-get -o DPkg::lock::Timeout=300 install -y "${PACKAGES[@]}"
+    apt-get -o DPkg::lock::Timeout=300 install -y "${CLI_PACKAGES[@]}"
 
     log "CLI tools ready"
+}
+
+install_docker() {
+    if docker compose version >/dev/null 2>&1; then
+        log "Docker already installed: $(docker --version)"
+        return 0
+    fi
+
+    local keyring_dir="/etc/apt/keyrings"
+    local keyring_file="${keyring_dir}/docker.asc"
+    local source_file="/etc/apt/sources.list.d/docker.sources"
+
+    install -m 0755 -d "${keyring_dir}"
+
+    curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+        -o "${keyring_file}"
+
+    chmod a+r "${keyring_file}"
+
+    cat >"${source_file}" <<EOF
+Types: deb
+URIs: https://download.docker.com/linux/ubuntu
+Suites: $(. /etc/os-release && echo "${UBUNTU_CODENAME:-$VERSION_CODENAME}")
+Components: stable
+Architectures: $(dpkg --print-architecture)
+Signed-By: ${keyring_file}
+EOF
+
+    apt-get -o DPkg::lock::Timeout=300 update
+    apt-get -o DPkg::lock::Timeout=300 install -y "${DOCKER_PACKAGES[@]}"
+
+    log "Docker installed $(docker --version)"
 }
 
 main() {
@@ -76,6 +109,7 @@ main() {
     verify_kvm
     wait_for_time_sync
     install_cli_tools
+    install_docker
 }
 
 main "$@"

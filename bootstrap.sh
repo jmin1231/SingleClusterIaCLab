@@ -104,6 +104,10 @@ EOF
     log "Docker installed $(docker --version)"
 }
 
+install_cloudstack() {
+    log "Running the Cloudstack all-in-one installer..."
+}
+
 main() {
     verify_root
     verify_kvm

@@ -16,7 +16,7 @@ die() {
 export DEBIAN_FRONTEND=noninteractive
 
 SOURCE_SCRIPT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-CLI_PACKAGES=(curl jq gettext-base openssl gnupg ca-certificates)
+CLI_PACKAGES=(curl jq gettext-base openssl gnupg ca-certificates openssh-server)
 DOCKER_PACKAGES=(docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin)
 
 verify_root() {

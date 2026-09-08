@@ -15,6 +15,11 @@ die() {
 SOURCE_SCRIPT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
 CHECK_BRIDGE_NETFILTER="${CHECK_BRIDGE_NETFILTER:-true}"
+SSHD_DROPIN="/etc/ssh/sshd_config.d/01-cloudstack.conf"
+ROOT_PASSWORD="$(openssl rand -hex 24)"
+export ROOT_PASSWORD
+
+# -------------------- Prepare Bridge Netfilter ----------------------------
 
 disable_bridge_netfilter() {
     local setting
@@ -26,6 +31,8 @@ net.bridge.bridge-nf-call-iptables = 0
 net.bridge.bridge-nf-call-ip6tables = 0
 net.bridge.bridge-nf-call-arptables = 0
 EOF
+
+    log Preparing bridge netfilter...
 
     for setting in \
         net.bridge.bridge-nf-call-iptables \
@@ -62,9 +69,49 @@ check_bridge_netfilter() {
     log "Local KVM bridge netfilter is disabled"
 }
 
+# ------------------------- Prepare Host ---------------------------
+
+prepare_host() {
+    log "Preparing host..."
+
+    cat > "${SSHD_DROPIN}" <<'EOF'
+PermitRootLogin yes
+PasswordAuthentication yes
+EOF
+
+    printf 'root:%s\n' "${ROOT_PASSWORD}" | chpasswd || die "Failed to set root password"
+
+    chmod 644 "${SSHD_DROPIN}"
+
+    systemctl restart ssh || die "Failed to restart SSH"
+
+    log "SSH configured"
+}
+
+# ------------------------- Install Cloudmonkey ---------------------------
+install_cmk() {
+    log "Installing cloudmonkey..."
+    if command -v cmk >/dev/null 2>&1; then
+        log "Cloudmonkey already installed"
+        return 0
+    fi
+    local tempfile
+    tempfile="$(mktemp)"
+    if ! curl -fSL https://github.com/apache/cloudstack-cloudmonkey/releases/download/6.5.0/cmk.linux.x86-64 \
+        -o "${tempfile}"; then
+        rm -f "${tempfile}"
+        die "Failed to download cloudmonkey"
+    fi
+    install -m 0755 "${tempfile}" /usr/local/bin/cmk
+    rm -f "${tempfile}"
+    log "Cloudmonkey installed"
+}
+
 main() {
     disable_bridge_netfilter
     check_bridge_netfilter
+    prepare_host
+    install_cmk
 }
 
 main "$@"

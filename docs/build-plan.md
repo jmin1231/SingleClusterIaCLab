@@ -1,39 +1,46 @@
 # Build Plan
 
-A single-host infrastructure lab, built from nothing on a fresh Ubuntu 24.04 VM.
+A single-host infrastructure lab, **written by you, from nothing**, on a fresh
+Ubuntu 24.04 VM.
 
-**This is the current plan.** [`build-order.md`](build-order.md) is the original
-sixteen-phase syllabus; its per-step *Learning* notes are still the best
-explanation of why each piece exists, but its **order is wrong now** and five
-things in it were cut. Where the two disagree, this file wins.
-
-Effort: **S** an evening · **M** a weekend · **L** split it.
+This is a syllabus, not a runbook. Every step says what to build, the decisions
+inside it, the traps that are not obvious, and a *Done when* you can run. It does
+not contain the code — writing that is the exercise.
 
 ---
 
-## The one thing that changed, and why it matters
+## How this works
 
-The original plan built trust **before** the secret store: an offline openssl root
-CA, an intermediate, and a leaf for Vault — because Vault needs a certificate to
-start and could not issue its own.
+**The reference sits in [`reference/`](../reference/)** — a complete, working
+version of this lab: CloudStack, CoreDNS, a self-signed CA inside Vault, Gitea
+with a runner, a reverse proxy, a CI toolbox, all from one `bootstrap.sh`.
 
-That is gone. **Vault is the CA** (decision 3.4-5), which means the dependency
-runs the other way:
+**The rule, and it is the whole method:** attempt the step, get your *Done when*
+passing, *then* open the reference to see what you missed. Never before. What you
+are practising is deciding, and a decision you read is not one you made.
 
+That rule is doing real work, because a file you can open is a file you will
+copy. If you find yourself reaching for `reference/` before you have written
+anything, read it from history instead, where it is inconvenient enough to be
+deliberate:
+
+```sh
+git show 91b02cf:bootstrap.sh
 ```
-old:   openssl CA  ->  Vault  ->  everything else       3 CA certs, 2 chains
-now:   Vault  ->  its own PKI  ->  everything else      1 CA cert, 1 chain
-```
 
-The circularity — Vault needs a certificate, Vault issues certificates — is
-broken by **two passes**: a self-signed certificate brings the listener up, then
-once the PKI exists Vault issues itself a real one and restarts. TLS is on from
-the first start either way. Around 860 lines of openssl scripting disappear with
-it, and so does the entire class of bug that motivated them: `openssl ca` exits 0
-when it *refuses* a CSR.
+**Nothing in `reference/` runs.** Its containers are stopped and nothing at the
+root depends on it. You write in the root; it stays where it is until Phase 13,
+when you delete it and the lab still comes up.
 
-Read that paragraph again before Phase 3. It is the part of this lab most worth
-understanding, and the part the old document will actively mislead you on.
+**Two documents are yours to keep writing as you go:**
+
+| | |
+|---|---|
+| `decisions.md` | what you chose, what you rejected, why. One entry per real choice. Keep them short — the previous log reached 3,148 lines and stopped being read |
+| `failure-log.md` | write an entry when a failure costs more than an hour, or when the symptom pointed somewhere other than the cause |
+
+Both already exist and are worth reading before you start. They are the previous
+build's, and they are the most useful thing in the repo.
 
 ---
 
@@ -42,282 +49,388 @@ understanding, and the part the old document will actively mislead you on.
 | | Minimum |
 |---|---|
 | OS | Ubuntu 24.04 LTS, x86_64 |
-| CPU | 12 cores, VT-x/AMD-V **enabled** |
-| RAM | 16 GB — a hard ceiling, see `resource-budget.md` |
+| CPU | 12 cores, VT-x/AMD-V enabled |
+| RAM | 16 GB — a ceiling, see `resource-budget.md` |
 | Disk | 200 GB SSD |
-| Virtualization | `/dev/kvm` present; **nested virt on** if this host is itself a VM |
+| Virtualization | `/dev/kvm` present; **nested virt on**, set on the hypervisor |
 
-The two that stop people first:
+Nested virtualization cannot be fixed from inside the guest. Check before you
+build anything:
 
 ```sh
-egrep -c '(vmx|svm)' /proc/cpuinfo   # must be > 0
-ls -l /dev/kvm                       # must exist
+egrep -c '(vmx|svm)' /proc/cpuinfo   # > 0
+ls -l /dev/kvm                       # exists
 ```
 
-**Do not run `bootstrap.sh` from an IDE's integrated terminal.** VS Code's
+**Never run your installer from an IDE's integrated terminal.** VS Code's
 AppArmor profile blocks MySQL's post-install script from signalling its own
-temporary server, and the run stalls with a timeout three layers from the cause.
-A plain terminal, a TTY, or ssh. See `failure-log.md`.
+temporary server; the run stalls with a timeout three layers from the cause.
+
+Effort: **S** an evening · **M** a weekend · **L** split it.
 
 ---
 
-## The whole thing is one command
+# Phase 0 · What never gets committed · `S`
 
-```sh
-git clone <this repo> && cd SingleClusterIaCLab
-make setup                  # required once per clone: enables the git hooks
-sudo ./bootstrap.sh         # ~40 minutes, mostly CloudStack
-```
+No build tooling — no Makefile, no linter, no hooks. The one thing worth deciding
+before there is anything to decide it about is what must never reach git.
 
-Then `sudo SKIP_HOST_PREP=1 ./bootstrap.sh` re-runs just the service layer.
+**Build:** a repo and a `.gitignore`.
 
-**That command is the syllabus.** Every phase below is one step inside it, in the
-order it actually runs:
+**The decision:** three categories, and write the rule at the top of the file so
+the next entry has somewhere obvious to go.
 
-```
-check_kvm                 Phase 0
-install_cloudstack        Phase 1
-install_coredns           Phase 2
-install_vault             Phase 3   <- the CA lives here now
-ensure_cloudstack_secret  Phase 3
-install_gitea             Phase 4
-install_proxy             Phase 4
-setup_gitea_repo          Phase 5
-install_toolbox           Phase 5
-```
+| | |
+|---|---|
+| **Committed config** | non-secret settings that make the lab portable — ports, hostnames, image tags. Clone it elsewhere and it stands up the same |
+| **Machine-local state** | real but not portable: container data, rendered files, anything holding an address discovered on this host |
+| **Secrets** | never, on any branch. If one lands in history, rotating the secret is the fix — deleting the file is not |
 
-**How to work through it:** run `bootstrap.sh` once and let it finish. Then go
-back and take each phase apart — read the script, run its *Done when*, break it
-deliberately, run it again. Reading a working system beats watching a broken one
-assemble itself, and every step is safe to re-run.
+**Why now, when nothing generates secrets until Phase 4:** because the first run
+that writes a private key must not also be the run that decides whether it is
+ignored. This repo has come within one `git add -A` of committing a CA key twice,
+both times during a directory move.
 
----
+**Traps:**
 
-# Phase 0 · The host · `S`
+- **Patterns containing a slash are relative to the `.gitignore`'s own
+  directory.** `docker/vault/certs/` in a root `.gitignore` stops matching the
+  moment that tree moves. Moving the `.gitignore` with it keeps every rule
+  working — that is why `reference/.gitignore` still protects `reference/`.
+- **A rule that matches nothing looks exactly like no rule.** `git check-ignore`
+  answers for a path whether or not it exists, so assert on the paths you care
+  about rather than reading the file and believing it.
+- **`git status` will not warn you.** A root-owned `0700` directory is invisible
+  to it, so the only thing between a token and a commit can be a permission bit.
 
-**Read:** `bootstrap.sh`, top to `main()`. It is 300 lines and the only bash you
-must understand before anything else.
+**Done when:** `git check-ignore -q <path>` succeeds for a file that does not
+exist yet — the key, the env file, the data directory — for every one you can
+name in advance.
 
-`check_kvm` is verify-only and fatal — later phases boot real VMs, and finding out
-then is expensive. `SKIP_HOST_PREP=1` skips the steps that **mutate** the host,
-not everything before the services; `require_root` and `check_kvm` stay, because
-neither prepares anything.
+# Phase 1 · The host · `M`
 
-**Learn:** why a provisioner asserts before it acts. Why `set -euo pipefail` is
-the first line of every script here.
-**Done when:** `sudo ./bootstrap.sh` gets past `check_kvm` on your VM.
+**Build:** `bootstrap.sh` — bare Ubuntu to a machine that can run containers.
 
----
+**In order:** refuse to run as non-root · verify KVM · sync the clock · install
+CLI tools · install Docker · add your user to the `docker` group.
 
-# Phase 1 · The cloud · `L` — split: install, then read back what it built
+**The decisions:**
 
-**Read:** `cloudstack/cloudstack-install-all.sh`. **Not**
-`scripts/cloudstack-install.sh` — that is 2,704 lines of vendored upstream code,
-excluded from lint and fmt so the diff against upstream stays readable.
+- **Where the guards go.** One `require_root` at the top, or a check in every
+  function? Pick and be consistent.
+- **What "verify" means versus "install".** `check_kvm` cannot fix anything, so
+  it fails fast. That is a different kind of step and worth separating.
+- **A skip flag.** You will re-run this a hundred times, and the host layer
+  changes far less than the services. Decide what a skip flag skips — the steps
+  that *mutate*, not everything before the services.
 
-Six steps, and three of them are interesting:
+**Traps, and these are the ones that cost time:**
 
-- **The resolver floor.** Before CloudStack rebuilds host networking, no link
-  supplies DNS — so a global resolver is written first and retired by CoreDNS in
-  Phase 2. A bootstrap dependency that exists only to be removed.
-- **Seeding the apt repo.** The version is pinned to 4.21 because the installer's
-  own default is broken upstream. It proves the repo yields an installable
-  package *before* the 40-minute install, not during it.
-- **`sshd -T`.** After writing the SSH drop-in it asserts on what sshd
-  **concluded**, not on the file — a lower-numbered drop-in silently outranks
-  yours, and nothing else can detect that.
+- **The clock comes before apt.** A host with a skewed clock fails
+  `apt-get update` with `Release file is not valid yet`, which reads like a
+  network problem. Sync first, and wait for it — `timedatectl` reports
+  `NTPSynchronized` and there is a window where it is not yet true.
+- **`command -v docker` proves almost nothing.** It proves a binary is on PATH.
+  It does not prove the daemon runs, and `apt install docker.io` gives you a
+  daemon with no compose plugin at all. Assert on `docker info` and
+  `docker compose version`.
+- **Group membership is fixed when a session starts.** Adding yourself to
+  `docker` does nothing for the shell that ran the command. Say so in the output
+  or you will debug it later.
+- **`$USER` is `root` under `sudo`.** The variable that knows who invoked you is
+  `SUDO_USER`, and it is unset in a real root shell — which is a case to handle,
+  not assume away.
+- **A trailing colon in `chown user:` means the user's own login group.**
+  Spelling the group as the username assumes a `useradd` default that is not
+  universal, and `chown` failing under `set -e` kills the script after the work.
 
-**LAB ONLY:** this sets a root password and enables root + password SSH, because
-CloudStack adds a KVM host over SSH even when that host is itself.
+**Done when:** `docker run hello-world` works, `timedatectl` says synchronised,
+and running the whole script twice changes nothing the second time.
 
-**Learn:** what a hypervisor and a control plane actually are. And the lesson in
-`failure-log.md` — *a control plane reports its database, not reality.*
-**Done when:** `https://<host>:8080/client` loads and a zone exists.
-
----
-
-# Phase 2 · Names · `M`
-
-**Read:** `docker/coredns/` — the installer, the Corefile, the zone template.
-
-Three ideas:
-
-- **Authoritative vs forwarding.** The Corefile has two blocks: `lab.test` served
-  from a zone file, everything else forwarded upstream. Get the second wrong and
-  the host resolves `web.lab.test` but not `github.com`.
-- **`Domains=~lab.test`.** The `~` means *route this domain here and nothing
-  else*. Without it you get a search suffix; without `Domains=` at all, CoreDNS
-  becomes the resolver for everything and its correctness becomes all DNS.
-- **Both protocols.** Docker publishes TCP by default. DNS is UDP, so a bare
-  `53:53` looks completely dead — and TCP is still needed when a response
-  exceeds 512 bytes.
-
-Note the installer **deletes** the Phase 1 resolver floor rather than overriding
-it: `DNS=` accumulates across drop-ins, so both would answer and `lab.test` would
-fail intermittently.
-
-**Learn:** why an address discovered at run time beats one written down.
-**Done when:** `dig gitea.lab.test @<host>` answers, and `github.com` still
-resolves.
+**Check yourself:** `git show 91b02cf:bootstrap.sh`
 
 ---
 
-# Phase 3 · Trust and secrets · `L` — split: Vault running, then the CA
+# Phase 2 · The cloud · `L` — split: install, then read back what it built
 
-**Read:** `docs/vault-lesson.md`. It is a seven-lesson walkthrough of this phase
-written line by line, and this is the phase it exists for.
+**Build:** a wrapper around CloudStack's all-in-one installer that makes an
+unattended install reproducible.
 
-Then `docker/vault/vault-installer.sh` — 325 lines, from nothing to a running,
-unsealed, configured Vault that issues its own certificate.
+CloudStack's own installer is ~2,700 lines you did not write. **Do not rewrite
+it.** Vendor it, and write the wrapper: prepare the host, pin the repository,
+run it, verify what it produced.
 
-The four things to come away with:
+**The decisions:**
 
+- **What you own and what you vendor.** Keep the vendored file out of your
+  own tooling. If you ever add a formatter, exclude it — reformatting vendored
+  code turns a small patch into an unreadable one — and guard that exclusion,
+  because one matching nothing looks exactly like none.
+- **A bootstrap resolver.** While the installer rebuilds host networking, no link
+  supplies DNS. Something has to provide it, and Phase 3 has to retire it.
+- **Where the root password comes from.** The installer needs root SSH to add
+  the KVM host — even when that host is itself. Decide whether that is an
+  argument, an environment variable, or a generated value.
+
+**Traps:**
+
+- **Pin the apt component.** The installer's own default has been broken
+  upstream. Prove the repository yields an installable package *before* the
+  40-minute install, not during it.
+- **Assert on what `sshd` concluded, not the file you wrote.** `sshd -T` prints
+  the effective config after every drop-in merges, and it takes the **first**
+  value for each keyword — so a lower-numbered drop-in silently outranks yours.
+  Nothing else detects that.
+- **Bridge netfilter.** With it on, iptables sees bridged frames and VPC port
+  forwards drop them **silently** — no error, no log line. Disable it and check.
+- **`clear` fails without a usable `TERM`,** and under `set -e` that turns a
+  successful install into a non-zero exit. If you wrap anything in a cleanup
+  handler, this will find you.
+
+**Done when:** the management UI loads, a zone exists, and re-running the wrapper
+reports every step already done.
+
+---
+
+# Phase 3 · Names · `M`
+
+**Build:** CoreDNS in a container, authoritative for `lab.test`, forwarding
+everything else. Plus whatever renders its zone file.
+
+**The decisions:**
+
+- **Generate the records or template them.** A template you edit by hand grows
+  entries for services you deleted. Generating from a list means adding a service
+  is a list entry.
+- **How the serial advances.** RFC 1912 says `YYYYMMDDnn`; epoch seconds is
+  monotonic and unreadable. Either is defensible — a serial that never changes is
+  not, and nothing in this lab will ever complain about it.
+- **Where the host's address comes from.** It differs per host, so discover it.
+  Ask the kernel which source address it would use to reach the outside world,
+  rather than naming an interface — an interface name is a per-host fact wearing
+  a constant's clothing.
+
+**Traps:**
+
+- **Docker publishes TCP by default.** DNS is UDP, so a bare `53:53` looks
+  completely dead. You need both, and you need TCP anyway for responses over 512
+  bytes.
+- **Bind a specific address.** `0.0.0.0:53` collides with `systemd-resolved` on
+  `127.0.0.53` and makes you an open resolver for anything that can route to you.
+- **`DNS=` accumulates across `resolved` drop-ins.** Writing a higher-numbered
+  file does not replace a lower one — both answer, and `lab.test` fails
+  intermittently. Delete the one you are replacing.
+- **`Domains=~lab.test`.** The `~` routes only that domain. Without it you get a
+  search suffix; without `Domains=` at all you have made a lab VM the resolver
+  for your whole machine.
+- **Never forward to `127.0.0.53`.** That is `systemd-resolved`, which you are
+  about to point at CoreDNS. The loop answers nothing and logs nothing.
+- **Zone files:** a name without a trailing dot gets `$ORIGIN` appended, so
+  `ns.lab.test` quietly becomes `ns.lab.test.lab.test`. And if you substitute
+  variables with `envsubst`, restrict it — it will otherwise eat `$ORIGIN` and
+  `$TTL`, which are directives, not variables.
+
+**Done when:** `dig gitea.lab.test @<host>` answers, `github.com` still resolves,
+and rendering twice produces a higher serial.
+
+---
+
+# Phase 4 · Trust and secrets · `L` — split: Vault running, then its CA
+
+**The most important phase, and the one where the obvious order is wrong.**
+
+**Build:** Vault, behind its own TLS, initialised, unsealed, with an audit
+device, a KV store, and a PKI engine that becomes the lab's only CA.
+
+**Start here:** Vault needs a certificate to start. Vault is what issues
+certificates. Solve that before writing anything — it determines the shape of the
+whole phase. There is more than one answer; the one this lab took is two passes,
+a self-signed certificate to get the listener up and a real one once the PKI
+exists.
+
+**The decisions:**
+
+- **One CA or two.** A two-tier PKI exists so the root can be kept **offline**.
+  If both tiers live in the same Vault, you have the shape without the property.
+  Decide honestly and write down which you chose.
+- **Where the unseal key lives.** It cannot live in Vault — it is what decrypts
+  Vault. So: which directory, what mode, and is it mounted into the container?
+- **Certificate lifetimes.** One TTL will not fit both the services and Vault's
+  own certificate, because you have no renewal automation yet. A 30-day
+  certificate on the thing everything authenticates to expires unattended.
+
+**Traps:**
+
+- **The image's default command is `server -dev`** — in memory, self-unsealing,
+  indistinguishable from success until a restart loses everything.
+- **Pin a uid nothing else will claim.** Ubuntu hands uid 100–999 to whichever
+  package installs first, so the image's own default means a different daemon on
+  every machine — and that daemon could read Vault's key.
+- **Ownership before the container.** Docker creates a missing bind-mount source
+  as **root**; fixing it afterwards is a repair and a race.
+- **Vault stops serving if it cannot write its audit log.** That mount is
+  load-bearing in a way the data directory is not.
 - **Seal is not stop.** A restarted Vault is running, listening, and answering
-  everything 503. `vault-unseal.sh` is separate because unsealing must work after
-  a reboot, in a drill, with nothing else present.
-- **`operator init` happens once, ever.** It mints the storage key, returns it
-  exactly once, and it **cannot live in Vault**. `secrets/` is the one directory
-  not mounted into the container.
-- **The CA is one self-signed root inside Vault.** No file on disk holds its key.
-- **A PKI role is server-side policy.** A caller asks for a name and a lifetime;
-  the role decides. Compare a config file the client chooses to honour.
+  everything `503`. Unsealing must therefore be a separate thing you can run
+  after a reboot with nothing else present.
+- **`operator init` happens once, ever,** and returns the key exactly once. Guard
+  it against the four states, not two: cross-check Vault's health against whether
+  your key file exists. An emptied data directory reports "uninitialised"
+  exactly like a fresh one, and re-initialising there abandons real data.
+- **A no-healthcheck decision.** `docker ps` looks identical for a sealed, an
+  unreachable, and a working Vault. Ask Vault, not Docker.
+- **Bind versus advertise.** `address` is where it listens; `api_addr` is what it
+  tells clients. Wrong second value and it works while sending clients nowhere.
+- **Serve the leaf plus its chain, verify against the CA alone.** Two different
+  files, two different jobs. A bare leaf works in a browser that cached the
+  issuer and fails in `curl` on a clean machine.
 
-`ensure_cloudstack_secret` follows, and teaches the **three directions of a
-secret**: captured (CloudStack already has a key), generated (Vault is the
-origin), minted-once (the service will never show it again).
+**Then secrets.** Store the credentials the later phases need, and notice they
+arrive in **three different shapes**:
 
-**Learn:** where trust comes from, and why it comes out of the secret store.
-**Done when:** `vault status` says unsealed over HTTPS, `vault list pki/issuers`
-returns exactly one, and `vault write pki/issue/lab-server
-common_name=x.example.com` is **refused by the role**.
+| | |
+|---|---|
+| **Captured** | the service already has it and will show it to you again |
+| **Generated** | you create it in Vault *before* the service exists. Vault is the origin |
+| **Minted once** | the service creates it and will never show it again — so the only guard available is whether it still *works* |
 
----
+Know which one a secret is before you write code for it. The captured case has a
+specific danger: the API that reads a key back may be one character away from the
+API that **replaces** it, silently invalidating every existing holder.
 
-# Phase 4 · Serving it · `M`
+**Done when:** `vault status` says unsealed over HTTPS with no `-k`, a role
+refuses a name outside your domain, and a restart leaves it sealed but
+recoverable.
 
-**Read:** `docker/gitea/gitea-installer.sh`, then `docker/proxy/proxy-installer.sh`.
-
-Gitea's credentials are **generated in Vault before Gitea exists** — Vault is
-their origin, and nobody ever chooses them. Gitea publishes no ports at all; the
-proxy is the only way in.
-
-**The ordering here is the lesson, and it was a real bug.** The proxy must start
-after Gitea (it joins Gitea's network and resolves the `gitea` container name at
-startup) but before anything talks to Gitea's API (which is only reachable
-through the proxy). That is a cycle, and `install_proxy` sits at the one point
-that breaks it. See `failure-log.md` — it went unnoticed for months because the
-proxy was always already running.
-
-The proxy also refuses names it does not know: nginx promotes the first server
-block to the default, so without an explicit one it answers for every name that
-resolves to the host and presents the wrong certificate.
-
-**Learn:** why one place holds certificates rather than every service.
-**Done when:** `https://gitea.lab.test` loads with **no** `-k`, and an unknown
-name fails to connect rather than serving the wrong site.
+**Check yourself:** `docs/vault-lesson.md` is a seven-lesson walkthrough of the
+finished version — read it *after* your *Done when* passes.
 
 ---
 
-# Phase 5 · CI · `M`
+# Phase 5 · Serving it · `M`
 
-**Read:** `docker/gitea/gitea-repo-setup.sh`, `docker/toolbox/`,
-`.gitea/workflows/`.
+**Build:** Gitea with a database, and a reverse proxy terminating TLS for
+everything, with certificates from Phase 4.
 
-The repo is pushed to Gitea and an API token is minted — the minted-once case
-from Phase 3, where the guard is whether the stored token still *works*, because
-there is nothing on the far side to compare against.
+**The decisions:**
 
-The toolbox is one image holding `terraform`, `ansible`, `kubectl` and `packer`,
-every version pinned, nothing installed at job time. It is built here and never
-published.
+- **What publishes ports.** If the proxy is the only way in, nothing else needs a
+  published port at all. That is a smaller attack surface and one place that
+  holds certificates.
+- **Where Gitea's credentials come from.** They are the *generated* case — create
+  them in Vault before Gitea exists, and nobody ever chooses a password.
 
-**The runner keeps the host Docker socket; jobs get a rootless dind instead.**
-Read `decisions.md` 4.4-1 — this is the deviation the lab makes knowingly, and it
-explains what a runner with the host socket would give away.
+**Traps:**
 
-**Workflows live in `.gitea/workflows/` and nowhere else.** Gitea Actions reads
-that path only; anywhere else and CI is silently dead.
+- **nginx promotes the first server block to the default.** Without an explicit
+  one it answers for every name that resolves to the host and presents the wrong
+  certificate — a warning users click through.
+- **The ordering here is a genuine cycle**, and it was a real bug in the previous
+  build that went unnoticed for months: the proxy must start after Gitea (it
+  joins Gitea's network and resolves a container name at startup), but anything
+  talking to Gitea's *API* needs the proxy, because Gitea publishes no ports.
+  There is exactly one point in the sequence that breaks it. Find it.
+- **It works when you test it, because the proxy is already running.** A cycle
+  like this only appears on a cold start. Test by stopping everything.
 
-**Learn:** why a pipeline that `apt-get`s its own tools is slower every run and
-trusts whatever the network served that minute.
-**Done when:** a push runs a job in the toolbox image, and a broken commit shows
-red in Gitea.
-
-> **Drill 5** — this is where `bootstrap.sh` finishes. Run it again, whole. Every
-> step reports "already". That is the claim the whole lab rests on.
+**Done when:** your service loads over HTTPS with **no** `-k`, an unknown name
+fails to *connect* rather than serving the wrong site, and the whole thing comes
+up from nothing in one command.
 
 ---
 
-> **Phases 6–12 are not built yet.** Nothing below exists on any host; these are
-> the plan, not a walkthrough. Their *Done when* lines get sharper as you reach
-> them.
+# Phase 6 · CI · `M`
 
-# Phase 6 · Images
-### 6.1 A Packer build · `L` — split: any image first, then the customisation
-### 6.2 Publish and register it · `M`
-Serve it behind the **existing proxy** at `images.lab.test`, then register it as a
-CloudStack template. Not Gitea's registry: `registerTemplate` pulls by URL, so a
-private package means a credential in that URL, which lands in CloudStack's
-database and logs.
-### 6.3 Both builds in CI · `M`
+**Build:** push the repo to Gitea, mint an API token, build a toolbox image, and
+register a runner.
 
-# Phase 7 · Infrastructure as code
-### 7.1 Provider, offerings, one tier, one VM · `M`
-**Settle the state backend before the first `apply`.** Check whether this Gitea
-has the Terraform state backend — 1.24.7 answered 404 on a first probe. If not:
-upgrade, or stay on a local file and revisit at 7.4. Decide it here, in writing.
-### 7.2 Three tiers with deny-by-default ACLs · `L` — split: networks, then rules
-The thing CloudStack gives you that libvirt does not.
-### 7.3 VMs, addresses, and DNS from Terraform outputs · `M`
-### 7.4 Remote state, with locking proven · `M`
-### 7.5 Terraform in CI, with drift detection · `M`
+**The decisions:**
 
-# Phase 8 · Configuration management
-### 8.1 Ansible, dynamic inventory from Terraform · `M`
-### 8.2 A base role — users, resolver, your CA, time · `M`
-### 8.3 Ansible in CI · `S`
+- **What the runner may reach.** This is the security decision of the phase.
+  Anyone who can open a pull request can change what a workflow does. A runner
+  holding the host's Docker socket means one line of YAML is root on the
+  hypervisor.
+- **Whether the toolbox is published.** It is the image every job runs in, so it
+  cannot be built by a job.
 
-# Phase 9 · Kubernetes
-### 9.1 k3s, single node, with Cilium · `M`
-`--flannel-backend=none --disable-network-policy`, then Cilium. Decided here
-because a CNI cannot be swapped without rebuilding. See 9.1-1.
-### 9.2 Deploy something, reach it through Gateway API · `M`
-### 9.3 cert-manager, issuing from Vault · `M`
-### 9.4 Registry trust · `S`
-### 9.5 Segment the cluster, deny by default · `M`
-NetworkPolicy is **allow-only and additive** — the opposite of how a VPC ACL
-reads. Egress deny breaks DNS first.
+**Traps:**
 
-# Phase 10 · GitOps and the application
-### 10.1 Flux, pointed at Gitea · `M`
-### 10.2 Base and overlays · `M`
-### 10.3 Vault Kubernetes auth and External Secrets · `M`
-### 10.4 Postgres, an API, a web tier · `L`
-### 10.5 Break something by hand, watch it heal · `S`
+- **Credentials in a git remote URL** land in `.git/config` and survive every
+  clone. A credential on a command line is visible in `ps` to every user on the
+  host. Neither is where it belongs; there is a third way.
+- **Run git as the repository's owner, not root,** or `.git/` fills with
+  root-owned objects and the next ordinary push fails.
+- **Only committed history pushes.** Obvious until the twenty minutes spent
+  wondering why a fix visible in your editor had no effect.
+- **Gitea Actions reads `.gitea/workflows/` and nowhere else.** Anywhere else and
+  CI is silently dead — registered, idle, and green because it ran nothing.
+- **A branch protection rule can deadlock you.** Requiring a status check that no
+  pipeline yet produces, plus blocking direct pushes, makes `main` unreachable
+  both ways.
 
-# Phase 11 · Seeing it
-### 11.1 kube-prometheus-stack · `M`
-### 11.2 Loki on the host, Alloy everywhere · `L`
-Loki runs on the **host**, not the cluster — so the logs survive the cluster
-dying. Grafana does not, which is the trade. See L-7.
-### 11.3 One alert that arrives · `S`
+**Done when:** a push runs a job in your toolbox image, and a broken commit shows
+red.
 
-# Phase 12 · Operations
-### 12.1 Back up everything stateful · `M`
-Gitea's Postgres and data, Vault's storage **and unseal key**, Terraform state,
-CloudStack's database. Decide the destination first — a copy on the host you are
-backing up is not a backup.
-### 12.2 Restore, for real · `M`
-### 12.3 Rebuild from zero · `L`
-### 12.4 Failure injection · `M`
+> **Drill 6** — this is where the one-command build ends. Delete every container
+> and run it again. Everything comes back, in order, with no manual step. That is
+> the claim the rest of the lab rests on.
+
+---
+
+> **Phases 7–13 exist in no version of this lab.** They are the plan, and they
+> get sharper as you reach them. Everything above has a reference at `91b02cf`;
+> nothing below does.
+
+# Phase 7 · Images · `L`
+Build an image with Packer, publish it, register it as a template. Serve it as a
+static file behind the proxy you already have — a template is fetched **by URL**,
+so a private registry means a credential inside that URL, which then lives in the
+control plane's database and logs.
+
+# Phase 8 · Infrastructure as code · `L`
+Terraform against CloudStack: provider, offerings, **three tiers with
+deny-by-default ACLs**, VMs, and DNS records fed from outputs. Settle the state
+backend *before* the first apply — migrating state is a real operation and there
+is no reason to perform it on a lab you could have configured correctly. Then
+prove the locking, with two applies at once.
+
+# Phase 9 · Configuration management · `M`
+Ansible with inventory generated from Terraform outputs, and a base role: users,
+resolver, your CA in every trust store, time. Never type an address Terraform
+already knows.
+
+# Phase 10 · Kubernetes · `L`
+k3s, and **choose the CNI at install time** — it cannot be swapped without
+rebuilding the cluster. The default enforces NetworkPolicy correctly and shows
+you nothing when it denies, which matters because the last step of this phase is
+segmentation. Then Gateway API, and cert-manager issuing from Vault.
+
+Finish with default-deny NetworkPolicy. It is **allow-only and additive** — the
+opposite of an ordered ACL list. Egress deny breaks DNS first, and every symptom
+looks like an application bug.
+
+# Phase 11 · GitOps and the application · `L`
+Flux pointed at Gitea, base and overlays, Vault Kubernetes auth and External
+Secrets — a pod proves who it is and receives a credential nobody wrote down.
+Then Postgres, an API and a web tier across the three tiers you segmented twice.
+
+# Phase 12 · Seeing it · `M`
+Metrics in the cluster; **logs on the host**, so they survive the cluster dying.
+Note what that costs: the dashboard dies with the cluster, so practise reading
+logs without it before you need to.
+
+# Phase 13 · Operations · `L`
+Back up everything stateful — including the unseal key, without which the backup
+is ciphertext. Restore it for real. Then rebuild from zero and count the manual
+steps; each one is either automated or written down as a deliberate exception.
 
 ---
 
 ## Not in this plan
 
-Named so they are choices, not omissions — see S-1: identity and SSO, Kyverno
-admission policies, image signature verification, MinIO, the offline root CA,
-multi-node k3s as a default, and WireGuard between tiers.
+Named so they are choices: identity and SSO, admission control policies, image
+signature verification, an object store, an offline root CA, multi-node
+Kubernetes by default, and an encrypted overlay between tiers.
 
 ## If a step is too big
 

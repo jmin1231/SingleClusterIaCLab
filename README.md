@@ -10,40 +10,26 @@ syllabus — superseded as the plan, kept for its per-step explanations.
 
 ## Status
 
-**Phases 0–5 are built and `bootstrap.sh` builds them.** CloudStack with `Zone1`
-and its system VMs, CoreDNS answering for `lab.test`, a single self-signed CA
-inside Vault issuing every certificate, Gitea with a registered runner, the
-reverse proxy terminating TLS, and the CI toolbox image.
+**This lab is being rebuilt from nothing, by hand.**
 
-Phases 6–12 — Packer, Terraform, Ansible, k3s, GitOps, observability, operations
-— do not exist on any host yet.
+A complete working version sits in [`reference/`](reference/) — CloudStack,
+CoreDNS, a self-signed CA inside Vault, Gitea with a runner, a reverse proxy, and
+a CI toolbox, all from one `bootstrap.sh`. **Nothing in it runs**; its containers
+are stopped and the root does not depend on it.
 
-**Check this first — it is what stops most people, and it stops them late:**
-
-```sh
-egrep -c '(vmx|svm)' /proc/cpuinfo   # must be > 0
-ls -l /dev/kvm                       # must exist
-```
-
-If this machine is itself a VM, **nested virtualization must be enabled on the
-hypervisor** — CloudStack boots real guests inside it. On a Proxmox host that is
-the CPU type set to `host`; on VMware, *Expose hardware assisted virtualization*;
-on KVM, `kvm_intel nested=1`. It cannot be fixed from inside the guest, and
-`bootstrap.sh` refuses to start without it.
-
-**Then one command builds all of it:**
+Follow [`docs/build-plan.md`](docs/build-plan.md). It gives you what each piece
+has to do, the decisions inside it, and the traps — not the code. Attempt a step,
+get its *Done when* passing, **then** open the reference. A file you can open is
+a file you will copy, so if the temptation is strong, read it from history
+instead:
 
 ```sh
-make setup && sudo ./bootstrap.sh
+git show 91b02cf:bootstrap.sh
 ```
 
-Roughly 40 minutes, mostly CloudStack. `sudo SKIP_HOST_PREP=1 ./bootstrap.sh`
-re-runs just the service layer, and every step is a no-op the second time.
-
-**Run it from a plain terminal, not an IDE's.** VS Code's AppArmor profile blocks
-MySQL's post-install script from signalling its own temporary server; the run
-stalls with a timeout three layers from the cause. That one cost an hour — see
-[`docs/failure-log.md`](docs/failure-log.md).
+Phases 7–13 — Packer, Terraform, Ansible, Kubernetes, GitOps, observability,
+operations — exist in **no** version of this lab. There is nothing to check
+against there.
 
 ### What changed from the original design
 
@@ -70,7 +56,11 @@ machine mints a **different** CA — and certificates issued under one will not
 validate against the other. That is intended, not a gap: a second machine is for
 writing code and docs, and certificates are issued where they will be used.
 
-## Building it on a fresh VM
+## Running the reference build
+
+Everything below builds the version at `91b02cf`, not the one you are writing.
+Useful for standing the finished lab up on a VM to compare against — and the
+prerequisites, the laptop-side DNS and the CA import apply to your rebuild too.
 
 ### 1 · Before you create the VM
 
@@ -188,18 +178,6 @@ likely on a first build:
 - **`exit 1` at the end of a successful CloudStack install** — no usable `TERM`.
   Its `cleanup()` calls `clear` under `set -e`.
 
-## Working on the code
-
-```sh
-make            # list the available targets
-make lint       # check formatting and syntax — never writes
-make fmt        # rewrite files into canonical format
-```
-
-`make setup` is **required on every clone**. It enables the git hooks by setting
-`core.hooksPath`, which git cannot carry inside a commit. Skip it and the
-pre-commit hook sits there doing nothing, silently.
-
 ## Requirements
 
 | | Minimum |
@@ -219,28 +197,27 @@ ls -l /dev/kvm                       # must exist
 
 ## Layout
 
-Organised by tool. Directories appear as the phase that creates them is reached.
+```
+docs/           build-plan.md — follow this. Plus decisions.md,
+                failure-log.md, network-plan.md, resource-budget.md,
+                vault-lesson.md
+reference/      the finished lab, stopped. Read it AFTER you attempt a step
+<everything else you write goes here>
+```
 
-```
-bootstrap.sh    bare Ubuntu to a running lab, in one command
-cloudstack/     the vendored all-in-one installer and its wrapper
-docker/         one directory per service: coredns, vault, gitea, proxy,
-                minio (removed at 1.6), toolbox
-.gitea/         workflows/ — CI, read by Gitea Actions from this path only
-docs/           build-plan.md (current), build-order.md (reference),
-                decisions.md, failure-log.md, network-plan.md,
-                resource-budget.md
-.githooks/      versioned git hooks; enabled by `make setup`
-```
+The root is empty on purpose. Phase 0 puts one thing in it — a `.gitignore` —
+and Phase 1 the first script. There is deliberately no build tooling: no
+Makefile, no linter, no hooks. `reference/` has all three if you ever want them,
+and `decisions.md` 0.2-x records why the previous build thought they earned their
+keep.
 
 ## Conventions
 
-- **`lint` never writes; `fmt` does.** The pre-commit hook only ever calls `lint`,
-  so it cannot modify a file and make the second run differ from the first.
-- **Missing tools warn locally, fail in CI.** `STRICT=1` turns a skipped linter
-  into an error; CI sets it.
-- **No suppression without a reason.** Every entry in `.trivyignore` and
-  `.shellcheckrc` carries a comment explaining itself.
+- **Everything is idempotent.** Running an installer twice must not break
+  anything, and the second run should say so rather than silently redoing work.
+- **Discovered, never declared.** An address that differs per host is asked for
+  at run time. An interface name in a constant is a per-host fact wearing a
+  constant's clothing.
 - **Decisions are written down.** See [`docs/decisions.md`](docs/decisions.md) —
   what was chosen, what was rejected, and why.
 - **So are failures.** See [`docs/failure-log.md`](docs/failure-log.md) — what

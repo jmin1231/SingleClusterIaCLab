@@ -27,11 +27,11 @@ verify_root() {
 
 verify_kvm() {
     if ! grep -Eq '(vmx|svm)' /proc/cpuinfo; then
-        die "CPU reports no vmx/svm flag. If this host is itself a VM, enable nested virtualization on the hypervisor - it cannot be set from inside the guest."
+        die "CPU reports no vmx/svm flag."
     fi
 
     if [[ ! -e /dev/kvm ]]; then
-        die "/dev/kvm is missing though the CPU supports virtualization - the kvm_intel/kvm_amd module did not load. Check 'lsmod | grep kvm' and 'dmesg | grep -i kvm'."
+        die "/dev/kvm is missing though the CPU supports virtualization."
     fi
 
     log "KVM available: $(grep -oEm1 'vmx|svm' /proc/cpuinfo) flag present, /dev/kvm ready"
@@ -59,6 +59,7 @@ wait_for_time_sync() {
     die "Clock failed to synchronize after 60 seconds"
 }
 
+# --------------------------- Install dependencies --------------------------------
 install_cli_tools() {
     if dpkg -s "${CLI_PACKAGES[@]}" >/dev/null 2>&1; then
         log "CLI tools already installed"
@@ -66,8 +67,8 @@ install_cli_tools() {
     fi
 
     log "Installing CLI tools: ${CLI_PACKAGES[*]}..."
-    apt-get -o DPkg::lock::Timeout=300 update
-    apt-get -o DPkg::lock::Timeout=300 install -y "${CLI_PACKAGES[@]}"
+    apt-get -o DPkg::Lock::Timeout=300 update
+    apt-get -o DPkg::Lock::Timeout=300 install -y "${CLI_PACKAGES[@]}"
 
     log "CLI tools ready"
 }
@@ -98,14 +99,15 @@ Architectures: $(dpkg --print-architecture)
 Signed-By: ${keyring_file}
 EOF
 
-    apt-get -o DPkg::lock::Timeout=300 update
-    apt-get -o DPkg::lock::Timeout=300 install -y "${DOCKER_PACKAGES[@]}"
+    apt-get -o DPkg::Lock::Timeout=300 update
+    apt-get -o DPkg::Lock::Timeout=300 install -y "${DOCKER_PACKAGES[@]}"
 
     log "Docker installed $(docker --version)"
 }
 
-install_cloudstack() {
+run_cloudstack_installer() {
     log "Running the Cloudstack all-in-one installer..."
+    "${SOURCE_SCRIPT}/cloudstack/cloudstack-install-all.sh"
 }
 
 main() {
@@ -114,6 +116,7 @@ main() {
     wait_for_time_sync
     install_cli_tools
     install_docker
+    run_cloudstack_installer
 }
 
 main "$@"

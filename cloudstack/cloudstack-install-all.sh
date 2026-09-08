@@ -8,13 +8,14 @@ set -euo pipefail
 
 log() { printf '\033[1;32m[+]\033[0m %s\n' "$*"; }
 die() {
-  printf '\033[1;31m[x]\033[0m %s\n' "$*" >&2
-  exit 1
+    printf '\033[1;31m[x]\033[0m %s\n' "$*" >&2
+    exit 1
 }
 
 SOURCE_SCRIPT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
 CHECK_BRIDGE_NETFILTER="${CHECK_BRIDGE_NETFILTER:-true}"
+CS_INSTALLER="${SOURCE_SCRIPT}/scripts/cloudstack-install.sh"
 SSHD_DROPIN="/etc/ssh/sshd_config.d/01-cloudstack.conf"
 ROOT_PASSWORD="$(openssl rand -hex 24)"
 export ROOT_PASSWORD
@@ -24,6 +25,8 @@ export ROOT_PASSWORD
 disable_bridge_netfilter() {
     local setting
 
+    log "Preparing bridge netfilter..."
+
     modprobe br_netfilter
 
     cat > /etc/sysctl.d/99-disable-bridge-netfilter.conf <<'EOF'
@@ -31,8 +34,6 @@ net.bridge.bridge-nf-call-iptables = 0
 net.bridge.bridge-nf-call-ip6tables = 0
 net.bridge.bridge-nf-call-arptables = 0
 EOF
-
-    log Preparing bridge netfilter...
 
     for setting in \
         net.bridge.bridge-nf-call-iptables \
@@ -107,11 +108,21 @@ install_cmk() {
     log "Cloudmonkey installed"
 }
 
+# ------------------------- Install CloudStack ---------------------------
+
+install_cloudstack() {
+    log "Running the vendored CloudStack installer..."
+    export CLOUDSTACK_UNATTENDED=1
+    "${CS_INSTALLER}"
+    log "CloudStack installed"
+}
+
 main() {
     disable_bridge_netfilter
-    check_bridge_netfilter
     prepare_host
     install_cmk
+    install_cloudstack
+    check_bridge_netfilter
 }
 
 main "$@"

@@ -113,7 +113,7 @@ run_cloudstack_installer() {
     "${SOURCE_SCRIPT}/cloudstack/cloudstack-install-all.sh"
 }
 
-run_cordns_installer() {
+run_coredns_installer() {
     log "Running the CoreDNS installer..."
     "${SOURCE_SCRIPT}/services/coredns/coredns-installer.sh"
 }
@@ -125,7 +125,7 @@ main() {
     install_cli_tools
     install_docker
     run_cloudstack_installer
-    run_cordns_installer
+    run_coredns_installer
 }
 
 main "$@"

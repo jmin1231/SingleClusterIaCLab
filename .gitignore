@@ -1,0 +1,24 @@
+# Editor and OS noise
+.DS_Store
+*.swp
+
+# CloudStack installer checkpoints and logs. 
+cloudstack-installer-tracker.conf
+cloudstack-installer.log
+installer.log
+
+# CoreDNS.
+services/coredns/.env
+services/coredns/zones/*.zone
+
+# --- 3. Secrets -------------------------------------------------------------
+secrets/
+*.pem
+*.key
+*.key.enc
+*_rsa
+*.tfvars
+.runner
+
+# Per-service secret and state directories are added here as each service is
+# built - before its directory exists, not after `docker compose up` creates it.

@@ -17,8 +17,8 @@ SOURCE_SCRIPT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 CHECK_BRIDGE_NETFILTER="${CHECK_BRIDGE_NETFILTER:-true}"
 CS_INSTALLER="${SOURCE_SCRIPT}/scripts/cloudstack-install.sh"
 SSHD_DROPIN="/etc/ssh/sshd_config.d/01-cloudstack.conf"
-ROOT_PASSWORD="$(openssl rand -hex 24)"
-export ROOT_PASSWORD
+# Declared here so the name lives with the rest of the config.
+ROOT_PASSWORD=""
 
 # -------------------- Prepare Bridge Netfilter ----------------------------
 
@@ -75,14 +75,21 @@ check_bridge_netfilter() {
 prepare_host() {
     log "Preparing host..."
 
+    ROOT_PASSWORD="$(openssl rand -hex 24)"
+    export ROOT_PASSWORD
+
+    trap 'rm -f "${SSHD_DROPIN}" || true; systemctl reload ssh || true' EXIT
+
     cat > "${SSHD_DROPIN}" <<'EOF'
 PermitRootLogin yes
 PasswordAuthentication yes
 EOF
 
-    printf 'root:%s\n' "${ROOT_PASSWORD}" | chpasswd || die "Failed to set root password"
-
     chmod 644 "${SSHD_DROPIN}"
+
+    sshd -t || die "Invalid SSH configuration"
+
+    printf 'root:%s\n' "${ROOT_PASSWORD}" | chpasswd || die "Failed to set root password"
 
     systemctl restart ssh || die "Failed to restart SSH"
 

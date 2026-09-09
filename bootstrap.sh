@@ -60,6 +60,7 @@ wait_for_time_sync() {
 }
 
 # --------------------------- Install dependencies --------------------------------
+
 install_cli_tools() {
     if dpkg -s "${CLI_PACKAGES[@]}" >/dev/null 2>&1; then
         log "CLI tools already installed"
@@ -105,9 +106,16 @@ EOF
     log "Docker installed $(docker --version)"
 }
 
+# ----------------------- Install Services ---------------------------
+
 run_cloudstack_installer() {
     log "Running the Cloudstack all-in-one installer..."
     "${SOURCE_SCRIPT}/cloudstack/cloudstack-install-all.sh"
+}
+
+run_cordns_installer() {
+    log "Running the CoreDNS installer..."
+    "${SOURCE_SCRIPT}/services/coredns/coredns-installer.sh"
 }
 
 main() {
@@ -117,6 +125,7 @@ main() {
     install_cli_tools
     install_docker
     run_cloudstack_installer
+    run_cordns_installer
 }
 
 main "$@"

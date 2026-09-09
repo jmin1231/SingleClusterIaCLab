@@ -1,0 +1,18 @@
+$ORIGIN lab.test.
+$TTL 300
+
+@   IN  SOA ns.lab.test. admin.lab.test. (
+    ${ZONE_SERIAL}  ; serial
+    7200            ; refresh
+    3600            ; retry
+    1209600         ; expire
+    300             ; minimum TTL
+)
+
+@ IN NS ns.lab.test.
+
+ns          IN A    ${CLOUDBR0_IP}
+cloudstack  IN A    ${CLOUDBR0_IP}
+gitea       IN A    ${CLOUDBR0_IP}
+vault       IN A    ${CLOUDBR0_IP}
+proxy       IN A    ${CLOUDBR0_IP}

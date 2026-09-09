@@ -1,0 +1,19 @@
+name: coredns
+
+services:
+  coredns:
+    image: coredns/coredns:1.14.7
+    container_name: coredns
+    restart: unless-stopped
+    
+    command:
+      - -conf
+      - /etc/coredns/Corefile
+    
+    ports:
+      - "${CLOUDBR0_IP}:53:53/udp"
+      - "${CLOUDBR0_IP}:53:53/tcp"
+    
+    volumes:
+      - ./Corefile:/etc/coredns/Corefile:ro
+      - ./zones:/etc/coredns/zones:ro

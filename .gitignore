@@ -11,6 +11,12 @@ installer.log
 services/coredns/.env
 services/coredns/zones/*.zone
 
+# vault
+services/vault/data/
+services/vault/logs/
+services/vault/certs/
+services/vault/.env
+
 # --- 3. Secrets -------------------------------------------------------------
 secrets/
 *.pem
@@ -20,5 +26,4 @@ secrets/
 *.tfvars
 .runner
 
-# Per-service secret and state directories are added here as each service is
-# built - before its directory exists, not after `docker compose up` creates it.
+

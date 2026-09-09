@@ -1,0 +1,36 @@
+name: vault
+
+networks:
+  vault:
+    driver: bridge
+
+services:
+  vault:
+    image: hashicorp/vault:2.1.0
+    container_name: vault
+    restart: unless-stopped
+
+    command:
+      - server
+      - -config=/vault/config/vault.hcl
+
+    user: "65100:65100"
+
+    ports:
+      - "${CLOUDBR0_IP}:8200:8200"
+
+    volumes:
+      - ./config:/vault/config:ro
+      - ./certs:/vault/certs:ro
+      - ./data:/vault/data
+      - ./logs:/vault/logs
+
+    extra_hosts:
+      - "vault.lab.test:127.0.0.1"
+
+    environment:
+      - VAULT_ADDR=https://vault.lab.test:8200
+      - VAULT_CACERT=/vault/certs/ca.crt
+
+    networks:
+      - vault

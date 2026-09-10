@@ -11,8 +11,8 @@ services:
       - /etc/coredns/Corefile
     
     ports:
-      - "${CLOUDBR0_IP}:53:53/udp"
-      - "${CLOUDBR0_IP}:53:53/tcp"
+      - "${CLOUDBR0_IP:?not set - run services/coredns/coredns-installer.sh}:53:53/udp"
+      - "${CLOUDBR0_IP:?not set - run services/coredns/coredns-installer.sh}:53:53/tcp"
     
     volumes:
       - ./Corefile:/etc/coredns/Corefile:ro

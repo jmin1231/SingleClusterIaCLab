@@ -14,7 +14,7 @@ services:
       - server
       - -config=/vault/config/vault.hcl
 
-    user: "65100:65100"
+    user: "${VAULT_UID:?not set - run services/vault/vault-installer.sh}:${VAULT_GID:?not set - run services/vault/vault-installer.sh}"
 
     ports:
       - "${CLOUDBR0_IP:?not set - run services/vault/vault-installer.sh}:8200:8200"

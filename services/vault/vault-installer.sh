@@ -15,18 +15,14 @@ source "${REPO_ROOT}/lib/common.sh" || {
     exit 1
 }
 
-COMPOSE_FILE="${SOURCE_SCRIPT}/docker-compose.yml"
-CERT_DIR="${SOURCE_SCRIPT}/certs"
-DATA_DIR="${SOURCE_SCRIPT}/data"
-LOGS_DIR="${SOURCE_SCRIPT}/logs"
-ENV_FILE="${SOURCE_SCRIPT}/.env"
-INIT_FILE="${SOURCE_SCRIPT}/vault-init.json"
-
-VAULT_UID=65100
-VAULT_GID=65100
+# shellcheck source=scripts/vault-env.sh
+source "${SOURCE_SCRIPT}/scripts/vault-env.sh" || {
+    printf '\033[1;31m[x]\033[0m cannot source %s/scripts/vault-env.sh\n' "${SOURCE_SCRIPT}" >&2
+    exit 1
+}
 
 generate_cert() {
-    if [[ -f "${CERT_DIR}/tls.crt" && -f "${CERT_DIR}/tls.key" ]]; then
+    if [[ -f "${TLS_CRT}" && -f "${TLS_KEY}" ]]; then
         log "Certificate already present"
         return 0
     fi
@@ -38,26 +34,26 @@ generate_cert() {
         -newkey rsa:2048 \
         -noenc \
         -days 3650 \
-        -subj "/O=SingleClusterIaCLab/CN=vault.lab.test" \
-        -addext "subjectAltName=DNS:vault.lab.test,DNS:localhost,IP:127.0.0.1" \
-        -keyout "${CERT_DIR}/tls.key" \
-        -out "${CERT_DIR}/tls.crt" 2>/dev/null
+        -subj "/O=SingleClusterIaCLab/CN=${VAULT_HOST}" \
+        -addext "subjectAltName=DNS:${VAULT_HOST},DNS:localhost,IP:127.0.0.1" \
+        -keyout "${TLS_KEY}" \
+        -out "${TLS_CRT}" 2>/dev/null
 
-    cp "${CERT_DIR}/tls.crt" "${CERT_DIR}/bundle.crt"
-    cp "${CERT_DIR}/tls.crt" "${CERT_DIR}/ca.crt"
+    cp "${TLS_CRT}" "${BUNDLE_CRT}"
+    cp "${TLS_CRT}" "${CA_CRT}"
 
     chown "${VAULT_UID}:${VAULT_GID}" \
-        "${CERT_DIR}/tls.crt" \
-        "${CERT_DIR}/bundle.crt" \
-        "${CERT_DIR}/ca.crt" \
-        "${CERT_DIR}/tls.key"
+        "${TLS_CRT}" \
+        "${BUNDLE_CRT}" \
+        "${CA_CRT}" \
+        "${TLS_KEY}"
 
     chmod 0644 \
-        "${CERT_DIR}/tls.crt" \
-        "${CERT_DIR}/bundle.crt" \
-        "${CERT_DIR}/ca.crt"
+        "${TLS_CRT}" \
+        "${BUNDLE_CRT}" \
+        "${CA_CRT}"
 
-    chmod 0600 "${CERT_DIR}/tls.key"
+    chmod 0600 "${TLS_KEY}"
 
     log "Vault TLS certificate generated"
 }
@@ -95,9 +91,9 @@ wait_for_vault() {
 
     for ((sec = 0; sec < 60; sec++)); do
         if code="$(curl -s -o /dev/null -w '%{http_code}' \
-            --cacert "${CERT_DIR}/ca.crt" \
-            --resolve "vault.lab.test:8200:${CLOUDBR0_IP}" \
-            "https://vault.lab.test:8200/v1/sys/health")"; then
+            --cacert "${CA_CRT}" \
+            --resolve "${VAULT_HOST}:${VAULT_PORT}:${CLOUDBR0_IP}" \
+            "${VAULT_API}/v1/sys/health")"; then
             case "$code" in
                 200|501|503)
                     responding=true
@@ -122,9 +118,9 @@ initialize_vault() {
     local tmp_init
 
     if ! response="$(curl -fsS --max-time 5 \
-        --cacert "${CERT_DIR}/ca.crt" \
-        --resolve "vault.lab.test:8200:${CLOUDBR0_IP}" \
-        "https://vault.lab.test:8200/v1/sys/init")"; then
+        --cacert "${CA_CRT}" \
+        --resolve "${VAULT_HOST}:${VAULT_PORT}:${CLOUDBR0_IP}" \
+        "${VAULT_API}/v1/sys/init")"; then
         die "Could not check Vault initialization status."
     fi
 
@@ -194,9 +190,9 @@ unseal_vault() {
     local sealed
 
     if ! response="$(curl -fsS --max-time 5 \
-        --cacert "${CERT_DIR}/ca.crt" \
-        --resolve "vault.lab.test:8200:${CLOUDBR0_IP}" \
-        "https://vault.lab.test:8200/v1/sys/seal-status")"; then
+        --cacert "${CA_CRT}" \
+        --resolve "${VAULT_HOST}:${VAULT_PORT}:${CLOUDBR0_IP}" \
+        "${VAULT_API}/v1/sys/seal-status")"; then
         die "Could not check Vault seal status"
     fi
 
@@ -224,12 +220,12 @@ unseal_vault() {
     if ! response="$(
         jq '{key: .unseal_keys_b64[0]}' "${INIT_FILE}" |
             curl -fsS --max-time 30 \
-                --cacert "${CERT_DIR}/ca.crt" \
-                --resolve "vault.lab.test:8200:${CLOUDBR0_IP}" \
+                --cacert "${CA_CRT}" \
+                --resolve "${VAULT_HOST}:${VAULT_PORT}:${CLOUDBR0_IP}" \
                 --header "Content-Type: application/json" \
                 --request POST \
                 --data-binary @- \
-                "https://vault.lab.test:8200/v1/sys/unseal"
+                "${VAULT_API}/v1/sys/unseal"
     )"; then
         die "Unseal request failed"
     fi

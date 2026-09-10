@@ -6,24 +6,18 @@
 
 set -euo pipefail
 
-log() { printf '\033[1;32m[+]\033[0m %s\n' "$*"; }
-warn() { printf '\033[1;33m[!]\033[0m %s\n' "$*" >&2; }
-die() {
-    printf '\033[1;31m[x]\033[0m %s\n' "$*" >&2
+SOURCE_SCRIPT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="${SOURCE_SCRIPT}"
+
+# shellcheck source=lib/common.sh
+source "${REPO_ROOT}/lib/common.sh" || {
+    printf '\033[1;31m[x]\033[0m cannot source %s/lib/common.sh\n' "${REPO_ROOT}" >&2
     exit 1
 }
 
 export DEBIAN_FRONTEND=noninteractive
-
-SOURCE_SCRIPT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 CLI_PACKAGES=(curl jq gettext-base openssl gnupg ca-certificates openssh-server)
 DOCKER_PACKAGES=(docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin)
-
-verify_root() {
-    if [[ $EUID -ne 0 ]]; then
-        die "Must be run as root - sudo ./bootstrap.sh"
-    fi
-}
 
 verify_kvm() {
     if ! grep -Eq '(vmx|svm)' /proc/cpuinfo; then
@@ -116,6 +110,11 @@ run_cloudstack_installer() {
 run_coredns_installer() {
     log "Running the CoreDNS installer..."
     "${SOURCE_SCRIPT}/services/coredns/coredns-installer.sh"
+}
+
+run_vault_installer() {
+    log "Running the Vault installer..."
+    "${SOURCE_SCRIPT}/services/coredns/vault-installer.sh"
 }
 
 main() {

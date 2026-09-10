@@ -6,17 +6,21 @@
 
 set -euo pipefail
 
-log() { printf '\033[1;36m[+]\033[0m %s\n' "$*"; }
-die() {
-  printf '\033[1;31m[x]\033[0m %s\n' "$*" >&2
-  exit 1
+SOURCE_SCRIPT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd -- "${SOURCE_SCRIPT}/../.." && pwd)"
+
+# shellcheck source=../../lib/common.sh
+source "${REPO_ROOT}/lib/common.sh" || {
+    printf '\033[1;31m[x]\033[0m cannot source %s/lib/common.sh\n' "${REPO_ROOT}" >&2
+    exit 1
 }
 
-SOURCE_SCRIPT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 COMPOSE_FILE="${SOURCE_SCRIPT}/docker-compose.yml"
 CERT_DIR="${SOURCE_SCRIPT}/certs"
 DATA_DIR="${SOURCE_SCRIPT}/data"
 LOGS_DIR="${SOURCE_SCRIPT}/logs"
+ENV_FILE="${SOURCE_SCRIPT}/.env"
+INIT_FILE="${SOURCE_SCRIPT}/vault-init.json"
 
 VAULT_UID=65100
 VAULT_GID=65100
@@ -66,9 +70,192 @@ create_bind_mounts() {
     install -d -o "${VAULT_UID}" -g "${VAULT_GID}" -m 0700 "${CERT_DIR}"
 }
 
+render_config() {
+    cat > "${ENV_FILE}" << EOF
+CLOUDBR0_IP=${CLOUDBR0_IP}
+EOF
+
+    log "Environment file rendered: ${ENV_FILE}"
+}
+
+start_vault() {
+    log "Starting vault..."
+    docker compose -f "${COMPOSE_FILE}" up -d --remove-orphans
+}
+
+wait_for_vault() {
+    log "Waiting for Vault to answer..."
+
+    local responding
+    local code
+    local sec
+
+    responding=false
+    code=000
+
+    for ((sec = 0; sec < 60; sec++)); do
+        if code="$(curl -s -o /dev/null -w '%{http_code}' \
+            --cacert "${CERT_DIR}/ca.crt" \
+            --resolve "vault.lab.test:8200:${CLOUDBR0_IP}" \
+            "https://vault.lab.test:8200/v1/sys/health")"; then
+            case "$code" in
+                200|501|503)
+                    responding=true
+                    break
+                    ;;
+            esac
+        fi
+
+        sleep 1
+    done
+
+    if [[ "${responding}" != true ]]; then
+        die "Vault did not respond within 60s."
+    fi
+
+    log "Vault is answering"
+}
+
+initialize_vault() {
+    local response
+    local initialized
+    local tmp_init
+
+    if ! response="$(curl -fsS --max-time 5 \
+        --cacert "${CERT_DIR}/ca.crt" \
+        --resolve "vault.lab.test:8200:${CLOUDBR0_IP}" \
+        "https://vault.lab.test:8200/v1/sys/init")"; then
+        die "Could not check Vault initialization status."
+    fi
+
+    initialized="$(printf '%s' "$response" | jq -r '.initialized')" ||
+        die "Could not parse Vault initialization status."
+    
+    case "$initialized" in
+        false)
+            if [[ -e "$INIT_FILE" || -L "$INIT_FILE" ]]; then
+                die "Vault is uninitialized but ${INIT_FILE} exists. Check the endpoint"
+            fi
+            
+            log "Initializing Vault..."
+
+            tmp_init="$(mktemp "${INIT_FILE}.XXXXXX")" ||
+                die "Could not create a temporary credentials file"
+
+            if ! (
+                umask 077
+                docker compose -f "${COMPOSE_FILE}" exec -T vault \
+                    vault operator init \
+                    -key-shares=1 \
+                    -key-threshold=1 \
+                    -format=json > "${tmp_init}"
+            ); then
+                die "Initialization failed. Output preserved at ${tmp_init}. Check Vault status before retrying."
+            fi
+
+            jq -e '
+                (.unseal_keys_b64[0] | type == "string" and length > 0) and
+                (.root_token | type == "string" and length > 0)
+            ' "${tmp_init}" >/dev/null 2>&1 ||
+                die "Initialization output is invalid. Preserved at ${tmp_init}; Vault may already be initialized."
+
+            chmod 0400 "${tmp_init}" ||
+                die "Could not restrict permissions on ${tmp_init}."
+
+            mv "${tmp_init}" "${INIT_FILE}" ||
+                die "Could not move credentials into place. They remain at ${tmp_init}."
+            ;;
+        true)
+            if [[ ! -s "$INIT_FILE" ]]; then
+                 die "Vault is initialized but ${INIT_FILE} is missing or empty."
+            fi
+
+            log "Vault is already initialized"
+            ;;
+        *)
+            die "Vault returned an invalid initialization status."
+            ;;
+    esac
+
+    jq -e '
+        (.unseal_keys_b64[0] | type == "string" and length > 0) and
+        (.root_token | type == "string" and length > 0 )
+    ' "$INIT_FILE" >/dev/null 2>&1 ||
+        die "${INIT_FILE} lacks valid credentials"
+
+    chmod 0400 "$INIT_FILE" ||
+        die "Could not change permissions on ${INIT_FILE}"
+
+    log "Vault is initialized" 
+}
+
+unseal_vault() {
+    local response
+    local sealed
+
+    if ! response="$(curl -fsS --max-time 5 \
+        --cacert "${CERT_DIR}/ca.crt" \
+        --resolve "vault.lab.test:8200:${CLOUDBR0_IP}" \
+        "https://vault.lab.test:8200/v1/sys/seal-status")"; then
+        die "Could not check Vault seal status"
+    fi
+
+    sealed="$(printf '%s' "$response" | jq -r '.sealed')" ||
+        die "Could not parse Vault seal status."
+    
+    case "$sealed" in
+        false)
+            log "Vault is already unsealed."
+            return 0
+            ;;
+        true)
+            log "Unsealing Vault..."
+            ;;
+        *)
+            die "Vault returned an invalid seal status."
+            ;;
+    esac
+
+    jq -e '
+        .unseal_keys_b64[0] | type == "string" and length > 0
+    ' "$INIT_FILE" >/dev/null 2>&1 ||
+        die "${INIT_FILE} lacks a valid unseal key."
+    
+    if ! response="$(
+        jq '{key: .unseal_keys_b64[0]}' "${INIT_FILE}" |
+            curl -fsS --max-time 30 \
+                --cacert "${CERT_DIR}/ca.crt" \
+                --resolve "vault.lab.test:8200:${CLOUDBR0_IP}" \
+                --header "Content-Type: application/json" \
+                --request POST \
+                --data-binary @- \
+                "https://vault.lab.test:8200/v1/sys/unseal"
+    )"; then
+        die "Unseal request failed"
+    fi
+    
+    printf '%s' "$response" | jq -e '.sealed==false' \
+        >/dev/null 2>&1 ||
+        die "Vault did not confirm that it is unsealed."
+    
+    log "Vault is unsealed"
+}
+
+
 main() {
+    verify_root
+
+    CLOUDBR0_IP="$(get_cloudbr0_ip)"
+
     create_bind_mounts
     generate_cert
+    render_config
+    start_vault
+    wait_for_vault
+    initialize_vault
+    unseal_vault
+
+    log "Vault is up, unsealed and configured"
 }
 
 main "$@"

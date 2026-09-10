@@ -16,6 +16,7 @@ services/vault/data/
 services/vault/logs/
 services/vault/certs/
 services/vault/.env
+services/vault/vault-init.json*
 
 # --- 3. Secrets -------------------------------------------------------------
 secrets/

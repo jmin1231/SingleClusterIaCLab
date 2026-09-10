@@ -6,13 +6,14 @@
 
 set -euo pipefail
 
-log() { printf '\033[1;32m[+]\033[0m %s\n' "$*"; }
-die() {
-    printf '\033[1;31m[x]\033[0m %s\n' "$*" >&2
+SOURCE_SCRIPT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd -- "${SOURCE_SCRIPT}/.." && pwd)"
+
+# shellcheck source=../lib/common.sh
+source "${REPO_ROOT}/lib/common.sh" || {
+    printf '\033[1;31m[x]\033[0m cannot source %s/lib/common.sh\n' "${REPO_ROOT}" >&2
     exit 1
 }
-
-SOURCE_SCRIPT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
 CHECK_BRIDGE_NETFILTER="${CHECK_BRIDGE_NETFILTER:-true}"
 CS_INSTALLER="${SOURCE_SCRIPT}/scripts/cloudstack-install.sh"
@@ -125,6 +126,7 @@ install_cloudstack() {
 }
 
 main() {
+    verify_root
     disable_bridge_netfilter
     prepare_host
     install_cmk

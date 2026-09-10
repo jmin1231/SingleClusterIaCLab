@@ -7,14 +7,14 @@
 
 set -euo pipefail
 
-log() { printf '\033[1;32m[+]\033[0m %s\n' "$*"; }
-warn() { printf '\033[1;33m[!]\033[0m %s\n' "$*" >&2; }
-die() {
-    printf '\033[1;31m[x]\033[0m %s\n' "$*" >&2
+SOURCE_SCRIPT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd -- "${SOURCE_SCRIPT}/../.." && pwd)"
+
+# shellcheck source=../../lib/common.sh
+source "${REPO_ROOT}/lib/common.sh" || {
+    printf '\033[1;31m[x]\033[0m cannot source %s/lib/common.sh\n' "${REPO_ROOT}" >&2
     exit 1
 }
-
-SOURCE_SCRIPT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
 COMPOSE_FILE="${SOURCE_SCRIPT}/docker-compose.yml"
 RESOLVED_DIR="/etc/systemd/resolved.conf.d"
@@ -22,19 +22,6 @@ RESOLVED_DROPIN="${RESOLVED_DIR}/lab-dns.conf"
 ZONE_TEMPLATE="${SOURCE_SCRIPT}/zones/lab.test.zone.tmpl"
 ZONE_FILE="${SOURCE_SCRIPT}/zones/lab.test.zone"
 ENV_FILE="${SOURCE_SCRIPT}/.env"
-
-get_cloudbr0_ip() {
-    local ip_addr
-
-    ip_addr="$(
-        ip -4 -o addr show dev cloudbr0 scope global 2>/dev/null |
-        awk '{split($4, a, "/"); print a[1]; exit}'
-    )"
-
-    [[ -n "$ip_addr" ]] || die "Unable to determine cloudbr0 ip address. cloudbr0 is created by cloudstack-install-all.sh - has it run?"
-
-    printf '%s\n' "$ip_addr"
-}
 
 render_config() {
     local cloudbr0_ip
@@ -87,6 +74,7 @@ start_coredns() {
 }
 
 main() {
+    verify_root
     render_config
     start_coredns
     configure_resolved

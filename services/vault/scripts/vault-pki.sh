@@ -8,6 +8,8 @@ set -euo pipefail
 
 SOURCE_SCRIPT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${SOURCE_SCRIPT}/../../.." && pwd)"
+
+# ---------------------- IMPORT -----------------------------------
 # shellcheck source=../../../lib/common.sh
 source "${REPO_ROOT}/lib/common.sh" || {
     printf '\033[1;31m[x]\033[0m cannot source %s/lib/common.sh\n' "${REPO_ROOT}" >&2
@@ -19,6 +21,8 @@ source "${SOURCE_SCRIPT}/vault-env.sh" || {
     printf '\033[1;31m[x]\033[0m cannot source %s/vault-env.sh\n' "${SOURCE_SCRIPT}" >&2
     exit 1
 }
+
+# ------------------------ CONFIGURE PKI ------------------------------
 
 configure_pki_mount() {
     log "Configuring pki mount..."

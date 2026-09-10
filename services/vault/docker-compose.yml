@@ -12,7 +12,6 @@ services:
 
     command:
       - server
-      - -config=/vault/config/vault.hcl
 
     user: "${VAULT_UID:?not set - run services/vault/vault-installer.sh}:${VAULT_GID:?not set - run services/vault/vault-installer.sh}"
 

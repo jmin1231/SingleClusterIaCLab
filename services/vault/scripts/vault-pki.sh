@@ -153,6 +153,11 @@ configure_pki_urls() {
 configure_pki_role() {
     log "Configuring lab-server PKI role..."
 
+    # ttl equals max_ttl deliberately: the lab is short-lived, so nothing
+    # should expire mid-run whether or not a caller passes a ttl. A
+    # persistent deployment would keep the default well below the ceiling
+    # and make a long-lived certificate a deliberate request.
+
     curl -fsS -o /dev/null --max-time 10 \
         --cacert "${CA_CRT}" \
         --resolve "${VAULT_HOST}:${VAULT_PORT}:${CLOUDBR0_IP}" \
@@ -167,12 +172,7 @@ configure_pki_role() {
             "allow_wildcard_certificates": false,
             "allow_localhost": false,
             "allow_ip_sans": false,
-            "allow_any_name": false,
-            "server_flag": true,
-            "client_flag": false,
-            "key_type": "rsa",
-            "key_bits": 2048,
-            "ttl": "24h",
+            "ttl": "720h",
             "max_ttl": "720h"
         }' \
         "${VAULT_API}/v1/pki/roles/lab-server" ||

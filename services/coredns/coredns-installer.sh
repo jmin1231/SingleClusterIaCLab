@@ -36,6 +36,10 @@ render_config() {
 CLOUDBR0_IP=${cloudbr0_ip}
 EOF
 
+    # Single quotes on the envsubst argument are deliberate: it wants the
+    # literal variable names as an allowlist of what it may substitute.
+    # Double quotes would expand them here and leave it nothing to match.
+    # shellcheck disable=SC2016
     CLOUDBR0_IP="$cloudbr0_ip" \
     ZONE_SERIAL="$zone_serial" \
     envsubst '${CLOUDBR0_IP} ${ZONE_SERIAL}' \

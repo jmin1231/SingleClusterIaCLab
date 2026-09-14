@@ -41,7 +41,7 @@ configure_pki_mount() {
     mount_type="$(printf '%s' "$response" |
         jq -r '.data["pki/"].type // "missing"')" ||
         die "Could not parse Vault mounts."
-    
+
     case "$mount_type" in
         pki)
             log "PKI is already mounted at pki/."
@@ -105,7 +105,9 @@ configure_pki_root() {
 create_pki_root() {
     log "Generating root CA..."
 
-    curl -fsS --max-time 10 \
+    local response
+
+    if ! response="$(curl -fsS --max-time 10 \
         --cacert "${CA_CRT}" \
         --resolve "${VAULT_HOST}:${VAULT_PORT}:${CLOUDBR0_IP}" \
         --header "X-Vault-Token: ${TOKEN}" \
@@ -118,10 +120,65 @@ create_pki_root() {
             "key_bits": 4096,
             "issuer_name": "lab-root"
         }' \
-        "${VAULT_API}/v1/pki/root/generate/internal" ||
+        "${VAULT_API}/v1/pki/root/generate/internal")"; then
         die "Could not create the root CA."
+    fi
 
-    log "Root CA created at /pki"
+    log "Root CA created: serial $(jq -r '.data.serial_number' <<<"$response")"
+}
+
+configure_pki_urls() {
+    log "Configuring PKI URLs..."
+
+    local body
+
+    body="$(jq -n \
+        --arg ca "${VAULT_API}/v1/pki/ca" \
+        --arg crl "${VAULT_API}/v1/pki/crl" \
+        '{issuing_certificates: [$ca], crl_distribution_points: [$crl]}')"
+
+    curl -fsS -o /dev/null --max-time 10 \
+        --cacert "${CA_CRT}" \
+        --resolve "${VAULT_HOST}:${VAULT_PORT}:${CLOUDBR0_IP}" \
+        --header "X-Vault-Token: ${TOKEN}" \
+        --header "Content-Type: application/json" \
+        --request POST \
+        --data "$body" \
+        "${VAULT_API}/v1/pki/config/urls" ||
+        die "Could not configure PKI URLs"
+
+    log "PKI issuing and CRL URLs configured"    
+}
+
+configure_pki_role() {
+    log "Configuring lab-server PKI role..."
+
+    curl -fsS -o /dev/null --max-time 10 \
+        --cacert "${CA_CRT}" \
+        --resolve "${VAULT_HOST}:${VAULT_PORT}:${CLOUDBR0_IP}" \
+        --header "X-Vault-Token: ${TOKEN}" \
+        --header "Content-Type: application/json" \
+        --request POST \
+        --data '{
+            "issuer_ref": "lab-root",
+            "allowed_domains": ["lab.test"],
+            "allow_subdomains": true,
+            "allow_bare_domains": false,
+            "allow_wildcard_certificates": false,
+            "allow_localhost": false,
+            "allow_ip_sans": false,
+            "allow_any_name": false,
+            "server_flag": true,
+            "client_flag": false,
+            "key_type": "rsa",
+            "key_bits": 2048,
+            "ttl": "24h",
+            "max_ttl": "720h"
+        }' \
+        "${VAULT_API}/v1/pki/roles/lab-server" ||
+        die "Could not configure lab-server PKI role."
+
+    log "PKI role lab-server configured."
 }
 
 main () {
@@ -133,6 +190,8 @@ main () {
 
     configure_pki_mount
     configure_pki_root
+    configure_pki_urls
+    configure_pki_role
 }
 
 main "$@"

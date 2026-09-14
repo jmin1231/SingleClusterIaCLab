@@ -130,13 +130,13 @@ initialize_vault() {
 
     initialized="$(printf '%s' "$response" | jq -r '.initialized')" ||
         die "Could not parse Vault initialization status."
-    
+
     case "$initialized" in
         false)
             if [[ -e "$INIT_FILE" || -L "$INIT_FILE" ]]; then
                 die "Vault is uninitialized but ${INIT_FILE} exists. Check the endpoint"
             fi
-            
+
             log "Initializing Vault..."
 
             tmp_init="$(mktemp "${INIT_FILE}.XXXXXX")" ||
@@ -186,7 +186,7 @@ initialize_vault() {
     chmod 0400 "$INIT_FILE" ||
         die "Could not change permissions on ${INIT_FILE}"
 
-    log "Vault is initialized" 
+    log "Vault is initialized"
 }
 
 unseal_vault() {
@@ -202,7 +202,7 @@ unseal_vault() {
 
     sealed="$(printf '%s' "$response" | jq -r '.sealed')" ||
         die "Could not parse Vault seal status."
-    
+
     case "$sealed" in
         false)
             log "Vault is already unsealed."
@@ -220,7 +220,7 @@ unseal_vault() {
         .unseal_keys_b64[0] | type == "string" and length > 0
     ' "$INIT_FILE" >/dev/null 2>&1 ||
         die "${INIT_FILE} lacks a valid unseal key."
-    
+
     if ! response="$(
         jq '{key: .unseal_keys_b64[0]}' "${INIT_FILE}" |
             curl -fsS --max-time 30 \
@@ -233,11 +233,11 @@ unseal_vault() {
     )"; then
         die "Unseal request failed"
     fi
-    
+
     printf '%s' "$response" | jq -e '.sealed==false' \
         >/dev/null 2>&1 ||
         die "Vault did not confirm that it is unsealed."
-    
+
     log "Vault is unsealed"
 }
 

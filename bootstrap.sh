@@ -114,7 +114,7 @@ run_coredns_installer() {
 
 run_vault_installer() {
     log "Running the Vault installer..."
-    "${SOURCE_SCRIPT}/services/coredns/vault-installer.sh"
+    "${SOURCE_SCRIPT}/services/vault/vault-installer.sh"
 }
 
 main() {
@@ -125,6 +125,7 @@ main() {
     install_docker
     run_cloudstack_installer
     run_coredns_installer
+    run_vault_installer
 }
 
 main "$@"

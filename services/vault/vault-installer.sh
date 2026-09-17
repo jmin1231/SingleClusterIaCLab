@@ -241,6 +241,21 @@ unseal_vault() {
     log "Vault is unsealed"
 }
 
+# The KV store the later phases write into. Mounted before the PKI so that
+# Phase 5 has somewhere to put credentials the moment it needs one.
+configure_kv() {
+    "${SOURCE_SCRIPT}/scripts/vault-kv.sh" ||
+        die "KV configuration failed."
+}
+
+# PKI lives in its own script because it is also what you re-run on its own -
+# after changing a role, against a Vault that is already up - and because it
+# needs a token, which nothing before this point does.
+configure_pki() {
+    "${SOURCE_SCRIPT}/scripts/vault-pki.sh" ||
+        die "PKI configuration failed."
+}
+
 
 main() {
     verify_root
@@ -254,8 +269,10 @@ main() {
     wait_for_vault
     initialize_vault
     unseal_vault
+    configure_kv
+    configure_pki
 
-    log "Vault is up and unsealed"
+    log "Vault is up, unsealed, and serving its own PKI"
 }
 
 main "$@"

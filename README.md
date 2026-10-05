@@ -56,6 +56,31 @@ machine mints a **different** CA — and certificates issued under one will not
 validate against the other. That is intended, not a gap: a second machine is for
 writing code and docs, and certificates are issued where they will be used.
 
+## Unsealing Vault
+
+A restart is not a stop: Vault comes back running, listening, and answering
+everything `503`. It has to be unsealed again by hand after a host reboot, after
+`docker compose up -d --force-recreate`, and after the certificate replacement.
+
+The unseal key is the first entry of `unseal_keys_b64` in
+`services/vault/vault-init.json` — root-owned, mode 0400, and gitignored:
+
+```sh
+sudo jq -r '.unseal_keys_b64[0]' services/vault/vault-init.json \
+  | sudo docker exec -i vault vault operator unseal -
+sudo docker exec vault vault status   # Sealed: false
+```
+
+`unseal -` reads the key from stdin, so it never reaches the host's process list
+the way an argument would.
+
+The *root token* in the same file is a different credential — it authenticates
+API calls, and unsealing does not use it:
+
+```sh
+sudo jq -r '.root_token' services/vault/vault-init.json
+```
+
 ## Running the reference build
 
 Everything below builds the version at `91b02cf`, not the one you are writing.

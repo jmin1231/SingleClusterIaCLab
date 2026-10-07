@@ -1,0 +1,25 @@
+# .shellcheckrc
+#
+# Every script in this repo is bash. Declaring it here rather than relying on
+# each file's shebang means a sourced fragment with no shebang - lib/lib.sh,
+# the env files - is still checked as bash rather than as POSIX sh.
+shell=bash
+
+# Follow `source` into files resolved at run time. Without this, every
+# `source "${REPO_ROOT}/lib/lib.sh"` is an SC1091 "not following" warning,
+# because the path is only known when the script runs.
+external-sources=true
+
+# SC1091: cannot follow a dynamically-resolved source. external-sources above
+#         handles the ones it can; this covers the rest.
+# SC2034: appears unused. lib/lib.sh and the per-service env fragments exist to
+#         define names their *callers* consume, so a standalone check finds no
+#         use for any of them.
+disable=SC1091,SC2034
+
+# Deliberately NOT disabled, though it is the usual candidate:
+#
+# SC2155 (declare and assign separately) stays ON. `local x="$(cmd)"` discards
+# cmd's exit status, so under `set -e` a failing command inside a declaration
+# does not stop the script - exactly the class of silent failure this lab keeps
+# a log of. Write `local x; x="$(cmd)"` instead.

@@ -21,6 +21,10 @@ fi
 
 VAULT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 
+# Root CA Common name
+CA_CN="SingleClusterIaCLab Root CA"
+
+
 COMPOSE_FILE="${VAULT_DIR}/docker-compose.yml"
 CONFIG_DIR="${VAULT_DIR}/config"
 CERT_DIR="${VAULT_DIR}/certs"

@@ -1,0 +1,18 @@
+---
+# .yamllint - see `yamllint -c .yamllint .`, wired into `make lint` at 7.1.
+
+extends: relaxed
+
+rules:
+  # Compose files and workflow definitions have long image digests and long
+  # `run:` lines that cannot be wrapped without changing meaning.
+  line-length: disable
+  # `on:` in a workflow is the truthy-key case, and renaming it breaks CI.
+  truthy:
+    allowed-values: ["true", "false"]
+    check-keys: false
+
+ignore: |
+  .terraform/
+  state/
+  reference/

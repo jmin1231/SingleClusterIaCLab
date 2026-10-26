@@ -1658,53 +1658,62 @@ so its event log is the only record of changes to the zone.
 > **CUT — see S-1.** The whole phase. Six steps, ~2 GB, and the budget
 > already says authentik cannot coexist with Phase 13's monitoring. Nothing in
 > the plan depends on it, and it is integration rather than construction.
+>
+> **Amended by 14.0-2:** 14.0, directory login, returns as an optional step. 14.1–14.5 stay cut.
 
 Every prerequisite is in place — names resolve everywhere including inside the cluster, TLS is
 universal, clocks are synchronised since Phase 0.3, and your CA is already in the JVM truststore.
 
 ### 14.0 Directory services, and the plane this lab does not have · `L` — optional
 
-> **Not scheduled — see decision 14.0-1.** Recorded here so the gap is visible in
-> the syllabus rather than only in the decision log. Gated on memory: FreeIPA
-> without Dogtag is 1.5–2 GB against a ceiling the estate already reaches at ~28.
+> **Optional — see decision 14.0-2**, which amends 14.0-1 and, for this step only, S-1.
+> It runs with the monitoring stack stopped (`resource-budget.md` rule 8): the domain
+> controller is ~1 GB against a committed ~15.9 GB. The rest of Phase 14 stays cut.
 
 There are three identity planes, and Phase 14 as written delivers one. authentik is
 OIDC/SAML for **applications** — it has no KDC, no machine enrolment, no host keytabs, and a VM
 cannot be joined to it. Vault covers **workload** identity. What is missing is **host** identity:
 central accounts, central sudo, and machines that can authenticate as themselves. That is what
-Active Directory is, and what FreeIPA or a Samba AD DC would supply.
+Active Directory is, and a Samba AD DC supplies it with AD's own protocols.
 
-Stand up FreeIPA with `--no-ca` on its own guest — it is RHEL-family and will not run on this
-Ubuntu host — then `realm join` the three tier VMs from the Phase 8 base role.
+Add a shared-services tier, `tier-svc` `10.0.10.0/24` (`network-plan.md` row 14), and a `dc` VM at
+`10.0.10.10` from the same Packer template as the tiers. Provision the domain `ad.lab.test`, realm
+`AD.LAB.TEST`, with `samba-tool domain provision`, then `realm join` the three tier VMs from the
+Phase 8 base role using a delegated `joiner` account (`secret/ad/joiner`). Users and groups:
+`alice` in `lab-admins`, `bob` in `lab-users`, `carol` in neither.
 
 **Learning:** what a *domain* is, as distinct from a user database. LDAP is the directory;
 Kerberos is the authentication; the pair is what makes a machine a member rather than a client. A
-joined host holds a principal (`host/backend.lab.test@LAB.TEST`) and a keytab, and authenticates
-**as itself** — the same idea as a Vault AppRole or a Kubernetes ServiceAccount, one layer down.
-Then: `id alice` with no local account, `kinit` once for SSO across every joined host, sudo rules
-from the directory, and HBAC expressing which humans reach which tier — which the
+joined host holds a principal (`host/backend.ad.lab.test@AD.LAB.TEST`) and a keytab, and
+authenticates **as itself** — the same idea as a Vault AppRole or a Kubernetes ServiceAccount, one
+layer down. Then: `id alice` with no local account, password login checked by the KDC rather than
+`/etc/shadow`, sudo from a directory group, and per-tier access from AD groups (`realm permit -g`,
+the backend admits only `lab-admins`), which is the AD stand-in for FreeIPA's HBAC and which the
 frontend/tunnel/backend split makes a real question rather than an exercise.
 
-**Three prerequisites that are not obvious**, and two of them are gaps today:
+**Three prerequisites that are not obvious:**
 
-- **`SRV` records.** Clients discover the KDC through `_kerberos._udp`, `_ldap._tcp`,
-  `_kpasswd._udp`. The zone is A records only.
+- **The domain is a subdomain.** A DC is authoritative for its own zone and registers members in
+  it, and `lab.test` already belongs to CoreDNS. So the domain is `ad.lab.test`, and CoreDNS
+  forwards it, plus the reverse zone `0.10.in-addr.arpa`, to the DC (the commented stanza in
+  `services/coredns/Corefile`). The DC gets a public IP with a 53/udp+tcp forward that admits only
+  the host, because CoreDNS reaches the VPC no other way (7.3).
 - **Reverse DNS.** Kerberos derives service principals from hostnames and reverse-resolves them.
-  There is no `in-addr.arpa` zone anywhere in this lab, and the failure names the principal rather
-  than the DNS — so the search starts in the wrong place. See the open question in `decisions.md`.
+  The DC's reverse zone is where those PTR records live; the failure names the principal rather
+  than the DNS, so check `dig -x` first when SSO fails.
 - **The clock, promoted from hygiene to load-bearing.** Kerberos rejects tickets outside five
   minutes of skew. Phase 0.3 warned the clock would return "with certificates, JWTs and SAML
   assertions"; Kerberos is the least forgiving item on that list.
 
-**The cheap version, and what it costs:** authentik's LDAP outpost serving POSIX attributes to
-SSSD. Central users, groups and sudo for roughly no extra memory, from a component already being
-built — and no Kerberos, so no tickets, no SSO, no keytabs. It teaches nsswitch, PAM and SSSD. It
-does not teach why a domain differs from a user database.
+**Build order inside the step:** password login, then groups and sudo, then Kerberos SSO. SSO is
+tested on a joined VM against itself (`kinit`, then `ssh -K` to its own name): the tiers are
+isolated from each other and the host cannot reach the KDC, and self-SSH still exercises the
+principal, the PTR record and the keytab.
 
-**Done when:** `realm list` on the backend tier shows the domain, `id` resolves a directory user
-with no local account, and `kinit` on your workstation gets you into all three tiers with no
-password — or, if you take the cheap version, when `decisions.md` says plainly which half is
-missing.
+**Done when:** `realm list` on the backend tier shows `ad.lab.test`; `id alice` resolves with no
+local account; `alice` logs in with her directory password and can `sudo`, `bob` logs in and
+cannot, `carol` is refused, and `samba-tool user disable alice` refuses her next login; and, for
+SSO, `klist` shows a `host/` service ticket after a passwordless `ssh -K`.
 
 ### 14.1 Stand up authentik · `L` — split: stack up, then groups and flows
 

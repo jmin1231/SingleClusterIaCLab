@@ -2420,6 +2420,10 @@ reason to consider dropping the pin. See 3.1-1.
 
 ## 14.0-1 · Directory services are a third identity plane, and the lab has none
 
+> **AMENDED by [14.0-2](#140-2--samba-ad-dc-not-freeipa-and-140-comes-back-from-the-cut).** The three-plane framing and the four
+> obstacles stand. The choice of server does not: Samba AD DC replaces FreeIPA, the
+> domain is `ad.lab.test` rather than `lab.test`, and 14.0 is scheduled.
+
 **Not scheduled.** This entry settles the *shape* of the thing and where it would
 go, so that the gap is a decision rather than an oversight. Building it is gated
 on the resource question below.
@@ -3252,6 +3256,10 @@ although MinIO exists, that is a Phase 5 dependency this does not need.
 
 ## S-1 · Five cuts, to make the lab fit and to shorten it
 
+> **AMENDED by [14.0-2](#140-2--samba-ad-dc-not-freeipa-and-140-comes-back-from-the-cut)** for 14.0 only. Directory login comes back
+> as an optional step that runs with the monitoring stack stopped; authentik and the
+> rest of Phase 14 stay cut.
+
 **Decided:** five things leave the plan. Together they remove ~3.9 GB and eleven
 steps, and take the budget from 0.3 GB over to ~15.9 GB of 16.
 
@@ -3344,3 +3352,95 @@ deleting it warned that operations without an explicit key would fail. The mount
 now holds exactly one issuer, one key, and both defaults pointing at it. Check
 with `vault list pki/issuers` and `vault list pki/keys`: more than one of either
 means a migration was left half-finished.
+
+---
+
+## 14.0-2 · Samba AD DC, not FreeIPA, and 14.0 comes back from the cut
+
+**Decided:** host identity is built, as 14.0, on a **Samba AD DC**. A user who
+exists only in the directory logs into the tier VMs with their directory username
+and password, gets `sudo` only through a directory group, and is refused everywhere
+once disabled. Designed in `PLAN-enterprise.md` (*Directory login with Samba AD DC*,
+Phase 11). Amends [14.0-1](#140-1--directory-services-are-a-third-identity-plane-and-the-lab-has-none)
+and, for this step only, [S-1](#s-1--five-cuts-to-make-the-lab-fit-and-to-shorten-it).
+
+**Why Samba over FreeIPA, reversing 14.0-1.** The goal is specifically "log in with
+Active Directory credentials", and 14.0-1 already named Samba as the honest option on
+budget. Three reasons settle it:
+
+- **It is AD.** Kerberos, LDAP, AD-style DNS and SMB, so members join exactly as they
+  would join a Windows domain: `realm join`, `adcli`, SSSD's `ad` provider. FreeIPA
+  teaches the same concepts through a different client stack.
+- **One image.** It runs on Ubuntu 24.04 from the same Packer template as every other
+  VM. FreeIPA is RHEL-family, so it needs a second image pipeline and a second
+  hardening baseline to maintain.
+- **Memory.** About 1 GB against 1.5–2 GB for FreeIPA without Dogtag.
+
+What is given up is **HBAC**. FreeIPA expresses "which humans may reach which tier" as
+directory rules; here it is AD groups plus `realm permit -g` per tier (the backend
+permits only `lab-admins`). The policy still lives in the directory; only its
+enforcement point moves to SSSD on each VM.
+
+**The domain is `ad.lab.test`, realm `AD.LAB.TEST`, and not `lab.test`.** An AD domain
+controller is authoritative for its own DNS zone and registers members in it. `lab.test`
+belongs to CoreDNS, and handing it to the DC would move every existing name with it.
+CoreDNS **forwards** `ad.lab.test` and `0.10.in-addr.arpa` to the DC instead, so VMs
+keep the one resolver 8.2 gives them. This also settles the reverse-DNS open question
+for the directory's half: the PTR records live in the DC's reverse zone, the one place
+Kerberos needs them.
+
+**Placement: a shared-services tier, `tier-svc` `10.0.10.0/24`.** Free in
+`network-plan.md`'s VPC range. Identity serves all three tiers, so it gets its own:
+the tier ACL and the DC's security group allow only the AD ports in (53, 88, 123, 389,
+445, 464, 636, 3268–3269), and frontend, tunnel and backend stay as isolated from each
+other as before.
+
+**Login methods, in build order.** Password over SSH first (the requirement), then
+group-based access and `sudo` (the strongest demo: revocation is one `samba-tool user
+disable`), then Kerberos SSO as a stretch. SSO depends on SRV records, PTR records and
+clock skew under five minutes, which fail with errors naming the principal instead of
+the cause, so it is built on a base that already works. The SSO test runs on a joined
+VM against itself (`kinit`, then `ssh -K` to its own name): the tiers are isolated from
+each other and the host cannot reach the KDC, and self-SSH exercises the whole ticket
+flow, principal, PTR and keytab included, without opening a path to do it.
+
+**How CoreDNS reaches the DC.** CoreDNS runs on the host, which reaches VPC addresses
+only through public IPs (7.3). The DC gets a public IP with port forwards for 53/udp and
+53/tcp, and the `tier-svc` ACL admits them from the host's bridge address only. Answers
+still carry private addresses, which is correct: the clients that use them are inside
+the VPC.
+
+**Join with a delegated account, not the domain administrator.** A `joiner` account may
+only create computer objects in `OU=LabServers`; its password lives at
+`secret/ad/joiner`. `secret/ad/administrator` is read once, to provision the DC, and
+never reaches a member. The one-time-password join (`adcli preset-computer`) is the
+enterprise step after this one; it removes even the joiner password from the VMs.
+
+**Image vs instance.** The Packer image carries the client packages and the CA, and
+**never** a keytab, an `sssd.conf` or a join. A keytab is the machine's identity; a
+template carrying one makes every clone the same computer. The image build fails if
+`/etc/krb5.keytab` exists.
+
+**Budget, which is what keeps this optional.** Committed is ~15.9 GB of 16, so the DC's
+~1 GB does not fit beside the full estate. 14.0 runs with **stop-order 3, the monitoring
+stack, stopped**, which is the treatment authentik had before S-1. That costs visibility
+for the duration and breaks nothing. Measured numbers replace the 1 GB estimate when it
+first runs.
+
+**Rejected:**
+- **FreeIPA** (14.0-1's pick): above.
+- **authentik's LDAP outpost** (14.0-1's cheap version): authentik is cut by S-1, and
+  its outpost gives LDAP without Kerberos, so no join and no domain.
+- **The DC as a container on the host:** a domain controller on the hypervisor is not
+  how one is deployed, and Samba's AD DC wants filesystem ACLs and its own DNS port.
+- **`lab.test` as the AD domain:** above.
+
+**At 32 GB** the budget argument goes away: the DC runs permanently, and authentik
+can return and federate to it (`resource-budget.md`, *If the target has 32 GB*).
+The choice of Samba does not change, because its other two reasons are not about
+memory.
+
+**Made alongside this entry:** row 14 in `network-plan.md` (`tier-svc`); rule 8 in
+`resource-budget.md` (the monitoring stop); a commented `ad.lab.test` forward in
+`services/coredns/Corefile`, to enable at 14.0 once the DC's public IP exists; and
+`build-order.md` 14.0 rewritten for Samba.

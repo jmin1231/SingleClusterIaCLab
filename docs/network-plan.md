@@ -27,6 +27,7 @@ Three kinds of value appear here and the distinction matters:
 | 11 | k3s pod CIDR | `10.42.0.0/16` | k3s default |
 | 12 | k3s service CIDR | `10.43.0.0/16` | k3s default |
 | 13 | Docker bridges | `172.17.0.0/16` – `172.31.0.0/16` | auto-allocated, on demand |
+| 14 | Shared-services tier (14.0, optional) | `10.0.10.0/24` · Samba AD DC `10.0.10.10` · AD DNS `ad.lab.test` | chosen (decision 14.0-2) |
 
 Rows 1–3 are filled once the VM exists. Rows 7–10 follow the reference's values,
 which were checked against rows 11–13 rather than inherited on trust.

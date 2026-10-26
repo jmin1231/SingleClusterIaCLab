@@ -140,6 +140,13 @@ and the backend tier now has ~0.3 GB of slack it did not have before.
    needs the stop-order applied first — and at 16 GB that is mandatory, not
    prudent.
 
+8. **The domain controller (14.0) runs only with monitoring stopped.** The Samba
+   AD DC is ~1 GB (estimate; measure with `virsh dominfo` on first run) against a
+   committed ~15.9 GB, so it has nowhere to go beside the full estate. Apply
+   stop-order 3 first, the same treatment rule 4 gives authentik. Logins depend on
+   it while it runs; stopping it again ends new directory logins, while sessions
+   already open survive and SSSD's cache lets recent users back in. Decision 14.0-2.
+
 ## Stop-order
 
 Ordered by **blast radius, not by size**. The question is not "what is biggest"
@@ -163,6 +170,40 @@ fourth is the line where it starts to hurt, which is the point of listing it.
 | **Backend tier VM** | It is the entire cluster — and from Phase 13 it is also where Loki lives, so stopping it blinds the thing you would use to find out why. |
 | **CloudStack management server** | Running VMs survive without it — the data plane is independent — but nothing can be created, destroyed or reconfigured. |
 | **CoreDNS** | Every name in the lab, including the ones the cluster resolves. |
+
+## If the target has 32 GB
+
+**Not the plan; the options it would open.** Everything above is sized for 16 GB.
+If the target VM is 32 GB instead (the guest, not the development host), the
+~16 GB of headroom buys back, in this order, the things that were cut or
+scheduled for memory reasons. Figures are this document's estimates.
+
+| Option | Adds | Running total | What it changes |
+|---|---|---|---|
+| Today's committed estate | — | ~15.9 GB | baseline plus the 2 GB reserve |
+| Directory login runs permanently (14.0) | ~1.0 GB | ~16.9 GB | Rule 8 lifts; the DC stays up beside monitoring |
+| authentik, 14.1–14.5 back from S-1 | ~2.0 GB | ~18.9 GB | Rule 4 lifts; app SSO, with authentik federated to the DC as an LDAP source, so one identity covers apps and hosts |
+| Kyverno + signature admission, 11.3–11.4 back | ~0.4 GB | ~19.3 GB | Admission control returns |
+| Two k3s agents by default, 9.2 back | ~2.5 GB | ~21.8 GB | Rule 3 lifts: ~1 GB per agent plus Cilium's agent (S-1 counted the lighter ~1.5 GB pair); scheduling is something the cluster shows you again |
+| Image rebuild without the stop-order | ~4.0 GB transient | ~25.8 GB peak | Rule 5 and the scenario below become prudence rather than procedure |
+| Reserve raised to 4 GB | +2.0 GB | ~27.8 GB peak | Page cache and burst room for the JVMs |
+
+That leaves ~4.2 GB unallocated at the peak, which is the margin to keep rather
+than spend.
+
+**Taken together, the stop-order stops being routine.** At 32 GB, rules 3, 4, 5
+and 8 all lift: nothing has to stop for a phase to run. The stop-order table stays
+as the emergency procedure.
+
+**What 32 GB does not change:**
+- **FreeIPA over Samba.** Memory stops arguing against it (+0.5–1 GB), but the
+  reasons in 14.0-2 that are not about memory still hold: a second, RHEL-family
+  image pipeline, and AD protocols being the point of the exercise.
+- **The S-1 cuts that were not about memory.** The two-tier openssl CA saved no
+  memory, and MinIO's 0.3 GB was the smaller reason it went; restoring either is
+  rework against 3.4 and 5.2, not a budget question.
+- **Disk.** Two agents and a resident DC add ~30 GB of primary storage against
+  ~60 GB of margin in the disk budget below; check `df -h /` before adding both.
 
 ## The disk budget
 

@@ -92,6 +92,7 @@ The lab deliberately mirrors enterprise practices with local stand-ins:
 | Image hardening/scan | ansible CIS hardening + Trivy + Syft (SBOM) |
 | VPC provisioning | Terraform + `cloudstack/cloudstack` (remote state in MinIO) |
 | Config / VPN | Ansible + WireGuard (site-to-site, systemd) |
+| Directory / host login | Samba AD DC (VM) + `realmd`/`adcli`/SSSD on the tier VMs |
 | Policy / quality | Conftest/OPA, tflint, tfsec or checkov, ansible-lint, yamllint, shellcheck |
 | Observability | node_exporter + WireGuard metrics → Prometheus/Grafana/Loki |
 | CLIs | CloudMonkey (`cmk`), `mc`, `jq`, `qemu-utils`, `cloud-localds` |
@@ -129,6 +130,7 @@ issue_191/
 | `policy` | Conftest/OPA over `terraform plan` |
 | `setup` | Phase 4 (terraform plan → apply, remote state, secrets from Vault) |
 | `tunnel` | Phase 5 (ansible-playbook: site-to-site WireGuard) |
+| `directory` | Phase 11 (Samba AD DC, join the VMs, directory logins) **[ent]**; run after `tunnel` |
 | `verify` | automated checks (handshake, subnet-over-VPN reachability, isolation, egress deny); exit non-zero on failure |
 | `demo` | human-readable proof: direct path blocked, WireGuard path works |
 | `status` | read-only inventory of what exists |
@@ -219,6 +221,21 @@ Each step is scoped to a single focused work session with a clear exit check.
 ### Phase 10 — Docs **[core + ent]**
 - **10.1** README (what/why, prerequisites, `up`/`down`, expected output, the isolation+VPN demo, caveats). `docs/adr/` for the key decisions (CloudStack, WireGuard site-to-site, Vault, remote state, scoped account). `docs/runbook.md` for failure recovery (zone won't enable, template stuck, tunnel down, restore failed).
   Exit: a new operator can run `up → demo → down` from the docs alone.
+
+### Phase 11 — Directory login: AD users on the VMs **[ent]**
+Design and rationale: see *Directory login with Samba AD DC* under "Human & user access to the VMs".
+- **11.1** Shared-services tier + DC VM: Terraform adds `tier-svc` `10.0.10.0/24` and a `dc` VM (Medium Instance, 1 GB) at `10.0.10.10`; tier ACLs allow the data tiers to reach `tier-svc` **on the AD ports only**; an `sg_directory` group on `dc` does the same per VM; members get a route to `10.0.10.0/24` via their tier gateway.
+  Exit: `dc` Running; from a tier VM, `nc -zv 10.0.10.10 88` and `389` succeed and `22` from a tier VM fails.
+- **11.2** Provision the domain (Ansible `samba_dc` role): install `samba-ad-dc krb5-user`; stop and mask `smbd`/`nmbd`/`winbind`; point the DC's own resolver at itself (disable the `systemd-resolved` stub); `samba-tool domain provision --realm=AD.LAB.TEST --domain=LAB --server-role=dc --dns-backend=SAMBA_INTERNAL --adminpass=<Vault>`; install the generated `krb5.conf`; enable `samba-ad-dc`. Then create the reverse zone (`samba-tool dns zonecreate dc 0.10.in-addr.arpa`), `OU=LabServers`, a delegated `joiner` account (may only create computer objects in that OU), groups `lab-users` and `lab-admins`, and demo users `alice` (lab-admins), `bob` (lab-users), `carol` (no group), passwords from Vault.
+  Exit: `host -t SRV _ldap._tcp.ad.lab.test 10.0.10.10` answers; `kinit administrator@AD.LAB.TEST` works on `dc`; `samba-tool user list` shows the demo users.
+- **11.3** Join the members (Ansible `ad_member` role): FQDN hostname (`vm-a.ad.lab.test`); DNS: the lab resolver forwards `ad.lab.test` and `0.10.in-addr.arpa` to the DC (with no lab resolver, a `systemd-resolved` drop-in with `DNS=10.0.10.10` and `Domains=~ad.lab.test`); `chrony` syncs from `dc`; `realm join --user=joiner --computer-ou=OU=LabServers ad.lab.test` with the joiner password from Vault on stdin. SSSD: `use_fully_qualified_names = False`, `fallback_homedir = /home/%u`, `ad_gpo_access_control = permissive`. Access: `realm deny --all` then `realm permit -g lab-users lab-admins`; `pam-auth-update --enable mkhomedir`; `/etc/sudoers.d/lab-admins` with `%lab-admins ALL=(ALL) ALL`; sshd allows password/keyboard-interactive auth.
+  Exit: `realm list` shows `ad.lab.test`; `id alice` resolves with no local account; `/etc/krb5.keytab` exists **on the VM** (and never in the image).
+- **11.4 [stretch]** Kerberos SSO: PTR records for every member; `GSSAPIAuthentication yes` on the VMs. Test on a joined VM against itself: log in as `alice`, `kinit alice@AD.LAB.TEST`, then `ssh -K alice@vm-a.ad.lab.test` with no password. Self-SSH is deliberate: the tiers are isolated from each other, and the bastion cannot reach the KDC on `tier-svc`, so this is the one path that exercises the full ticket flow without opening a new hole.
+  Exit: `klist` on `vm-a` shows a `host/vm-a.ad.lab.test@AD.LAB.TEST` service ticket after the login.
+- **11.5** Verify (add to `verify`): `alice` logs in with her AD password and can `sudo`; `bob` logs in and cannot `sudo`; `carol` is refused at login; `samba-tool user disable alice` makes her next login fail, and re-enabling restores it. Passwords come from Vault (`sshpass` in the test only).
+  Exit: all five pass; non-zero on any wrong expectation.
+- **11.6** Teardown: `realm leave` (removes the computer object) before `terraform destroy`; delete the `secret/ad/*` paths in Vault.
+  Exit: no computer objects or AD secrets left behind.
 
 ---
 
@@ -406,6 +423,152 @@ control plane); Tailscale/Headscale for the 3-network churn topology (ephemeral 
 
 ---
 
+## Human & user access to the VMs **[ent]**
+
+Access splits into **two planes**, and conflating them is the classic mistake. The
+core lab is management-plane-only (admin SSH scoped to `mgmt_cidr`, service reachable
+only over the tunnel); enterprise adds the data plane and a brokered privileged plane.
+
+| | Data / service plane | Privileged plane |
+|---|---|---|
+| **Who** | end users ("conduct business") | admins *and* any human who needs a shell |
+| **What** | the application (HTTP/API/DB), never the OS | interactive OS login (SSH/RDP) |
+| **Grant by** | published service endpoint | **identity**, not a network hole |
+
+### Data-plane ingress (users use the app, not the OS)
+
+Expose the *service*, never SSH or the mgmt NIC:
+- **CloudStack:** acquire a public IP on the VPC, add a **port-forward or LB rule**
+  (`cloudstack_ipaddress` + `cloudstack_port_forward`/`cloudstack_loadbalancer_rule`)
+  to the tier VM; open the **tier ACL** for the service port only; the VM's nftables
+  allows the app port on the **tier NIC** (contrast the core demo, which pins the
+  service to `iifname wg0` = internal-only).
+- **Enterprise front door:** LB + **WAF** + **API gateway** terminate TLS and do
+  authn/z; backends never see raw internet. Scope the ACL source where possible.
+
+### Privileged-plane login (someone needs a shell)
+
+Treat "log in to the VM" as privileged **regardless of the person's title**. Never
+widen `mgmt_cidr`, share `lab_ssh_key`, or scatter static per-user keys (no
+attribution, no MFA, no revocation). Instead **broker login by identity**.
+
+**1. One controlled entry point — users never hit the VM directly:**
+
+| Approach | Path | Inbound SSH on the VM |
+|---|---|---|
+| Bastion / jump host | user → bastion (authn) → VM | from bastion only |
+| Access proxy (Teleport, Boundary) | user → proxy (SSO+MFA) → VM | from proxy only, short-lived cert |
+| Agent dials out (AWS SSM, Cloudflare Tunnel, Tailscale SSH) | VM agent → broker → user | **none** (VM connects outbound) |
+
+The agent-based options are strongest: the VM opens an **outbound** session, so there
+is **zero inbound SSH** to firewall — the network attack surface for login disappears.
+
+**2. Identity + short-lived credentials instead of static keys:**
+- **SSO/OIDC** (Keycloak) as the identity source; **MFA** enforced at login.
+- **SSH certificate authority** — the broker issues a **short-lived cert** bound to the
+  user's identity+role+TTL; the VM trusts the **CA**, not individual keys, so expiry =
+  automatic revocation and nothing permanent lands on the host.
+- **RBAC** — which users may log into which VMs as which account.
+- **Session recording + audit** — every interactive session logged (compliance).
+- **JIT / approval** — access granted for a window on request, not standing.
+
+**3. Accounts:** never share `ubuntu` for real users (lose attribution). Use
+**directory-integrated** accounts (SSSD + LDAP/AD, configured by Ansible) or
+**broker-mapped** logins (the proxy maps an SSO identity to an OS user on the fly).
+
+**Firewall end state:** the SG allows SSH **only from the bastion/proxy**
+(`ip saddr <broker_cidr> tcp dport 22 accept`), tighter than `mgmt_cidr`; with an
+agent-based broker, **drop the inbound SSH rule entirely**.
+
+**Tooling:** Teleport · HashiCorp Boundary · Cloudflare Access+Tunnel · AWS SSM
+Session Manager · Tailscale SSH — all pair with Keycloak (OIDC) and the
+Headscale/Tailscale identity model above (access by `tag:`/identity, not by subnet).
+
+**Core-lab note:** the host already *is* the bastion — `ssh -J user@host
+ubuntu@<vm mgmt IP>` is the scoped admin path and needs no firewall change. That is
+sufficient for the JQR demo; the broker/CA/RBAC stack is the enterprise layer on top.
+
+
+### Directory login with Samba AD DC **[ent]**
+
+**Goal:** a person who exists only in Active Directory (`alice`) logs into a tier VM
+with her **AD username and password**, gets `sudo` only because of an AD group, and
+loses access the moment she is disabled in AD. No local account, no SSH key, nothing
+per-user on the VM. Built as Phase 11.
+
+**Why Samba AD DC** (recorded as decision 14.0-2 in `docs/decisions.md`, replacing
+14.0-1's FreeIPA pick for the host-identity plane):
+- It speaks Active Directory's own protocols (Kerberos, LDAP, AD-style DNS, SMB), so the
+  VMs join exactly as they would join a Windows domain: `realm join`, `adcli`, SSSD's
+  `ad` provider. What you learn transfers directly to a real AD.
+- It runs on Ubuntu 24.04 from the **same golden image**. FreeIPA needs a RHEL-family
+  guest, which means a second Packer pipeline.
+- About 1 GB of RAM.
+- Trade-off: no FreeIPA-style HBAC rules. Per-tier login policy is AD groups plus
+  `realm permit -g` on each tier instead (e.g. only `db-admins` on the backend).
+
+**Login methods, in build order:**
+
+| Step | Method | What it proves | Why this order |
+|---|---|---|---|
+| core | SSH with AD password | The VM accepts directory credentials; SSSD checks them with the DC over Kerberos | The requirement itself; needs only the join and sshd password auth |
+| core | Group-based access + sudo | Authorization comes from the directory, and revocation is central (disable in AD, refused everywhere) | Two config lines on top of the join, and the strongest demo |
+| stretch | Kerberos SSO (`kinit` once, GSSAPI) | What makes a *domain* more than a user database: tickets and host principals | Depends on SRV records, PTR records and the clock, which fail with misleading errors, so build it on a working base |
+
+**Topology:**
+```
+ tier-svc 10.0.10.0/24 (shared services)
+   dc 10.0.10.10  Samba AD DC: realm AD.LAB.TEST, DNS for ad.lab.test, KDC, LDAP, NTP
+        ▲  allowed in (ACL + sg_directory): 53 dns · 88 kerberos · 123 ntp ·
+        │  389/636 ldap/ldaps · 445 smb · 464 kpasswd · 3268/3269 global catalog
+        │
+ tier-a / tier-b VMs: realm-joined members (SSSD), route 10.0.10.0/24 via tier gw
+        ▲
+        │  ssh alice@<vm>  →  password  →  SSSD on the VM  →  KDC on dc
+ bastion (the host, per the core-lab note above)
+```
+Identity is a shared service, so it gets its own tier: the ACL and the DC's security
+group allow only AD ports into it, and the data tiers stay isolated from each other.
+The bastion needs no `alice` account; the SSH client side never checks her identity,
+the VM does.
+
+**DNS breaks first.** The domain is the **subdomain `ad.lab.test`** (realm
+`AD.LAB.TEST`), not `lab.test`: an AD domain controller must be authoritative for its
+own DNS zone, and `lab.test` already belongs to the lab's resolver. Members find the
+DC through SRV records (`_ldap._tcp.ad.lab.test`, `_kerberos._udp.ad.lab.test`), which
+Samba's internal DNS publishes automatically. The lab resolver **forwards** `ad.lab.test`
+and the reverse zone to the DC, so members keep one resolver and every other name
+resolves as before. The SSO step needs those PTR records, which closes the reverse-DNS
+gap noted in `docs/decisions.md`.
+
+**Image vs instance (Phase 3).** Bake trust, never identity:
+- **Bake:** `sssd`, `sssd-tools`, `libnss-sss`, `libpam-sss`, `realmd`, `adcli`,
+  `samba-common-bin`, `krb5-user`, `chrony`; the CA root; the `mkhomedir` PAM profile.
+- **Never bake:** a completed join, `/etc/krb5.keytab`, `/etc/sssd/sssd.conf`, the SSSD
+  cache, a hostname. A keytab is the machine's identity; every clone would authenticate
+  as the same computer. A build check fails the image if `/etc/krb5.keytab` exists.
+
+**Secrets (Phase 2, Vault):** `secret/ad/administrator` (used only to provision the DC),
+`secret/ad/joiner` (the delegated join account), `secret/ad/test-users` (demo passwords for
+`verify`). The domain administrator password never reaches a member VM.
+
+**Enterprise hardening on top:**
+- **One-time-password join:** pre-create each computer with
+  `adcli preset-computer --one-time-password`, store the OTP in Vault per host, and join
+  with `realm join --one-time-password`. That removes the joiner password from the VMs;
+  the OTP is spent on use.
+- **LDAPS / signing:** trust the lab CA on the DC and members; require LDAP signing.
+- **MFA:** AD password login over SSH has none. Add it at the broker (Teleport/Boundary
+  with OIDC) or with a PAM module; or federate authentik to AD as an LDAP source so
+  web SSO and host login share one identity.
+- **Cached credentials:** SSSD caches logins by default, so a disabled user may still log
+  in while the DC is unreachable. Decide per tier (`cache_credentials = False` on the
+  backend).
+- **Churn:** ephemeral frontends must `realm leave` (or have their computer object
+  deleted) on destroy, or AD fills with stale computer accounts.
+
+---
+
 ## Open-source tool choices (2026 review)
 
 Researched swaps where a more standard / better-licensed OSS tool fits. Optional;
@@ -445,3 +608,122 @@ decide per phase.
 - **Headscale (if used for the VPN):** PostgreSQL backup is mandatory (it holds nodes,
   keys, and ACL state — losing it loses the mesh); no official web console; server-side
   ACL linting is weak, so validate the HuJSON ACL in CI.
+
+---
+
+## Live-run lessons (from the core-lab first run — engineer these in)
+
+The first end-to-end `up` on a **non-pristine host** surfaced failures a fresh VM would
+have hidden. Bake these in so the enterprise build (CI runners, re-used hosts) does not
+repeat them.
+
+1. **Preflight the apt state; fail fast and loud.** The vendored installer runs
+   `set -euo pipefail`, so any apt source that makes `apt-get update` exit non-zero — a
+   leftover `docker.sources` with an unexpanded `${UBUNTU_CODENAME}`, or a rotated
+   HashiCorp key (`NO_PUBKEY`) — **silently kills the install** mid-run. Run a strict
+   `apt-get update` preflight that dies naming the offending source *before* any heavy
+   step, and make our own repo setup **always (re)install the signing key** rather than
+   skipping because the `.list` already exists (keys rotate).
+
+2. **A reused host's old `cloud` database is poison.** A prior install's
+   `cloud`/`cloud_usage` with an older schema (e.g. missing
+   `configuration.default_value`) makes the 4.22 management server loop on HTTP 503 and
+   never become ready — and the installer tracker's `db_deployed=yes` makes a re-run
+   **skip** redeploying, so it never self-heals. Teardown must drop the databases **and**
+   delete the installer tracker; the enterprise build should assert schema/version
+   compatibility (or always deploy fresh) before trusting an existing DB.
+
+3. **All-in-one agent↔management startup is a race.** The KVM agent must not connect
+   before the management API is serving. The readiness gate polls `/client/` for a real
+   HTTP 200 (not just an open port), but systemd's default `TimeoutStartSec=90s` is
+   shorter than the gate's wait budget, so on first boot — where management init takes
+   minutes — the agent **start times out**. Raise `TimeoutStartSec` on
+   `cloudstack-agent` above the readiness budget, gate on a 200 (not port-open), and
+   expect multi-minute first-boot management init.
+
+4. **Teardown must not depend on state it just deleted, and must be `set -e`-safe.**
+   `restore_netplan` read the backup path from the tracker that `remove_files` had
+   already deleted, and a lookup helper that returned non-zero on a missing key aborted
+   `down` under `set -e` **before the reboot**. Rules: keep the netplan backup *outside*
+   the repo and reference it **directly** (not via a tracker); make tracker/lookup
+   helpers return success on "not found"; order teardown so network restore never
+   depends on deleted markers; keep the reboot out of the reach of an earlier failure.
+
+5. **Leftovers from prior runs cause silent, confusing failures.** Custom systemd
+   drop-ins, `/usr/local/sbin` wait scripts, extra bridges, and third-party apt sources
+   from earlier installs all bit us. Teardown must remove **everything** the lab and its
+   vendored installer create; CI/enterprise runs should start from an
+   **ephemeral/throwaway host or image** so no cross-run state exists, and/or run a
+   preflight that refuses to proceed when prior-install artifacts are detected.
+
+6. **Make provision idempotency health-based, not flag-based.** The core lab guards the
+   install with a `cloudstack_installed=yes` tracker flag that is only written *after* a
+   fully successful run — so a mid-run failure (e.g. the zone-deploy timeout) leaves the
+   flag unset and re-runs re-enter the installer. The enterprise build should gate on
+   **actual health**: skip provision only when the management API returns `200` **and** a
+   deployed, Enabled zone exists **and** the required offerings are present. Pair this
+   with lesson 2 — on a *fresh* provision (no installer tracker yet), **drop any
+   pre-existing `cloud`/`cloud_usage` DB** so the installer can never inherit an ancient,
+   un-migratable schema. (A fresh deploy seeds the DB at the `4.0.0` baseline and the
+   management server migrates it to the target on first start; that migration is normal
+   but can run long — gate on `200`, don't assume a fixed timeout.)
+
+7. **Scripts invoked directly need the executable bit.** `cmd_image` ran
+   `image-build-all.sh` directly; a freshly-authored file without `+x` fails with
+   "Permission denied." Set `+x` on every script (git preserves it once committed) or
+   invoke via `bash <script>`.
+
+8. **A sourced helper must not set generic globals.** `cloudmonkey-install.sh` set
+   `SOURCE_DIR`, which clobbered the `SOURCE_DIR` of the scripts that sourced it, sending
+   `packer build` / `terraform -chdir` to the wrong directory. Give sourced files
+   private variable names (e.g. `CMK_DIR`).
+
+9. **Keep Packer's build target and `${path.root}` paths consistent with the layout.**
+   Moving the `.pkr.hcl` files into a `hcl/` subdir broke both the build invocation and
+   the `http_content` / `output_directory` paths. Point the build at the subdir and use
+   `${path.root}/../…` for sibling dirs; add a build-skip when the artifact already
+   exists locally (so a failed upload re-run doesn't rebuild or hit "output dir exists").
+
+10. **The Chainguard `minio-client` entrypoint is `mc`.** `docker run <img> sh -c "…"`
+    passes `sh` to `mc` ("not a recognized command"); override with `--entrypoint sh`.
+
+11. **Terraform's cloudstack provider can't create an untagged shared network** — its
+    `vlan` field is numeric, and a tagged VLAN isn't host-reachable on a flat LAN.
+    Create the mgmt shared network out-of-band via `cmk` (`vlan=untagged`) and hand its
+    UUID to Terraform as a variable.
+
+12. **ConfigDrive userdata is delivered by the VM's default NIC's network.** With a
+    ConfigDrive-pinned image, the default NIC's network offering must serve
+    `UserData=ConfigDrive` or the SSH key never lands — shared networks default to
+    VirtualRouter userdata, so create a shared offering with `UserData=ConfigDrive`.
+
+13. **Pick the right Terraform inventory plugin.** `ansible_host`/`ansible_group`
+    resources are read by `cloud.terraform.terraform_provider` (point `project_path` at
+    the initialized project), NOT `terraform_state` (which only maps native cloud-instance
+    types like `aws_instance`). Paths these plugins receive must be **absolute** (they run
+    `terraform` from elsewhere), and `terraform_state` requires the config file be named
+    `*terraform_state.yml`.
+
+14. **SSH-launched background processes must detach all three stdio.** A long-running
+    listener started over SSH hangs/aborts unless **stdin** is redirected too
+    (`nohup … </dev/null >/dev/null 2>&1 &`), not just stdout/stderr.
+
+15. **A WireGuard Endpoint must never fall within its own AllowedIPs.** Endpoint = peer
+    tier IP while `AllowedIPs` covered that tier → the handshake routed *into* the tunnel
+    and never completed. Run the tunnel transport over an underlay the tunnel does not
+    route (here, the mgmt network); for the enterprise build use a **dedicated transit
+    network** for the VPN underlay, separate from the data tiers and the admin network.
+
+16. **Remote verification listeners must outlive the SSH session.** The `verify` demo
+    service started over SSH with `nohup`/`setsid` didn't persist, so the "service
+    reachable over the tunnel" check saw a connection-refused (RST) and failed. Start
+    such helpers as **transient `systemd-run` units** (stopped on teardown) so they run
+    independently of the SSH connection. (A fast `rc=7` refused vs. a `rc=28` timeout also
+    distinguishes "no listener" from "firewall dropped it" — useful when debugging.)
+
+**Meta-lesson:** the first batch (1–6) appeared only because the test host was *reused* —
+so make "fresh, ephemeral host" a hard precondition (a dedicated CI runner image or a
+disposable VM) with the preflight checks as the safety net. The rest (7–16) are build /
+integration-design bugs to fix in code: tight CloudStack/Terraform/Ansible/WireGuard
+integration has many sharp edges, so budget real end-to-end iteration and keep every
+cross-tool assumption (paths, NIC defaults, userdata delivery, tunnel underlay) explicit.

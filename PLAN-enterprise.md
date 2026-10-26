@@ -1,729 +1,879 @@
-# issue_191 — Enterprise-style VPC + VPN on CloudStack (full target)
+# SingleClusterIaCLab — Build Plan
 
-> **Scope note:** this is the full enterprise-shaped build, kept for exam prep and
-> later hardening. The **core JQR demo** is built first — see [`PLAN.md`](PLAN.md).
-> Build the core, then layer these phases on top. Phases are tagged **[core]**
-> (also in `PLAN.md`) or **[ent]** (enterprise hardening added here).
+One Ubuntu 24.04 host becomes a small, enterprise-shaped private cloud, built and
+torn down by one command:
 
-**Goal:** `sudo ./bootstrap.sh up` takes a fresh Ubuntu 24.04 VM and stands up a
-small but enterprise-shaped private cloud: Apache CloudStack as the IaaS, a golden
-image built by Packer and shipped through an object store, a VPC with two
-**isolated** subnets (one VM each — no direct path between them), and a WireGuard
-**site-to-site** VPN, configured by Ansible, as the *only* route between the
-subnets. Everything is secrets-managed, remote-stated, policy-gated, and
-pipeline-drivable. `sudo ./bootstrap.sh down` tears it all down and restores the
-host to its original fresh-VM state (including the original netplan), then
-verifies the revert.
+- **IaaS:** Apache CloudStack on KVM, provisioned by Terraform from a hardened golden image.
+- **Network:** a VPC with isolated tiers, default-deny ACLs, no direct internet from any
+  tier, and a WireGuard site-to-site VPN as the only path between two of them.
+- **Application platform:** k3s running a three-tier application (HTML frontend → API →
+  PostgreSQL) in an Istio ambient mesh, with Vault as the encryption service and the CA.
+- **Control plane:** Vault, CoreDNS, MinIO, Gitea and an egress proxy on the host, driving
+  everything with secrets issued at run time.
 
-Satisfies JQR 191 (*construct a VPC and implement a VPN to provide access*) while
-mirroring how a platform team would actually run this.
+`sudo ./bootstrap.sh up` builds it. `sudo ./bootstrap.sh demo` proves every
+requirement. `sudo ./bootstrap.sh down` removes it and restores the host, and
+`sudo ./bootstrap.sh revert-check` (after the reboot) proves the host matches its
+original baseline.
 
-## What "enterprise, but local" means here
+This document is complete on its own: everything needed to build the lab is here.
 
-The lab deliberately mirrors enterprise practices with local stand-ins:
+---
 
-| Enterprise practice | Local realization in this lab |
+## 1. Requirements and how each is proven
+
+| ID | Requirement | Built in | Proven by (check IDs, §12) |
+|---|---|---|---|
+| **R1** | Construct a VPC and implement a VPN to provide access | Phases 5, 6 | N1–N5 |
+| **R2** | Deploy a database and an encryption service for a cloud application | Phases 2, 8 | E1–E3, T1–T2, Z1–Z2, P1–P3, S1–S2 |
+| **R3** | Back up and restore the encrypted data; show key loss destroys it | Phase 9 | B1–B2 |
+| **R4** | Reversible infrastructure: teardown restores the host exactly | Phase 13 | V1–V5 |
+| X1 | Directory login: AD users, AD-group sudo, central revocation | Phase 7 **[ext]** | D1–D4 |
+| X2 | Pipeline-driven delivery with gates | Phase 10 **[ext]** | G1–G3 |
+| X3 | Observability of tunnel, mesh denials and Vault access | Phase 11 **[ext]** | O1–O3 |
+
+**Tags.** Everything untagged is **core**: required for R1–R4. **[ext]** marks
+enterprise extensions built on a working core. `up --core` builds the core
+only; `up` builds everything.
+
+---
+
+## 2. Principles
+
+- **Bash at the door, Python inside.** `bootstrap.sh` checks for Python ≥ 3.12 and
+  runs `PYTHONPATH=src exec python3 -B -m lab "$@"`, nothing more. Every phase,
+  check, demo and teardown is Python in `src/lab/`, type-checked with mypy. External
+  tools (`cmk`, `terraform`, `ansible-playbook`, `packer`, `kubectl`, `vault`,
+  `istioctl`, `mc`, `docker`) are called through thin wrappers, never
+  re-implemented. The only shell in the repo is the vendored upstream CloudStack
+  installer, which is third-party.
+- **Every phase owns its teardown.** Each phase module exports `up()`, `down()` and
+  `check()`. `down` composes the `down()`s in reverse build order, so a phase can't
+  be built without the code to remove it.
+- **Idempotent on health, not on flags.** A phase is skipped only when its `check()`
+  passes against the real system (API returns 200, resource exists and is healthy).
+  The tracker in `state/tracker.json` records progress for resuming; it is never
+  proof that something is done.
+- **Least privilege.** Terraform uses a scoped CloudStack account. Each workload and
+  each pipeline gets its own Vault identity and policy. Nothing in automation uses
+  the CloudStack global admin or the Vault root token after bootstrap.
+- **Secrets are issued at run time**, with the exceptions in §6, each named and
+  protected.
+- **Pinned and immutable.** Every version, image digest, provider and chart is
+  pinned in `src/lab/versions.py`. Images are built, scanned and published once, then
+  never patched in place. Nothing installs software at container start.
+- **Gates before change.** Lint runs from the first commit. Terraform cannot apply
+  without passing the policy gate, on the local path and in CI alike.
+- **Fresh host assumed, dirty host refused.** Preflight refuses a host showing
+  leftovers from an earlier install rather than trying to work around them.
+
+---
+
+## 3. Enterprise practice → local realization
+
+| Enterprise practice | In this lab |
 |---|---|
-| Cloud IaaS (AWS/Azure/GCP) | Apache CloudStack + KVM on one host |
-| GitOps / PR-gated CI/CD | Gitea + containerized Gitea Actions runner |
-| Secrets manager (Vault/KMS/Secrets Manager) | HashiCorp Vault (or OpenBao) container |
-| Remote Terraform state + locking | MinIO S3 backend with lockfile |
-| Least-privilege deploy identity | Scoped CloudStack **account + role** for IaC (not global admin) |
-| Golden-image factory + registry | Packer + CIS hardening + Trivy scan → MinIO image bucket, versioned |
-| Policy-as-code guardrails | Conftest/OPA over the Terraform plan |
-| Security & quality gates | shellcheck, yamllint, ansible-lint, tflint, tfsec/checkov, trivy |
-| Network segmentation + egress control | VPC tiers, default-deny ACLs, default-deny egress allow-list |
-| Site-to-site VPN | WireGuard subnet routing (AllowedIPs = peer CIDR) + systemd |
-| Observability | node + WireGuard metrics → Prometheus/Grafana/Loki |
-| Immutable, reversible infra | tracker idempotency + full teardown + revert verification |
-| ADRs / runbooks | `docs/adr/*`, `docs/runbook.md` |
+| Cloud IaaS | Apache CloudStack + KVM |
+| Least-privilege deploy identity | CloudStack account `iac` with a restricted role |
+| Secrets manager + KMS | Vault: KV v2, **Transit** (encryption as a service), AppRole, Kubernetes auth |
+| Private CA + certificate automation | Vault PKI (`lab.test CA`); cert-manager in the cluster; `lab certs` on the host |
+| Remote Terraform state + locking | MinIO S3 backend, lockfile |
+| Golden-image factory | Packer + CIS-style hardening + Trivy + SBOM → versioned in MinIO |
+| Container registry | Gitea registry; images scanned before push |
+| Policy-as-code | Conftest/OPA on `terraform plan -json`, before every apply |
+| Network segmentation | VPC tiers, default-deny ACLs both directions |
+| Egress control | No tier has internet; an allow-listing forward proxy (Squid) on the host |
+| Site-to-site VPN | WireGuard, subnet-routed, systemd-managed |
+| Managed Kubernetes | k3s, Secrets encrypted at rest |
+| Zero-trust service traffic | Istio ambient: STRICT mTLS, SPIFFE identities, `AuthorizationPolicy` |
+| Managed database | PostgreSQL 16 StatefulSet; app credentials in Vault, not in manifests |
+| API front door | Istio Gateway (Gateway API), TLS with a Vault-issued certificate |
+| Backup / DR | Vault Raft snapshot + `pg_dump`, with a restore drill |
+| Directory **[ext]** | Samba AD DC; members joined with realmd/SSSD |
+| CI/CD **[ext]** | Gitea Actions runner, scoped Vault identity |
+| Observability **[ext]** | Prometheus, Grafana, Loki, Alloy |
 
-## Architecture
+---
+
+## 4. Architecture
 
 ```
-                              host (Ubuntu 24.04, KVM)
- ┌──────────────────────────────────────────────────────────────────────────┐
- │  control plane (docker):  Gitea + Actions runner · Vault · MinIO          │
- │        │ pipeline: lint → scan → policy → plan → apply → ansible → verify │
- │        ▼                                                                   │
- │  Apache CloudStack (mgmt+agent+MySQL+NFS)   Packer/qemu → golden image     │
- │        │  IaC uses a scoped 'iac' account; secrets pulled from Vault       │
- │   ┌──────────────────── VPC 10.0.0.0/16 ─────────────────────┐            │
- │   │  mgmt/bastion shared net (cloudbr0) ── Ansible/SSH ──┐    │            │
- │   │   tier-a 10.0.1.0/24            tier-b 10.0.2.0/24   │    │            │
- │   │   ┌──────────┐   ACL: deny      ┌──────────┐         │    │            │
- │   │   │  vm-a    │── direct + ──────│  vm-b    │         │    │            │
- │   │   │  wg0     │   default-deny   │  wg0     │◄────────┘ mgmt NIC        │
- │   │   └────┬─────┘   egress         └────┬─────┘                          │
- │   │        └── WireGuard site-to-site (AllowedIPs = peer subnet) ──┘       │
- │   └──────────────────────────────────────────────────────────────────────┘
- └──────────────────────────────────────────────────────────────────────────┘
+ LAN (MGMT_CIDR)  ── browser / operator
+   │
+ ┌─┴─────────────────────────────── host: Ubuntu 24.04, KVM ───────────────────────────────┐
+ │ cloudbr0 = HOST_IP                                                                       │
+ │ control plane (Docker):  CoreDNS · Vault · MinIO · Gitea(+registry) · Squid · [runner]   │
+ │                          [Prometheus · Grafana · Loki]                                   │
+ │ CloudStack: management + MySQL + NFS + KVM agent      Packer/qemu (image builds)         │
+ │                                                                                          │
+ │  mgmt shared network (untagged, on cloudbr0): every VM's NIC0, host-only reachability    │
+ │  ════════════════════════════════════════════════════════════════════════════════════   │
+ │   │ vm-a      │ vm-b          │ app-1                    │ dc [ext]                      │
+ │  ┌┴───────────┴───────────────┴──────────────────────────┴───────────────────────────┐  │
+ │  │ VPC 10.0.0.0/16   (virtual router: ACLs, source NAT, port-forward)                 │  │
+ │  │  tier-a 10.0.1.0/24   tier-b 10.0.2.0/24   tier-app 10.0.3.0/24   tier-svc 10.0.10.0/24│
+ │  │   vm-a .10  ✗──────────✗ vm-b .10           app-1 .10 (k3s)        dc .10            │  │
+ │  │     └─ wg0 10.99.0.1 ══ WireGuard (underlay: mgmt network) ══ wg0 10.99.0.2         │  │
+ │  └────────────────────────────────────────────────────────────────────────────────────┘  │
+ └──────────────────────────────────────────────────────────────────────────────────────────┘
+   VPC public IP :443 ──port-forward──▶ app-1:443 (Istio Gateway)
 ```
 
-- **Data plane:** tier-a ↔ tier-b direct traffic is denied by ACLs; egress is
-  default-deny with an allow-list. The WireGuard tunnel (subnet-routed) is the
-  only path between the two subnets.
-- **Management plane:** Ansible/SSH ride a separate bastion/mgmt shared network,
-  out-of-band from the data path.
-- **Control plane:** Gitea/Vault/MinIO run in Docker and drive the whole thing.
+**Three planes, kept apart:**
 
-## Principles
+- **Data plane:** the VPC tiers. Inter-tier traffic is denied by ACL, except the AD
+  ports into tier-svc **[ext]**. The tiers have **no egress to the internet**. tier-a
+  and tier-b reach each other only through the WireGuard tunnel, routed by subnet.
+- **Management plane:** each VM's NIC0 on the shared mgmt network. A per-VM nftables
+  policy lets NIC0 talk **only to the host** (SSH from it; DNS, NTP, proxy, Vault,
+  registry and Kubernetes API traffic to and from it) and to the WireGuard peer on
+  UDP 51820. NIC0 carries no default route.
+- **Control plane:** the host's containers. Every VM reaches the internet only
+  through Squid on `HOST_IP:3128`, against a domain allow-list.
 
-- **Pipeline-driven** — every phase is a CI job; `bootstrap.sh` is the local/dev
-  path that runs the identical logic.
-- **Idempotent** — guards before acting (tracker + `dpkg -s`/`systemctl`/`cmk list`/`[ -e ]`).
-- **Reversible & verified** — `down` restores the host and then asserts it matches baseline.
-- **Least privilege** — scoped CloudStack account for IaC; no global admin in automation.
-- **Secrets never on disk in clear** — Vault issues them at run time.
-- **Immutable, versioned images** — hardened, scanned, content-addressed; never patched in place.
-- **Policy-as-code** — the plan is checked against guardrails before apply.
-- **Pinned** — repos, providers, plugins, images, tool versions.
-- **Fresh-VM assumption** — nothing pre-installed; guards no-op on an already-provisioned host.
+**Application platform on app-1:**
 
-## Tools
+```
+ user ──HTTPS :443 (public IP → app-1)──▶ Istio Gateway ──mTLS──▶ frontend (ns app)
+                                                                    │ mTLS
+                                                                    ▼
+                                          Vault ◀──HTTPS── api (ns app) ──mTLS──▶ postgres (ns db)
+                                         (host)                     card_number = vault:v1:…
+```
 
-| Purpose | Tool |
+- Every pod-to-pod hop is mTLS through ztunnel. Applications speak plain HTTP/TCP.
+- **Vault stays outside the cluster and the mesh.** It is the mesh's root of trust;
+  if the mesh depended on Vault and Vault on the mesh, neither could recover alone.
+- The frontend has no database driver and no Vault access, and the mesh's policies
+  forbid it from reaching Postgres.
+
+---
+
+## 5. Address, VM, port and DNS plan (single source of truth)
+
+All environment-specific values live in `config/lab.toml` (committed, non-secret).
+Preflight validates them. The values below are the defaults and examples.
+
+**Host and management network**
+
+| Item | Value |
 |---|---|
-| IaaS / hypervisor | Apache CloudStack 4.22 + KVM/libvirt |
-| CI/CD | Gitea + `act_runner` (containerized, pinned toolchain image) |
-| Secrets | HashiCorp Vault / OpenBao (container) |
-| Object store (images + TF state) | MinIO (container) |
-| Image build | Packer (`qemu`) + Ubuntu autoinstall (subiquity) + cloud-init |
-| Image hardening/scan | ansible CIS hardening + Trivy + Syft (SBOM) |
-| VPC provisioning | Terraform + `cloudstack/cloudstack` (remote state in MinIO) |
-| Config / VPN | Ansible + WireGuard (site-to-site, systemd) |
-| Directory / host login | Samba AD DC (VM) + `realmd`/`adcli`/SSSD on the tier VMs |
-| Policy / quality | Conftest/OPA, tflint, tfsec or checkov, ansible-lint, yamllint, shellcheck |
-| Observability | node_exporter + WireGuard metrics → Prometheus/Grafana/Loki |
-| CLIs | CloudMonkey (`cmk`), `mc`, `jq`, `qemu-utils`, `cloud-localds` |
+| `MGMT_CIDR` | host LAN, e.g. `192.168.50.0/24` |
+| `HOST_IP` | host address, moved onto `cloudbr0` by CloudStack, e.g. `192.168.50.10` |
+| `LAN_GATEWAY` / upstream DNS | from the LAN |
+| CloudStack pod (system VM) range | e.g. `.180–.189` |
+| CloudStack public range (VPC source NAT and public IPs) | e.g. `.190–.209` |
+| mgmt shared network (VM NIC0) | e.g. `.150–.179`, untagged on `cloudbr0`, no gateway handed to VMs |
+| Docker address pool | `172.30.0.0/16` (pinned; must not overlap any range here) |
 
-## Directory layout
+**VPC `10.0.0.0/16`**
+
+| Tier | CIDR | VM | Size | Role |
+|---|---|---|---|---|
+| tier-a | `10.0.1.0/24` | `vm-a` `.10` | 1 vCPU · 1 GB · 10 GB | VPN site A |
+| tier-b | `10.0.2.0/24` | `vm-b` `.10` | 1 vCPU · 1 GB · 10 GB | VPN site B |
+| tier-app | `10.0.3.0/24` | `app-1` `.10` | 4 vCPU · 4 GB · 40 GB | k3s, mesh, database, app |
+| tier-svc **[ext]** | `10.0.10.0/24` | `dc` `.10` | 1 vCPU · 2 GB · 20 GB | Samba AD DC |
+| WireGuard overlay | `10.99.0.0/24` | vm-a `.1`, vm-b `.2` | | tunnel addresses |
+| k3s pods / services | `10.42.0.0/16` / `10.43.0.0/16` | | | inside app-1 only |
+
+**Host ports** (all services listen on `0.0.0.0`, so they keep working when
+CloudStack moves `HOST_IP` onto `cloudbr0`; the host firewall restricts sources)
+
+| Service | Port | Name |
+|---|---|---|
+| CoreDNS | 53 | — |
+| Vault | 8200 | `vault.lab.test` |
+| MinIO API / console | 9000 / 9001 | `minio.lab.test` |
+| Gitea web + registry | 3000 | `gitea.lab.test` |
+| Squid | 3128 | `proxy.lab.test` |
+| CloudStack UI/API · agent · cluster | 8080 · 8250 · 9090 | `cloudstack.lab.test` |
+| Grafana · Prometheus · Loki **[ext]** | 3001 · 9095 · 3100 | `grafana.lab.test` … |
+| chrony (NTP for VMs) | 123/udp | — |
+
+**DNS.** CoreDNS on the host is authoritative for `lab.test` and for the reverse
+zones of `MGMT_CIDR` and `10.0.0.0/16`, and forwards everything else upstream. It
+also forwards `ad.lab.test` to `dc` **[ext]**. Every VM resolves through the host.
+Pods resolve through k3s's CoreDNS, which forwards to the node's resolver.
+
+**Host capacity: 32 GB RAM is the ceiling, not a target.** The lab must fit
+under it with a reserve, at its peak, with no memory overcommit (CloudStack
+`mem.overprovisioning.factor = 1.0`, no swap counted). Figures are estimates until
+measured; each phase's Exit records the measured steady-state RSS in
+`docs/capacity.md`, and `up` refuses to start a phase if the host's available memory
+would drop below the **4 GB reserve**.
+
+| Consumer | Core | + [ext] |
+|---|---|---|
+| Host OS + page-cache floor | 2.0 GB | |
+| CloudStack management (JVM) + MySQL + KVM agent | 3.0 GB | |
+| System VMs: SSVM, CPVM, redundant VPC router pair | 2.5 GB | |
+| Control plane: CoreDNS, Vault, MinIO, Gitea, Squid | 1.5 GB | |
+| vm-a + vm-b (1 GB each) + app-1 (4 GB) + KVM overhead | 7.0 GB | |
+| dc (2 GB) + KVM overhead | | 2.3 GB |
+| Gitea runner + rootless BuildKit job | | 1.5 GB |
+| Prometheus + Grafana + Loki + Alloy | | 2.5 GB |
+| **Steady state** | **16.0 GB** | **22.3 GB** |
+| Peak transient: Packer build (Phase 4, before any VM exists) | +2.0 GB | |
+| Peak transient: image build + scan (8.6 / CI) | +1.5 GB | +1.5 GB |
+| **Peak** | **17.5 GB** | **23.8 GB** |
+| **Headroom under 32 GB** (must stay ≥ 4 GB reserve) | **14.5 GB** | **8.2 GB** |
+
+**What app-1's 4 GB holds** (requests in the manifests must sum to ≤ 3 GB): k3s
+server ~0.6, istiod ~0.3, ztunnel + istio-cni ~0.15, Istio gateway ~0.1,
+cert-manager ~0.2, Postgres ~0.3, api + frontend ~0.25.
+
+**If measurements overrun, cut in this order:** observability first (it can run
+only for the `demo`), then the redundant VPC router (a single router saves
+~0.25 GB but loses the HA story), then the CI runner (CD is [ext]). Core never
+shrinks below the table.
+
+**Host:** 8 cores · **32 GB RAM (ceiling)** · 250 GB disk · `/dev/kvm`.
+
+---
+
+## 6. Secrets and the trust bootstrap
+
+**Rule:** a secret is created in Vault or by its consumer, read at run time, and
+never written to the repo. The bootstrap secrets below are the only secrets that
+exist outside Vault, and each one is listed with its location and protection.
+
+| Secret | Lives in | Protection / rotation |
+|---|---|---|
+| Vault unseal key + initial root token | `/var/lib/lab/vault-init.json` (outside the repo) | root `0600`. The root token is **revoked** at the end of Phase 2; regenerate it with `vault operator generate-root` when needed. The unseal key is the one thing to back up offline. |
+| Bootstrap AppRole (`lab-bootstrap`) role_id + secret_id | `/var/lib/lab/approle.json` | root `0600`; secret_id TTL 30 days, re-issued by `lab platform --rotate-approle` |
+| Lab SSH private key (Ansible → VMs) | Vault KV; written to `state/ssh/id_ed25519` only for the duration of a run | `0600`, deleted at the end of each phase that uses it |
+| k3s kubeconfig (cluster-admin) | `state/kubeconfig` | `0600`; deleted by `down`; re-fetched on demand |
+| WireGuard private keys | generated **on** each VM; never leave it | public keys published to Vault KV |
+| AD machine keytabs **[ext]** | `/etc/krb5.keytab` on each member | created by the join, never baked into an image |
+| Postgres superuser password | k8s Secret in `ns db` | k3s Secrets encryption at rest is on |
+| istiod signing CA key | k8s Secret `istio-system/cacerts` | encrypted at rest; rotated by `lab mesh --rotate-ca` |
+
+**Everything else is in Vault:** CloudStack admin and `iac` API keys, MinIO root
+and per-bucket users, Gitea admin and runner tokens, the Postgres `app` password,
+AD passwords **[ext]**, and the CI AppRole **[ext]**.
+
+**Trust bootstrap order (the chicken-and-egg, broken explicitly):**
+
+1. Vault starts with a **self-signed bootstrap certificate**, valid for one day.
+2. `init` → unseal → enable PKI → generate the **single self-signed CA**
+   `lab.test CA` (10 years; key never leaves Vault).
+3. Vault issues its **own** listener certificate from that CA and reloads with
+   `SIGHUP`. The bootstrap certificate is gone.
+4. The CA is installed into the host trust store. It is baked into the golden image,
+   so every VM trusts it from first boot.
+5. Every other service certificate comes from Vault: host services via `lab certs`
+   (30-day TTL, daily systemd timer renews under 10 days), cluster workloads via
+   cert-manager.
+
+**Why a single CA tier:** a two-tier PKI exists so the root can be kept
+**offline**. Both tiers inside one Vault would have the shape without that
+property. The one sub-CA in this lab belongs to istiod (Phase 8.3), because Istio
+must hold a signing key of its own.
+
+---
+
+## 7. Repository layout
 
 ```
-issue_191/
-  PLAN.md  PLAN-enterprise.md  README.md
-  bootstrap.sh                single entry point (local path; mirrors CI)
-  lib.sh                      log/die, tracker, netplan backup/restore, vault/mc helpers
-  .gitea/workflows/           CI pipeline definitions (lint, scan, plan, apply, ansible, verify)
-  docker/                     control plane: gitea/, vault/, minio/ compose + bootstrap
-  cloudstack/                 KVM prep, install, scoped iac account, offerings (idempotent)
-  packer/                     qemu template, autoinstall, cloud-init, hardening, scan
-  terraform/                  provider(remote state), vpc, tiers+ACLs, mgmt net, 2 VMs, outputs
-  policy/                     OPA/Conftest rules run against the tf plan
-  ansible/                    inventory, wireguard (site-to-site) role, templates
-  tests/                      lint + integration (verify/demo) harness
-  docs/                       adr/*.md, runbook.md
-  state/                      tracker, generated inventory (secrets come from Vault; gitignored)
+bootstrap.sh                 shim: ensure Python ≥ 3.12, exec python3 -B -m lab "$@"
+pyproject.toml               ruff + mypy + pytest config (no packaging)
+config/lab.toml              environment values (§5), non-secret
+src/lab/
+  __main__.py                argparse command map (§8)
+  versions.py                every pin: CloudStack, Terraform provider, k3s, Istio,
+                             cert-manager, Gateway API, images (by digest), Python deps
+  lib/                       log, tracker, system (run/capture/require_root), config,
+                             netplan, cloudstack (cmk), terraform, ansible, packer,
+                             kube, vault, minio, docker — thin wrappers only
+  preflight.py platform.py provision.py image.py setup.py base.py tunnel.py
+  directory.py cluster.py mesh.py app.py backup.py verify.py demo.py
+  status.py teardown.py revert.py certs.py
+  vendor/cloudstack-install.sh   the vendored upstream installer (third-party shell)
+platform/                    compose project + config: coredns/, vault/, minio/, gitea/,
+                             squid/ (allowlist.txt), observability/ [ext]
+packer/                      qemu template, autoinstall seed, hardening, scan
+terraform/                   provider + backend, vpc, tiers, acls, compute, ingress, outputs
+policy/                      Conftest/OPA rules over the plan JSON
+ansible/                     roles: base, wireguard, k3s, samba_dc [ext], ad_member [ext]
+k8s/                         raw manifests: issuers, mesh, db, app, gateway, policies
+app/                         api/ and frontend/ (Flask), each with Dockerfile and
+                             requirements.txt (hash-pinned)
+tests/                       pytest for src/lab; verify/demo helpers
+.gitea/workflows/            ci.yml, cd.yml [ext]
+docs/                        adr/, runbook.md, capacity.md, walkthrough.md
+state/                       run state (gitignored): tracker, log, kubeconfig, inventory
 ```
 
-## bootstrap.sh command map
+---
+
+## 8. Commands and build order
+
+Every command runs `python3 -m lab <command>`. The table is in **build order**.
+
+| # | Command | Phase | Core | Needs |
+|---|---|---|---|---|
+| 1 | `preflight` | 1 | ✓ | — |
+| 2 | `platform` | 2 | ✓ (runner, observability: [ext]) | preflight |
+| 3 | `provision` | 3 | ✓ | platform (Vault holds the `iac` key) |
+| 4 | `image` | 4 | ✓ | provision (template registration) |
+| 5 | `setup` | 5 | ✓ | image; runs **plan → policy → apply** |
+| 6 | `base` | 6.1 | ✓ | setup |
+| 7 | `tunnel` | 6.2 | ✓ | base |
+| 8 | `directory` | 7 | [ext] | base |
+| 9 | `cluster` | 8.1–8.2 | ✓ | base |
+| 10 | `mesh` | 8.3 | ✓ | cluster |
+| 11 | `app` | 8.4–8.7 | ✓ | mesh |
+| 12 | `verify` | 12 | ✓ | everything built; non-zero on any failure |
+
+**Composite commands**
 
 | Command | Runs |
 |---|---|
-| `up` | platform → provision → image → template → setup → tunnel → verify |
-| `platform` | Phase 2 (Vault, MinIO, Gitea + runner) |
-| `provision` | Phase 1 (backup netplan, install CloudStack, scoped iac account, offerings) |
-| `image` | Phase 3 (Packer build + harden + scan + publish, versioned) |
-| `template` | register the image as a CloudStack template, wait ready |
-| `lint` | shellcheck/yamllint/ansible-lint/tflint |
-| `scan` | tfsec/checkov (tf) + trivy (image) |
-| `policy` | Conftest/OPA over `terraform plan` |
-| `setup` | Phase 4 (terraform plan → apply, remote state, secrets from Vault) |
-| `tunnel` | Phase 5 (ansible-playbook: site-to-site WireGuard) |
-| `directory` | Phase 11 (Samba AD DC, join the VMs, directory logins) **[ent]**; run after `tunnel` |
-| `verify` | automated checks (handshake, subnet-over-VPN reachability, isolation, egress deny); exit non-zero on failure |
-| `demo` | human-readable proof: direct path blocked, WireGuard path works |
-| `status` | read-only inventory of what exists |
-| `down` | terraform destroy → CloudStack uninstall → restore netplan → reboot → **verify revert** |
-
-Phases tagged **[core]** (needed for the JQR demo) or **[ent]** (enterprise
-hardening layered on). Build core first for a working demo, then layer ent.
+| `up [--core]` | 1 → 12 in order. `--core` skips [ext] steps. Resumes at the first phase whose `check()` fails. |
+| `demo` | the examiner walkthrough (§13): proofs with human-readable output, re-runnable |
+| `backup` / `restore-drill` | Phase 9 |
+| `lint` | ruff, mypy, pytest, shellcheck (`bootstrap.sh`), yamllint, ansible-lint, tflint, `trivy config`, kubeconform |
+| `status` | read-only inventory: what exists, what `check()` says |
+| `certs` | renew host service certificates (also run by a systemd timer) |
+| `down` | §14 order. Ends with a reboot. |
+| `revert-check` | after the reboot: asserts the host baseline (V1–V5) |
 
 ---
 
-## Phases and steps
+## 9. Phases and steps
 
-Each step is scoped to a single focused work session with a clear exit check.
+Each step fits one focused session and ends with an **Exit** you can run.
 
-### Phase 0 — Scaffolding **[core]**
-- **0.1** Repo skeleton, `bootstrap.sh` dispatch (stubs), `lib.sh` (log/die, tracker,
-  logging to `state/bootstrap.log`), `state/` + `.gitignore`, `docs/` seed.
-  Exit: `./bootstrap.sh` prints usage; `bash -n` + `shellcheck` clean.
+### Phase 0 — Scaffolding
 
-### Phase 1 — CloudStack bring-up + netplan preservation + scoped identity
-- **1.1 [core]** Netplan backup (one-time `cp -a /etc/netplan → /var/backups/cloudstack-lab/netplan.orig/`, guarded, tracked) then KVM host prep (root/password SSH drop-in).
-  Exit: pristine backup exists; `sshd -T` shows root+password; re-run is a no-op.
-- **1.2 [core]** Install CloudStack all-in-one (mgmt+agent+MySQL+NFS+advanced zone with public range + mgmt shared network); install/configure `cmk`; disable bridge-netfilter + preflight.
-  Exit: `cmk list zones` shows an Enabled Advanced zone; system VMs Running; re-run skips via tracker.
-- **1.3 [ent]** Scoped IaC identity: create a CloudStack **domain/account `iac`** with a **role** limited to VPC/network/VM/template/keypair ops; generate its API key; store the key in Vault. Terraform authenticates as `iac`, not the global admin.
-  Exit: `cmk` as the `iac` key can create networks but is denied a global-admin op.
-- **1.4 [core]** Offerings: compute, VPC offering (note the **redundant VPC offering** for an HA-shaped VR), VPC tier network offering (ConfigDrive userdata), mgmt shared-network offering. Create-if-absent.
-  Exit: `cmk list …offerings` show the lab offerings.
+- **0.1 Shim and package.** `bootstrap.sh`; `src/lab/__init__.py`; `lib/log.py`
+  (`[+]/[!]/[x]` to the console, timestamped `state/bootstrap.log`); `lib/tracker.py`
+  (atomic JSON writes via temp file + `os.replace`); `.gitignore` (`/state/`,
+  `__pycache__/`, `.mypy_cache/`, `.ruff_cache/`, `*.tfstate*`, `.terraform/`,
+  `/builds/`).
+  Exit: `shellcheck bootstrap.sh` clean; `PYTHONPATH=src python3 -c 'import lab.lib.log'`.
+- **0.2 Command map, config, helpers.** `__main__.py` with every §8 command as a
+  logged stub; the phase interface (`up/down/check`); `lib/system.py`; `lib/config.py`
+  (load and validate `config/lab.toml`); `versions.py`; `pyproject.toml`.
+  Exit: `./bootstrap.sh --help` lists every command; `sudo ./bootstrap.sh up` logs each
+  stub; `./bootstrap.sh lint` clean. **Lint stays green from here on.**
 
-### Phase 2 — Control plane: Vault, MinIO, Gitea **[ent]**
-- **2.1** MinIO container (pinned): buckets `images` and `terraform-state`; policy/user for each; reachable from the CloudStack SSVM network.
-  Exit: `mc` round-trips objects in both buckets.
-- **2.2** Vault container (pinned): enable KV; seed paths for CloudStack `iac` creds, MinIO creds, the lab SSH keypair, and WireGuard keys; an AppRole the runner/`bootstrap.sh` uses to read them.
-  Exit: `vault kv get` returns the seeded secrets via AppRole.
-- **2.3** Gitea + `act_runner` (pinned): a repo mirror of `issue_191/`, a runner image baked with terraform/ansible/packer/cmk/trivy, and the runner registered.
-  Exit: a trivial workflow runs green on the runner.
+### Phase 1 — Host preflight and reversibility
 
-### Phase 3 — Golden image factory **[core build, ent hardening]**
-- **3.1 [core]** Packer `qemu` build: Ubuntu 24.04 autoinstall (cidata seed) → qcow2 with cloud-init, qemu-guest-agent, openssh-server, python3. WireGuard installed later by Ansible.
-  Exit: `packer validate` passes; `packer build` yields a bootable, cloud-init-ready qcow2.
-- **3.2 [ent]** Harden + scan + SBOM: apply a CIS-style hardening pass in the build; **Trivy** scan (fail on HIGH/CRITICAL); **Syft** SBOM saved as a build artifact.
-  Exit: image passes the Trivy gate; SBOM emitted.
-- **3.3 [ent]** Version + publish: tag the artifact by content hash/date, upload to MinIO `images/<version>/`, keep a `latest` pointer; **build-skip if the same hash already published**.
-  Exit: versioned qcow2 in MinIO; re-run without changes skips the build.
-- **3.4 [core]** Register template in CloudStack by MinIO URL, wait `isready`; idempotent by name+version.
-  Exit: `cmk list templates` shows the versioned template ready.
+- **1.1 Baseline and netplan backup.** Record the revert baseline in
+  `/var/backups/lab/baseline.json` (package list, `/etc/netplan` hashes, bridges,
+  listening ports, apt sources). One-time copy of `/etc/netplan` to
+  `/var/backups/lab/netplan.orig/`, outside the repo and outside `state/`.
+  Exit: both exist; a re-run changes neither.
+- **1.2 Preflight.** Ubuntu 24.04; `/dev/kvm`; CPU and disk against §5; RAM ≥ 31 GiB
+  usable with the §5 peak + 4 GB reserve fitting (warn above 32 GB: the budget is the
+  ceiling, not the hardware); strict
+  `apt-get update` (fail naming any broken source); config values valid and
+  non-overlapping; **refuse** leftovers (existing `cloud` DB, `cloudbr0`,
+  `cloudstack-*` packages, lab containers) with a message naming each one.
+  Exit: passes on a fresh host; deliberately fails on a host with a planted
+  `cloudbr0`.
 
-### Phase 4 — Terraform: VPC, isolated tiers, VMs **[core + ent]**
-- **4.1 [core]** Provider + inputs + **remote state**: `cloudstack/cloudstack ~>0.6`, backend `s3` → MinIO with lockfile; creds (`iac` API key, MinIO) injected from Vault as `TF_VAR_*`/`AWS_*` at run time. Data lookups for zone/offerings/template.
-  Exit: `terraform init` (remote backend) + `validate` succeed; state object appears in MinIO.
-- **4.2 [core]** Network: VPC `10.0.0.0/16`; two data tiers each with an ACL — **deny inter-tier except WireGuard UDP `51820`**, allow SSH from mgmt, **default-deny egress with an allow-list** (DNS, updates, WireGuard); mgmt/bastion shared network on `cloudbr0`. `parallelism=1` on ACL rules.
-  Exit: apply; `cmk list networks` shows VPC + tiers + mgmt; egress allow-list in place.
-- **4.3 [core]** Compute + inventory: lab keypair (public from Vault) + ConfigDrive userdata; two multihomed VMs (mgmt NIC + one data tier each); `outputs.tf` writes IPs + Ansible inventory to `state/`.
-  Exit: both VMs Running, SSH-reachable on mgmt; **direct data-tier ping between them FAILS** (isolation proven).
+### Phase 2 — Control plane
 
-### Phase 5 — Ansible: WireGuard site-to-site VPN **[core]**
-- **5.1** `wireguard` role: install WG, fetch/generate keys (via Vault), enable `net.ipv4.ip_forward`, template `wg0.conf` with **AllowedIPs = the peer tier's CIDR** (subnet routing, not just /32), `PersistentKeepalive=25`, and manage it with `systemd` (`wg-quick@wg0`, enabled + restart-on-failure).
-  Exit: `wg show` on both VMs shows a recent handshake; `systemctl is-enabled wg-quick@wg0` is enabled.
-- **5.2 Verify**: over the VPN a host in tier-a reaches tier-b's **subnet** (not just the peer overlay IP); direct (non-tunnel) inter-tier probe still fails; a disallowed egress destination is blocked. Non-zero on any wrong expectation.
-  Exit: verify prints pass (VPN subnet routing works, direct blocked, egress filtered).
-- **5.3 Demo**: human-readable proof — (1) direct data-tier probe BLOCKED, (2) tier-a→tier-b over WireGuard CONNECTED, (3) the working path is `dev wg0` and dropping `wg0` breaks it. Non-destructive; prints `direct: BLOCKED ✓ · WireGuard: CONNECTED ✓`.
-  Exit: demo shows blocked + connected; non-zero if not.
+- **2.1 Docker and the compose project.** Docker Engine (pinned), address pool
+  `172.30.0.0/16`, one compose project in `platform/` with health checks on every
+  service. Host nftables: control-plane ports accept only from `MGMT_CIDR` and the
+  Docker pool.
+  Exit: `docker compose ps` all healthy; a port is refused from outside `MGMT_CIDR`
+  (tested from a network namespace with a foreign address).
+- **2.2 CoreDNS.** Forward and reverse zones from §5; upstream forwarding; host
+  resolver uses it for `lab.test` (systemd-resolved drop-in).
+  Exit: `dig vault.lab.test @HOST_IP` and a PTR lookup both answer; external names
+  resolve.
+- **2.3 Vault: server, init, unseal.** Integrated **Raft** storage (snapshots in
+  Phase 9); TLS listener on the bootstrap certificate; audit device to a file;
+  `operator init` (1 share for the lab; production uses 5/3 or KMS auto-unseal) to
+  `/var/lib/lab/vault-init.json`; unseal; `lab` re-unseals on every run if sealed.
+  Exit: `vault status` unsealed; restart the container, run `lab platform`, and it is
+  unsealed with data intact.
+- **2.4 Vault PKI and trust.** `pki/` with `lab.test CA`; roles `host-svc` (host
+  service names, 30 days) and `k3s-svc` (`svc.cluster.local` + the app hostname, 7
+  days); Vault re-issues its own certificate and reloads; CA into the host trust
+  store; `lab certs` + systemd timer.
+  Exit: `curl https://vault.lab.test:8200/v1/sys/health` succeeds **without** `-k`;
+  `openssl s_client` shows the issuer is `lab.test CA`.
+- **2.5 Vault identities and KV.** KV v2 at `kv/`; Transit at `transit/`; policies
+  `lab-bootstrap`, `iac`, `ci` **[ext]**; AppRole `lab-bootstrap` written to
+  `/var/lib/lab/approle.json`; seed CloudStack admin and SSH keypair paths. **Revoke
+  the root token.**
+  Exit: `lab` reads `kv/lab/ssh` via AppRole; the root token is rejected.
+- **2.6 MinIO.** TLS from Vault; buckets `images`, `tfstate` and `backups`; one user and
+  policy per bucket, credentials in Vault.
+  Exit: `mc` round-trips an object in each bucket with its own user, and is denied on
+  the other bucket.
+- **2.7 Gitea and registry.** TLS from Vault; admin in Vault; public org `lab` for
+  the container registry; repo mirror.
+  Exit: `docker push` then `docker pull` of `gitea.lab.test:3000/lab/hello:test` from the
+  host succeed with no insecure-registry setting.
+- **2.8 Squid egress proxy.** `platform/squid/allowlist.txt` (Ubuntu archive and
+  security mirrors, the container registries k3s/Istio/cert-manager/Postgres pull
+  from, GitHub release downloads); deny everything else; access log to a file.
+  Exit: through the proxy, an allow-listed URL returns 200 and `example.com` returns
+  403, which shows in the log.
 
-### Phase 6 — Quality & policy gates **[ent]**
-- **6.1** Lint: shellcheck (bash), yamllint, ansible-lint, tflint. Wire into `lint` + CI.
-  Exit: all linters clean (or documented, suppressed exceptions).
-- **6.2** Security scan: tfsec or checkov on Terraform; Trivy on the image (also in Phase 3). `scan` + CI gate.
-  Exit: no HIGH/CRITICAL, or risk-accepted with a comment.
-- **6.3** Policy-as-code: Conftest/OPA rules over `terraform plan -json` — e.g. no `0.0.0.0/0` ingress except mgmt, egress is allow-listed, VMs use the scoped account, tiers are isolated. `policy` + CI gate before apply.
-  Exit: policy passes; a deliberately bad plan is rejected.
+### Phase 3 — CloudStack
 
-### Phase 7 — Observability **[ent, stretch]**
-- **7.1** node_exporter + a WireGuard metrics collector (handshake age, transfer) on the VMs; Prometheus + Grafana + Loki in the control plane; a dashboard for tunnel health and an alert on stale handshake.
-  Exit: Grafana shows both VMs and the tunnel; killing `wg0` fires the alert.
+- **3.1 Install.** Vendored installer, all-in-one (management, MySQL, NFS, KVM
+  agent). Advanced zone with the §5 ranges; `cloudbr0` takes `HOST_IP`. Disable
+  bridge netfilter. Agent `TimeoutStartSec` above the readiness wait. Readiness means
+  `/client/api` returns 200, not an open port.
+  Exit: `cmk list zones` shows an Enabled Advanced zone; SSVM and CPVM Running; host
+  services from Phase 2 still reachable on `HOST_IP`.
+- **3.2 `cmk` and the scoped identity.** `cmk` (pinned); account `iac` in domain
+  `lab` with a role limited to VPC, network, ACL, VM, template, keypair, public IP and
+  port-forward APIs; API keys in Vault.
+  Exit: as `iac`, `cmk create network` succeeds and `cmk list hosts` (admin-only) is
+  denied.
+- **3.3 Offerings and the mgmt network.** Compute offerings matching §5 sizes;
+  redundant VPC offering; VPC tier offering with **ConfigDrive** userdata; a shared
+  offering with ConfigDrive userdata; the mgmt shared network created with `cmk`
+  (`vlan=untagged`, because the Terraform provider cannot create an untagged shared
+  network); its id written to `state/`.
+  Exit: `cmk list` shows each offering and the mgmt network; a re-run creates nothing.
+- **3.4 Template trust.** Install `lab.test CA` on the KVM host for direct-download
+  templates (`uploadTemplateDirectDownloadCertificate`).
+  Exit: the certificate is listed for the host.
 
-### Phase 8 — CI/CD wiring **[ent]**
-- **8.1** `.gitea/workflows/`: `ci.yml` (lint → scan → policy → `plan`, on PR) and `cd.yml` (`apply` → ansible → verify, on merge/manual gate). The runner reads secrets from Vault via AppRole; state is the MinIO backend. `bootstrap.sh` and CI call the same scripts.
-  Exit: a PR runs the gates; a merge provisions and verifies end-to-end on the runner.
+### Phase 4 — Golden image
 
-### Phase 9 — Teardown, revert & verification **[core + ent]**
-- **9.1 [core]** `terraform destroy`; delete the CloudStack template + MinIO image objects; stop control-plane containers (or keep, per flag).
-  Exit: lab CloudStack resources gone.
-- **9.2 [core]** CloudStack uninstall (services, VMs, DB, packages, config, NFS, drop-ins, repo, `cmk`) then `restore_netplan()` (restore backup, `netplan try`, remove `cloudbr0`/`cloud0`/`virbr10`), reboot.
-  Exit: no CloudStack; networking via original netplan.
-- **9.3 [ent]** Revert verification: after reboot assert baseline — no `cloudstack-*` packages, no zone, `/etc/netplan` byte-identical to the backup, lab bridges gone, host online, `state/` cleared. Emit a pass/fail report.
-  Exit: revert report is green.
+- **4.1 Build.** Packer `qemu`: Ubuntu 24.04 autoinstall → qcow2 with cloud-init,
+  qemu-guest-agent, openssh-server, python3, chrony, nftables, `lab.test CA` in the
+  trust store; [ext] directory packages (sssd, realmd, adcli, krb5-user,
+  samba-common-bin). Never bake identity: the build **fails** if a keytab, SSSD
+  config, SSH host keys or machine-id exist.
+  Exit: `packer validate`; a booted test VM gets userdata from a ConfigDrive.
+- **4.2 Harden, scan, SBOM.** CIS-style hardening role; Trivy fails the build on
+  HIGH/CRITICAL; Syft SBOM saved next to the image.
+  Exit: the scan gate passes; the SBOM exists.
+- **4.3 Publish and register.** Version = date + input content hash; upload to
+  `images/<version>/` with its SBOM and SHA-256; skip build and upload when that hash
+  already exists. Register as a **direct-download** template over HTTPS with the
+  checksum; wait for it to be ready.
+  Exit: `cmk list templates` shows the version ready; an unchanged re-run builds
+  nothing.
 
-### Phase 10 — Docs **[core + ent]**
-- **10.1** README (what/why, prerequisites, `up`/`down`, expected output, the isolation+VPN demo, caveats). `docs/adr/` for the key decisions (CloudStack, WireGuard site-to-site, Vault, remote state, scoped account). `docs/runbook.md` for failure recovery (zone won't enable, template stuck, tunnel down, restore failed).
-  Exit: a new operator can run `up → demo → down` from the docs alone.
+### Phase 5 — Terraform: VPC, tiers, VMs
 
-### Phase 11 — Directory login: AD users on the VMs **[ent]**
-Design and rationale: see *Directory login with Samba AD DC* under "Human & user access to the VMs".
-- **11.1** Shared-services tier + DC VM: Terraform adds `tier-svc` `10.0.10.0/24` and a `dc` VM (Medium Instance, 1 GB) at `10.0.10.10`; tier ACLs allow the data tiers to reach `tier-svc` **on the AD ports only**; an `sg_directory` group on `dc` does the same per VM; members get a route to `10.0.10.0/24` via their tier gateway.
-  Exit: `dc` Running; from a tier VM, `nc -zv 10.0.10.10 88` and `389` succeed and `22` from a tier VM fails.
-- **11.2** Provision the domain (Ansible `samba_dc` role): install `samba-ad-dc krb5-user`; stop and mask `smbd`/`nmbd`/`winbind`; point the DC's own resolver at itself (disable the `systemd-resolved` stub); `samba-tool domain provision --realm=AD.LAB.TEST --domain=LAB --server-role=dc --dns-backend=SAMBA_INTERNAL --adminpass=<Vault>`; install the generated `krb5.conf`; enable `samba-ad-dc`. Then create the reverse zone (`samba-tool dns zonecreate dc 0.10.in-addr.arpa`), `OU=LabServers`, a delegated `joiner` account (may only create computer objects in that OU), groups `lab-users` and `lab-admins`, and demo users `alice` (lab-admins), `bob` (lab-users), `carol` (no group), passwords from Vault.
-  Exit: `host -t SRV _ldap._tcp.ad.lab.test 10.0.10.10` answers; `kinit administrator@AD.LAB.TEST` works on `dc`; `samba-tool user list` shows the demo users.
-- **11.3** Join the members (Ansible `ad_member` role): FQDN hostname (`vm-a.ad.lab.test`); DNS: the lab resolver forwards `ad.lab.test` and `0.10.in-addr.arpa` to the DC (with no lab resolver, a `systemd-resolved` drop-in with `DNS=10.0.10.10` and `Domains=~ad.lab.test`); `chrony` syncs from `dc`; `realm join --user=joiner --computer-ou=OU=LabServers ad.lab.test` with the joiner password from Vault on stdin. SSSD: `use_fully_qualified_names = False`, `fallback_homedir = /home/%u`, `ad_gpo_access_control = permissive`. Access: `realm deny --all` then `realm permit -g lab-users lab-admins`; `pam-auth-update --enable mkhomedir`; `/etc/sudoers.d/lab-admins` with `%lab-admins ALL=(ALL) ALL`; sshd allows password/keyboard-interactive auth.
-  Exit: `realm list` shows `ad.lab.test`; `id alice` resolves with no local account; `/etc/krb5.keytab` exists **on the VM** (and never in the image).
-- **11.4 [stretch]** Kerberos SSO: PTR records for every member; `GSSAPIAuthentication yes` on the VMs. Test on a joined VM against itself: log in as `alice`, `kinit alice@AD.LAB.TEST`, then `ssh -K alice@vm-a.ad.lab.test` with no password. Self-SSH is deliberate: the tiers are isolated from each other, and the bastion cannot reach the KDC on `tier-svc`, so this is the one path that exercises the full ticket flow without opening a new hole.
-  Exit: `klist` on `vm-a` shows a `host/vm-a.ad.lab.test@AD.LAB.TEST` service ticket after the login.
-- **11.5** Verify (add to `verify`): `alice` logs in with her AD password and can `sudo`; `bob` logs in and cannot `sudo`; `carol` is refused at login; `samba-tool user disable alice` makes her next login fail, and re-enabling restores it. Passwords come from Vault (`sshpass` in the test only).
-  Exit: all five pass; non-zero on any wrong expectation.
-- **11.6** Teardown: `realm leave` (removes the computer object) before `terraform destroy`; delete the `secret/ad/*` paths in Vault.
-  Exit: no computer objects or AD secrets left behind.
+- **5.1 Provider and remote state.** Pinned `cloudstack/cloudstack` provider, lock
+  file committed; S3 backend on MinIO (`use_path_style`, `use_lockfile`); `iac` keys
+  and MinIO credentials injected from Vault as environment variables at run time;
+  data lookups for zone, offerings, template, mgmt network id.
+  Exit: `terraform init` + `validate`; the state object appears in `tfstate`.
+- **5.2 Network.** VPC `10.0.0.0/16` on the redundant offering; tiers from §5; one
+  ACL list per tier, **default deny in both directions**. Allow rules:
+  - nothing between tier-a, tier-b and tier-app
+  - tier-app ingress TCP 443 from `MGMT_CIDR` (the only public-facing rule)
+  - [ext] tier-a, tier-b and tier-app → tier-svc on the AD ports only
+  - **no internet egress for any tier**
+
+  `parallelism=1` for ACL rules.
+  Exit: plan shows the VPC, tiers and ACLs; nothing applied yet.
+- **5.3 Policy gate.** Conftest rules over `terraform plan -json`:
+  - no ingress from `0.0.0.0/0`
+  - the only public port-forward is tier-app 443
+  - every tier ends in deny-all, both directions
+  - no inter-tier allow except the AD ports
+  - every VM has the mgmt NIC as NIC0
+  - provider credentials are the `iac` account
+
+  `lab setup` runs **plan → policy → apply**, and apply is unreachable if the policy
+  fails.
+  Exit: the real plan passes; a fixture plan opening `0.0.0.0/0:22` is rejected and
+  nothing is applied.
+- **5.4 Compute and ingress.** Lab SSH public key from Vault; VMs with NIC0 = mgmt,
+  NIC1 = their tier (default route); ConfigDrive userdata; a VPC public IP with
+  port-forward 443 → `app-1:443`; outputs → `state/inventory.json`, consumed by Ansible
+  through the `cloud.terraform` inventory plugin with absolute paths; `app.lab.test`
+  registered in CoreDNS pointing at the public IP.
+  Exit: apply; all VMs Running and reachable over SSH from the host on NIC0; **vm-a
+  cannot ping vm-b's tier address** (N1 holds before the VPN exists).
+
+### Phase 6 — Base configuration and the VPN
+
+- **6.1 `base` role (all VMs).**
+  - DNS and NTP from the host.
+  - Proxy environment for apt and containerd: `http_proxy` to the host, with
+    `no_proxy` covering `lab.test`, `MGMT_CIDR`, the VPC, the pod and service CIDRs,
+    and `.svc` and `.cluster.local`.
+  - nftables on NIC0:
+    - in: from `HOST_IP` only: SSH; on app-1 also the k3s API (6443, for Vault's
+      token reviews and `lab`); node exporter **[ext]**
+    - out: to `HOST_IP` only, plus UDP 51820 to the VPN peer
+    - no default route via NIC0
+  - Unattended security updates through the proxy.
+
+  Exit: from vm-a, `apt-get update` works through the proxy; a direct `curl` to the
+  internet fails; `curl` to another VM's NIC0 fails; `curl` to the host succeeds
+  (N3, N4).
+- **6.2 `wireguard` role.** Keys generated on each VM (private never leaves; public
+  key to Vault). `wg0` with `AllowedIPs` = the peer **tier subnet** + its overlay /32.
+  Endpoint = the peer's **mgmt** address, so the underlay is never inside
+  `AllowedIPs`. `ip_forward=1`. `PersistentKeepalive=25`. `wg-quick@wg0` enabled,
+  restart on failure; `wg-quick` installs the routes for `AllowedIPs`, so the peer
+  tier subnet goes via `wg0`.
+  Exit: `wg show` has a recent handshake on both sides; vm-a reaches `10.0.2.10`
+  over `wg0`; with `wg0` down, it does not (N2).
+
+### Phase 7 — Directory login **[ext]**
+
+Goal: a user who exists only in AD logs in to a tier VM with their AD password,
+gets `sudo` only through an AD group, and loses access the moment they are disabled.
+
+- **7.1 DC VM.** `dc` in tier-svc; ACL allows only 53, 88, 123, 389, 445, 464, 636,
+  3268, 3269 from the member tiers.
+  Exit: from vm-a, ports 88 and 389 on `10.0.10.10` connect; port 22 does not.
+- **7.2 Provision the domain** (`samba_dc` role).
+  - Realm `AD.LAB.TEST` (subdomain: the DC must own its zone; `lab.test` belongs to
+    CoreDNS, which forwards `ad.lab.test` to the DC).
+  - Internal DNS; mask `smbd`, `nmbd`, `winbind`; the DC resolves through itself.
+  - Reverse zone; `OU=LabServers`.
+  - A delegated `joiner` account limited to creating computers in that OU.
+  - Groups `lab-users` and `lab-admins`; users `alice` (admins), `bob` (users),
+    `carol` (neither).
+  - All passwords generated into Vault.
+
+  Exit: `host -t SRV _ldap._tcp.ad.lab.test HOST_IP` answers via forwarding;
+  `kinit administrator` works on dc.
+- **7.3 Join members** (`ad_member` role).
+  - FQDN hostnames; chrony from dc.
+  - `realm join --user=joiner --computer-ou=OU=LabServers`, with the password on
+    stdin from Vault.
+  - SSSD: short names, `/home/%u`, `cache_credentials=False` on app-1.
+  - `realm deny --all`, then `realm permit -g lab-users lab-admins`.
+  - mkhomedir; `%lab-admins` in sudoers; sshd password auth for directory users.
+
+  Exit: `realm list` shows the domain; `id alice` resolves with no local account.
+- **7.4 Checks** (D1–D4) and **teardown slice:** `realm leave` on every member before
+  the VMs are destroyed; delete the `kv/ad/*` paths.
+
+### Phase 8 — Application platform: database + encryption service
+
+- **8.1 k3s on app-1** (`k3s` role).
+  - Pinned version, fetched through the proxy.
+  - Flags:
+    - `--disable=traefik`: the Istio Gateway is the only ingress
+    - `--secrets-encryption`
+    - `--node-ip=10.0.3.10`
+    - `--tls-san` = app-1's mgmt IP and `k3s.lab.test`
+    - `--write-kubeconfig-mode=600`
+  - Default flannel CNI.
+  - containerd proxy and `no_proxy` from 6.1; `registries.yaml` trusts
+    `gitea.lab.test`.
+  - Kubeconfig to `state/kubeconfig`, pointed at the mgmt IP.
+
+  Exit: from the host, `lab status` shows the node Ready; `k3s secrets-encrypt status`
+  shows enabled (S2); a pod resolves `vault.lab.test` and gets 200 from
+  `/v1/sys/health` using the CA bundle.
+- **8.2 Vault as the cluster's CA.**
+  - Host Vault:
+    - Kubernetes auth at `auth/k3s`, pointed at `https://<app-1 mgmt IP>:6443` with
+      the k3s CA.
+    - Reviewer: ServiceAccount `vault-auth` with `system:auth-delegator` and a
+      long-lived token Secret.
+    - Policy `cert-manager` = `pki/sign/k3s-svc` only.
+  - In k3s: cert-manager (pinned static manifest) and a `ClusterIssuer vault`
+    (server `https://vault.lab.test:8200`, `caBundle`, Kubernetes auth via a
+    ServiceAccount token request).
+
+  Exit: a throwaway `Certificate` reaches Ready and verifies against `lab.test CA`
+  with `openssl verify`.
+- **8.3 Istio ambient with Vault's CA.**
+  1. `lab mesh` generates the istiod CA key and CSR in memory.
+  2. Vault signs it via `pki/root/sign-intermediate` (CA:TRUE, path length 0, 1-year
+     TTL).
+  3. `lab mesh` writes Secret `istio-system/cacerts` (`ca-cert.pem`, `ca-key.pem`,
+     `root-cert.pem`, `cert-chain.pem`) **before** istiod starts.
+  4. Gateway API CRDs (pinned); `istioctl install --set profile=ambient` (pinned,
+     k3s values).
+  5. Mesh-wide `PeerAuthentication` STRICT.
+
+  `lab mesh --rotate-ca` repeats the signing and restarts the istiod, ztunnel and
+  workload rollouts in order.
+  Exit: a smoke namespace labelled `istio.io/dataplane-mode=ambient` shows `HBONE` for
+  its pods in `istioctl ztunnel-config workloads`; their certificate chains to
+  `lab.test CA`; a client in an unlabelled namespace is refused.
+- **8.4 Database.**
+  - Namespace `db` (ambient), ServiceAccount `postgres`.
+  - PostgreSQL 16 (pinned digest) StatefulSet with a `local-path` PVC; superuser
+    password generated into a Secret.
+  - Schema `customers(id serial primary key, name text not null, card_number text not
+    null)`; role `app` with `SELECT, INSERT` on the table and `USAGE` on its sequence,
+    nothing else.
+  - The `app` password generated once and written to Vault `kv/app/db`, never printed.
+  - `AuthorizationPolicy` on postgres: allow only `cluster.local/ns/app/sa/api`.
+
+  Exit: from a pod running as `sa/api` in `ns app`, `psql` as `app` connects; the same
+  pod with another ServiceAccount is refused.
+- **8.5 Vault for the api.**
+  - Transit key `customers` (`aes256-gcm96`).
+  - Policy `api`: exactly `transit/encrypt/customers`, `transit/decrypt/customers`
+    and `kv/data/app/db`.
+  - `auth/k3s/role/api`, bound to `sa/api` in `ns app`, token TTL 1h.
+  - ConfigMap `vault-ca` in `ns app` (public CA).
+
+  Exit: an encrypt/decrypt by hand round-trips; an `api`-policy token is denied
+  `kv/data/lab/ssh` and `transit/keys/customers/rotate`.
+- **8.6 Application images.** `app/api` and `app/frontend`, each:
+  - base image pinned by digest
+  - `pip install --require-hashes` at **build** time
+  - non-root user, read-only root filesystem compatible
+  - Trivy gate (HIGH/CRITICAL fail)
+  - SBOM
+  - tagged with the git SHA
+  - pushed to `gitea.lab.test:3000/lab/`
+
+  Built by `lab app` on the host (core) or by CI **[ext]**.
+  Exit: both images in the registry with their SBOMs; the scan gate passed.
+- **8.7 Deploy the application.**
+  - **api** (Flask, `sa/api`):
+    - `/healthz`, `GET /customers`, `POST /customers`
+    - logs in to Vault with its ServiceAccount token
+    - reads `kv/app/db` once at startup
+    - encrypts `card_number` via Transit before inserting
+    - decrypts on read and returns only `**** ` + the last 4 digits
+    - one database connection per request, parameterized SQL
+    - `VAULT_CACERT` is its only TLS setting
+  - **frontend** (Flask, `sa/frontend`): HTML list and add form; knows only `API_URL`.
+  - **Gateway**: Gateway API `Gateway` (class `istio`, HTTPS 443, certificate from
+    `ClusterIssuer vault` for `app.lab.test`) and an `HTTPRoute` to the frontend.
+  - **ALLOW policies**: frontend ← the gateway's ServiceAccount; api ← `sa/frontend`.
+  - Probes; resource requests and limits; no secret values in any Deployment.
+
+  Exit: from the host, `curl https://app.lab.test/` (resolving to the public IP)
+  succeeds without `-k`. Adding a customer shows `**** 4242`, and `psql` in the
+  postgres pod shows `vault:v1:…`.
+
+### Phase 9 — Backup, restore, crypto-shredding
+
+- **9.1 Backup.** `lab backup`:
+  - `vault operator raft snapshot save`
+  - `pg_dump` of `customers` (through `kubectl exec`)
+  - both to MinIO bucket `backups/<timestamp>/`, and the Vault snapshot also to
+    `/var/lib/lab/backups/`
+
+  The unseal key is **not** in the backup; it is stored offline (operator
+  responsibility, stated in the runbook).
+  Exit: both objects exist; sizes are non-zero; the Vault snapshot verifies.
+- **9.2 Restore drill.** Delete the `db` namespace and its PVC, redeploy, restore the
+  dump; the api reads the old rows and decrypts them (B1).
+- **9.3 Crypto-shredding.** Restore the same dump into a scratch Postgres next to a
+  **scratch Vault** without the `customers` key: every `card_number` is unreadable
+  ciphertext, and names are still readable (B2).
+
+  This is the point to make: the database backup is safe to lose; the Vault snapshot
+  plus the unseal key are the crown jewels.
+  Exit: B1 and B2 pass; the scratch resources are removed.
+
+### Phase 10 — Gates and CI/CD **[ext]**
+
+- **10.1 Runner.** `act_runner` on the host. Jobs run in containers with **no host
+  Docker socket and no host network privileges**; image builds use rootless
+  BuildKit. AppRole `ci` with read access to only what CI phases need.
+  Exit: a trivial workflow runs green; a job trying to mount `/var/run/docker.sock`
+  fails.
+- **10.2 CI on every PR.** `lint` → unit tests → build, scan and push app images →
+  `terraform plan` → policy gate. The plan output is posted to the PR.
+  Exit: a PR that opens `0.0.0.0/0` fails the gate (G1).
+- **10.3 CD (manual approval)** runs only the **cloud-level** commands, over the
+  network as `ci`: `setup`, `base`, `tunnel`, `cluster`, `mesh`, `app`, `verify`.
+  Host-level commands (`preflight`, `platform`, `provision`, `image`, `down`,
+  `revert-check`) are **operator-only**, because they change or reboot the host the
+  runner lives on.
+  Exit: an approved merge re-applies and verifies (G2); the runner identity is denied
+  `sys/` and `pki/root/*` in Vault (G3).
+
+### Phase 11 — Observability **[ext]**
+
+- **11.1** Prometheus, Grafana and Loki on the host. node_exporter and a WireGuard
+  exporter on the VMs, scraped over NIC0. Alloy on app-1 ships ztunnel logs and pod
+  logs; Alloy on the host ships the Vault audit log and the Squid access log.
+  Exit: Grafana dashboards for tunnel health, mesh denials and Vault access (O1).
+- **11.2** Alerts: WireGuard handshake older than 3 minutes; any ztunnel deny; any
+  Vault `transit/decrypt` by an identity other than `api`.
+  Exit: `wg-quick down wg0` on vm-a fires the tunnel alert (O2); a denied
+  frontend → postgres connection fires the mesh alert (O3).
+
+### Phase 12 — Verification
+
+- **12.1 `verify`.** Every check in §12 except B1–B2 (destructive; run by
+  `restore-drill`), each implemented once in `src/lab/verify.py` with a pass/fail line
+  and the evidence. Non-zero exit on any failure. [ext] checks are skipped, and
+  reported as skipped, under `--core`. E2/E3 run against a scratch Transit key that is
+  deleted afterwards, so `verify` changes nothing.
+  Exit: `verify` green twice in a row; `vault list transit/keys` is unchanged.
+
+### Phase 13 — Teardown and revert
+
+- **13.1 `down`** runs §14 in order. Each step tolerates "already gone". Teardown
+  never reads state that an earlier teardown step deleted. Helpers return success on
+  "not found".
+  Exit: completes from any partially built state (tested by interrupting `up` after
+  `setup` and after `mesh`).
+- **13.2 `revert-check`** (after the reboot) compares against
+  `/var/backups/lab/baseline.json` (V1–V5) and writes a pass/fail report.
+  Exit: green.
+
+### Phase 14 — Documentation
+
+- **14.1** `README.md`: what the lab is, prerequisites (§5), `up` / `demo` / `down` /
+  `revert-check`, and sample `demo` output.
+- **14.2** `docs/adr/`: one record per decision in §15, with the alternatives rejected.
+- **14.3** `docs/runbook.md`: zone won't enable, template stuck, Vault sealed after a
+  reboot, tunnel down, cert renewal failed, mesh CA rotation, restore from backup,
+  netplan restore failed.
+- **14.4** `docs/walkthrough.md`: §13, with real output pasted in.
+
+  Exit: someone new runs `up → demo → down → revert-check` from the docs alone.
 
 ---
 
-## Recommendations & gotchas
+## 10. Rules learned the hard way (build them in)
 
-- **MinIO does double duty:** image registry *and* Terraform remote-state backend
-  (its lockfile gives state locking). Keep the two buckets separate.
-- **Vault is the source of truth for secrets** at run time; `state/` holds only
-  non-secret generated files (inventory). Nothing sensitive is committed.
-- **Scoped `iac` account** is the single biggest realism win — automation must not
-  wield global admin. Verify a global-only op is denied to it.
-- **Site-to-site, not host overlay:** AllowedIPs = peer *subnet* + IP forwarding
-  makes this a real VPN between networks, and `systemd` + `PersistentKeepalive`
-  make it survive reboots/NAT — the enterprise expectation.
-- **Default-deny egress** with an allow-list is the posture reviewers look for;
-  demonstrate a blocked egress in `verify`.
-- **ConfigDrive** for cloud-init userdata (proven by the `iac-*-configdrive`
-  offerings here); avoids depending on the VR metadata service.
-- **`parallelism=1`** for ACL rules (CloudStack races otherwise).
-- **`netplan try`** on restore (auto-reverts); backup lives outside the repo so
-  the purge can't remove it.
-- **Bridge-netfilter preflight** before Terraform (silently breaks VPC port-forwarding).
-- **Idempotent image builds:** content-hash the inputs; skip build + publish when unchanged.
-
----
-
-## VPN alternative — Tailscale / Headscale (3-network transit)
-
-For exam prep the topology grows to **three** networks — **frontend → middle →
-backend** — where the frontend may talk to the backend **only through the middle,
-never directly**, and frontend VMs are **ephemeral** (exist for days) while the
-backend is the always-on service plane. This is where an identity-based mesh
-(Tailscale, self-hosted via **Headscale**) fits better than hand-managed WireGuard.
-
-### Why Tailscale here
-
-- **Ephemeral frontends:** register them with an **ephemeral, tagged auth key** baked
-  into cloud-init. When a frontend VM is destroyed it **auto-removes** from the
-  tailnet — no stale peers to clean off the backend (the toil raw WireGuard imposes).
-- **Tag-based ACLs:** rules key off `tag:frontend` / `tag:middle` / `tag:backend`, so
-  churn never requires editing config. New FE VM joins → rights apply instantly.
-- **Subnet router:** the middle advertises the backend subnet; the backend need not be
-  a direct peer of the frontend at all.
-- **Self-hosted control plane:** **Headscale** (OSS, ~43k★, HuJSON ACLs in Git, OIDC,
-  Postgres backend) keeps it local and free — no SaaS dependency.
-
-### How it works (control vs data plane)
-
-```
-      CONTROL PLANE (metadata/keys only)        DATA PLANE (your traffic)
-   ┌───────────────────────────────┐
-   │ Headscale (self-hosted) + OIDC │        node A ══ WireGuard ══ node B
-   │  - authenticates nodes          │          (direct P2P; DERP relay
-   │  - distributes public keys      │           only if NAT blocks it)
-   │  - pushes HuJSON ACL policy      │
-   └───────────────────────────────┘
-```
-Nodes authenticate (auth key or OIDC), send their **public** key up, receive the
-peer list + ACL they're allowed, and configure WireGuard themselves.
-
-### Three-network transit design
-
-Tailscale defaults to a **flat mesh** (everyone reaches everyone) — the opposite of
-what we want. We enforce transit with **default-deny ACLs + a subnet router on the
-middle**, and by keeping the **backend off the tailnet as a direct peer**:
-
-```
- tag:frontend (ephemeral)     tag:middle (persistent)        backend 10.0.3.0/24
- FE VMs 10.0.1.0/24           Tailscale node + SUBNET         BE VMs (service plane)
-                              ROUTER for 10.0.3.0/24
-      │                             │                                │
-      │  Tailscale (WireGuard)      │   routes (ip_forward)          │
-      └──── ACL: FE → middle ──────►│──── ACL: middle → backend ────►│
-            (e.g. :443)             │                                │
-   ✗ no ACL FE → 10.0.3.0/24  AND backend is not a direct peer
-     ⇒ frontend's only path to backend is through the middle
-```
-
-Two layers make "no direct FE↔BE" airtight: (1) backend is reachable only via the
-middle's advertised route — no FE→BE tunnel exists; (2) ACLs are default-deny and you
-never write an FE→backend rule.
-
-### ACL policy (HuJSON — versioned in Git, GitOps-friendly)
-
-```jsonc
-{
-  "tagOwners": {
-    "tag:frontend": ["autogroup:admin"],
-    "tag:middle":   ["autogroup:admin"],
-    "tag:backend":  ["autogroup:admin"]
-  },
-  "autoApprovers": { "routes": { "10.0.3.0/24": ["tag:middle"] } },
-  "acls": [
-    { "action": "accept", "src": ["tag:frontend"], "dst": ["tag:middle:443"] },
-    { "action": "accept", "src": ["tag:middle"],   "dst": ["10.0.3.0/24:*"] }
-    // no tag:frontend -> 10.0.3.0/24 rule => denied by default
-  ]
-}
-```
-
-### Ephemeral frontend vs persistent backend
-
-```yaml
-# cloud-init on an ephemeral frontend VM
-runcmd:
-  - curl -fsSL https://tailscale.com/install.sh | sh
-  - tailscale up --login-server https://headscale.lab --authkey tskey-... \
-      --advertise-tags tag:frontend
-# middle VM additionally: --advertise-routes 10.0.3.0/24  (approved via autoApprovers)
-# keys made once: FE = ephemeral+reusable+tag:frontend ; BE = reusable+tag:backend
-```
-
-### WireGuard hub-and-spoke (raw, no control plane) **[ent]**
-
-Same three-network outcome as above on plain WireGuard. The core JQR demo is a
-**2-tier point-to-point** tunnel (tier-a ↔ tier-b directly). The 3-tier version makes
-the **middle a transit hub (tunnel router)**: frontend (A) and backend (B) are
-**spokes that peer only with the hub**, never with each other. A and B never learn
-each other's specifics — the hub is the sole holder of the full routing map and the
-cross-tier policy.
-
-```
-tier-a 10.0.1.0/24        tier-mid 10.0.3.0/24 (HUB)       tier-b 10.0.2.0/24
- ┌────────┐  wg tunnel     ┌──────────────────┐  wg tunnel  ┌────────┐
- │  A-gw  │═══════════════►│ hub  ip_forward=1 │◄═══════════│  B-gw  │
- └────────┘                │ knows A + B + pol │             └────────┘
-  "internal → hub"         └──────────────────┘              "internal → hub"
-```
-
-**AllowedIPs asymmetry — the mechanism that keeps spokes ignorant.** `AllowedIPs` is
-both routing *and* inbound ACL, so:
-
-- **spoke → hub:** `AllowedIPs = <overlay>/24, 10.0.0.0/8` (an **aggregate**) — "send
-  all internal traffic to the hub, accept all internal back." The spoke has no route
-  for the far subnet specifically; it's swallowed by the aggregate, so A is oblivious
-  to B's existence.
-- **hub → spoke A:** `AllowedIPs = <A overlay>/32, 10.0.1.0/24`; **hub → spoke B:**
-  `<B overlay>/32, 10.0.2.0/24`. The hub alone holds the per-subnet specifics.
-
-```ini
-# spoke A-gw — one peer, the hub only
-[Peer]
-PublicKey  = <hub pubkey>
-Endpoint   = <hub tier-mid IP>:51820
-AllowedIPs = 10.99.0.0/24, 10.0.0.0/8
-
-# hub — one [Peer] per spoke
-[Peer]
-PublicKey  = <A pubkey>
-AllowedIPs = 10.99.0.2/32, 10.0.1.0/24
-[Peer]
-PublicKey  = <B pubkey>
-AllowedIPs = 10.99.0.3/32, 10.0.2.0/24
-```
-
-`ip_forward=1` on the hub is mandatory — forwarding between the two tunnels is its
-entire job.
-
-**"A↔B only via the middle" is enforced in three independent layers:**
-1. **Network ACLs:** allow UDP 51820 on `tier-a↔tier-mid` and `tier-mid↔tier-b`,
-   **deny `tier-a↔tier-b` outright** — A physically cannot address B.
-2. **WG peering:** A has no `[Peer]` for B — no key, no endpoint, no tunnel exists.
-3. **Hub policy:** all cross-tier traffic transits the hub, so `nftables` there is the
-   single enforcement/inspection/logging chokepoint (e.g. A→B:8080 only, B→A denied).
-
-**Enterprise mapping:** this is a **transit hub** — the self-managed analog of a
-transit VPC / AWS Transit Gateway / Azure vWAN hub: spokes route to the hub, the hub
-routes between them and enforces policy, spokes stay simple and ignorant of the wider
-topology. The chokepoint is where L4/L7 firewalling, IDS, and audit live.
-
-**Caveats:** the hub is a SPOF + bandwidth funnel (run an HA pair); routing must be
-symmetric through the hub both ways, or NAT/masquerade at the hub (trading away the
-source identity the per-VM SG rules depend on); on real clouds the hub instance needs
-**source/dest check disabled** to forward. Dead ephemeral spokes must be pruned by
-hand — exactly the toil Headscale automates.
-
-**Lab delta from the 2-tier core:** add `tier-mid` + a hub VM in Terraform; change the
-ACLs to A↔mid / mid↔B allow + A↔B deny; split the Ansible `wireguard` role into a
-**hub** play (loops over all spoke peers) and a **spoke** play (single `[Peer] = hub`
-with the aggregate `AllowedIPs`).
-
-**When to pick which:** WireGuard hub-spoke for the 2-network core (mechanics, no
-control plane); Tailscale/Headscale for the 3-network churn topology (ephemeral nodes
-+ tag ACLs + subnet-router transit pay off).
+1. **Preflight apt.** One broken apt source makes `apt-get update` exit non-zero and
+   kills the vendored installer partway through. Fail first and name the source.
+   Always reinstall signing keys; they rotate.
+2. **Old CloudStack databases are poison.** An existing `cloud` DB with an older
+   schema makes the management server loop on 503 forever. Preflight refuses it;
+   teardown drops it and deletes the installer's tracker.
+3. **Gate on health, with timeouts longer than the gates.** Readiness = HTTP 200 from
+   the API, not an open port. Systemd start timeouts must exceed the wait budget.
+   First boot of the management server takes minutes.
+4. **Teardown is the code most likely to be wrong.** It must not depend on state it
+   already deleted, must succeed on "not found", and must keep the reboot out of
+   reach of an earlier failure.
+5. **Refuse leftovers instead of tolerating them:** systemd drop-ins, extra bridges,
+   third-party apt sources, containers.
+6. **Terraform's CloudStack provider cannot create an untagged shared network.** Make
+   the mgmt network with `cmk` and pass its id in.
+7. **ConfigDrive userdata is served by the network of the VM's default NIC.** Shared
+   networks default to router-served userdata, so use a shared offering with
+   ConfigDrive.
+8. **Ansible's Terraform inventory:** `ansible_host` / `ansible_group` resources are
+   read by `cloud.terraform.terraform_provider` (not `terraform_state`), with absolute
+   paths.
+9. **A WireGuard Endpoint must never fall inside its own AllowedIPs.** Run the
+   underlay on a network the tunnel does not route (here, the mgmt network).
+10. **Long-running helpers on a VM run as transient systemd units** (`systemd-run`),
+    never as processes left behind by an SSH session. Connection refused vs timeout
+    tells "no listener" apart from "firewall dropped it".
+11. **`no_proxy` is where proxied clusters break.** Pod, service and VPC CIDRs, `.svc`,
+    `.cluster.local`, `lab.test` and `MGMT_CIDR` must all bypass the proxy, or pods
+    send cluster traffic to Squid.
+12. **Check container entrypoints before overriding commands.** Some images set the
+    entrypoint to the tool itself (`mc`), so `sh -c` needs `--entrypoint`.
 
 ---
 
-## Human & user access to the VMs **[ent]**
+## 11. Risks
 
-Access splits into **two planes**, and conflating them is the classic mistake. The
-core lab is management-plane-only (admin SSH scoped to `mgmt_cidr`, service reachable
-only over the tunnel); enterprise adds the data plane and a brokered privileged plane.
-
-| | Data / service plane | Privileged plane |
+| Risk | Where | Mitigation |
 |---|---|---|
-| **Who** | end users ("conduct business") | admins *and* any human who needs a shell |
-| **What** | the application (HTTP/API/DB), never the OS | interactive OS login (SSH/RDP) |
-| **Grant by** | published service endpoint | **identity**, not a network hole |
+| Advanced-zone bring-up is the most fragile step | 3.1 | health-based gates, resumable `up`, generous timeouts |
+| `HOST_IP` moves to `cloudbr0` mid-build | 3.1 | services bind `0.0.0.0`; 3.1 Exit re-checks Phase 2 reachability |
+| Direct-download templates over HTTPS with a private CA | 3.4, 4.3 | if the KVM host certificate upload fails, serve the images bucket through a read-only presigned URL and rely on the template checksum for integrity |
+| Istio ambient on k3s (CNI paths) | 8.3 | k3s-specific install values; smoke namespace before any workload; fallback is sidecar mode |
+| istiod `cacerts` key names | 8.3 | write all four Istio file names; Exit checks the workload chain, not just the Secret |
+| Egress allow-list too tight | 2.8, 6.1, 8.x | denials are logged by Squid; grow the list from the log, never by opening the ACL |
+| Host memory (32 GB ceiling) | all | §5 budget with a 4 GB reserve, measured per phase; `up` refuses a phase that would breach the reserve; §5 cut order if it overruns |
+| Vault sealed after a host reboot | everything | `lab` unseals on every run; runbook entry; production answer is KMS auto-unseal |
+| Losing the unseal key or Vault snapshot | 9 | that is total loss of encrypted data, by design; the runbook makes offline custody of both an explicit operator duty |
 
-### Data-plane ingress (users use the app, not the OS)
+---
 
-Expose the *service*, never SSH or the mgmt NIC:
-- **CloudStack:** acquire a public IP on the VPC, add a **port-forward or LB rule**
-  (`cloudstack_ipaddress` + `cloudstack_port_forward`/`cloudstack_loadbalancer_rule`)
-  to the tier VM; open the **tier ACL** for the service port only; the VM's nftables
-  allows the app port on the **tier NIC** (contrast the core demo, which pins the
-  service to `iifname wg0` = internal-only).
-- **Enterprise front door:** LB + **WAF** + **API gateway** terminate TLS and do
-  authn/z; backends never see raw internet. Scope the ACL source where possible.
+## 12. Verification catalog
 
-### Privileged-plane login (someone needs a shell)
-
-Treat "log in to the VM" as privileged **regardless of the person's title**. Never
-widen `mgmt_cidr`, share `lab_ssh_key`, or scatter static per-user keys (no
-attribution, no MFA, no revocation). Instead **broker login by identity**.
-
-**1. One controlled entry point — users never hit the VM directly:**
-
-| Approach | Path | Inbound SSH on the VM |
+| ID | Check | How |
 |---|---|---|
-| Bastion / jump host | user → bastion (authn) → VM | from bastion only |
-| Access proxy (Teleport, Boundary) | user → proxy (SSO+MFA) → VM | from proxy only, short-lived cert |
-| Agent dials out (AWS SSM, Cloudflare Tunnel, Tailscale SSH) | VM agent → broker → user | **none** (VM connects outbound) |
-
-The agent-based options are strongest: the VM opens an **outbound** session, so there
-is **zero inbound SSH** to firewall — the network attack surface for login disappears.
-
-**2. Identity + short-lived credentials instead of static keys:**
-- **SSO/OIDC** (Keycloak) as the identity source; **MFA** enforced at login.
-- **SSH certificate authority** — the broker issues a **short-lived cert** bound to the
-  user's identity+role+TTL; the VM trusts the **CA**, not individual keys, so expiry =
-  automatic revocation and nothing permanent lands on the host.
-- **RBAC** — which users may log into which VMs as which account.
-- **Session recording + audit** — every interactive session logged (compliance).
-- **JIT / approval** — access granted for a window on request, not standing.
-
-**3. Accounts:** never share `ubuntu` for real users (lose attribution). Use
-**directory-integrated** accounts (SSSD + LDAP/AD, configured by Ansible) or
-**broker-mapped** logins (the proxy maps an SSO identity to an OS user on the fly).
-
-**Firewall end state:** the SG allows SSH **only from the bastion/proxy**
-(`ip saddr <broker_cidr> tcp dport 22 accept`), tighter than `mgmt_cidr`; with an
-agent-based broker, **drop the inbound SSH rule entirely**.
-
-**Tooling:** Teleport · HashiCorp Boundary · Cloudflare Access+Tunnel · AWS SSM
-Session Manager · Tailscale SSH — all pair with Keycloak (OIDC) and the
-Headscale/Tailscale identity model above (access by `tag:`/identity, not by subnet).
-
-**Core-lab note:** the host already *is* the bastion — `ssh -J user@host
-ubuntu@<vm mgmt IP>` is the scoped admin path and needs no firewall change. That is
-sufficient for the JQR demo; the broker/CA/RBAC stack is the enterprise layer on top.
-
-
-### Directory login with Samba AD DC **[ent]**
-
-**Goal:** a person who exists only in Active Directory (`alice`) logs into a tier VM
-with her **AD username and password**, gets `sudo` only because of an AD group, and
-loses access the moment she is disabled in AD. No local account, no SSH key, nothing
-per-user on the VM. Built as Phase 11.
-
-**Why Samba AD DC** (recorded as decision 14.0-2 in `docs/decisions.md`, replacing
-14.0-1's FreeIPA pick for the host-identity plane):
-- It speaks Active Directory's own protocols (Kerberos, LDAP, AD-style DNS, SMB), so the
-  VMs join exactly as they would join a Windows domain: `realm join`, `adcli`, SSSD's
-  `ad` provider. What you learn transfers directly to a real AD.
-- It runs on Ubuntu 24.04 from the **same golden image**. FreeIPA needs a RHEL-family
-  guest, which means a second Packer pipeline.
-- About 1 GB of RAM.
-- Trade-off: no FreeIPA-style HBAC rules. Per-tier login policy is AD groups plus
-  `realm permit -g` on each tier instead (e.g. only `db-admins` on the backend).
-
-**Login methods, in build order:**
-
-| Step | Method | What it proves | Why this order |
-|---|---|---|---|
-| core | SSH with AD password | The VM accepts directory credentials; SSSD checks them with the DC over Kerberos | The requirement itself; needs only the join and sshd password auth |
-| core | Group-based access + sudo | Authorization comes from the directory, and revocation is central (disable in AD, refused everywhere) | Two config lines on top of the join, and the strongest demo |
-| stretch | Kerberos SSO (`kinit` once, GSSAPI) | What makes a *domain* more than a user database: tickets and host principals | Depends on SRV records, PTR records and the clock, which fail with misleading errors, so build it on a working base |
-
-**Topology:**
-```
- tier-svc 10.0.10.0/24 (shared services)
-   dc 10.0.10.10  Samba AD DC: realm AD.LAB.TEST, DNS for ad.lab.test, KDC, LDAP, NTP
-        ▲  allowed in (ACL + sg_directory): 53 dns · 88 kerberos · 123 ntp ·
-        │  389/636 ldap/ldaps · 445 smb · 464 kpasswd · 3268/3269 global catalog
-        │
- tier-a / tier-b VMs: realm-joined members (SSSD), route 10.0.10.0/24 via tier gw
-        ▲
-        │  ssh alice@<vm>  →  password  →  SSSD on the VM  →  KDC on dc
- bastion (the host, per the core-lab note above)
-```
-Identity is a shared service, so it gets its own tier: the ACL and the DC's security
-group allow only AD ports into it, and the data tiers stay isolated from each other.
-The bastion needs no `alice` account; the SSH client side never checks her identity,
-the VM does.
-
-**DNS breaks first.** The domain is the **subdomain `ad.lab.test`** (realm
-`AD.LAB.TEST`), not `lab.test`: an AD domain controller must be authoritative for its
-own DNS zone, and `lab.test` already belongs to the lab's resolver. Members find the
-DC through SRV records (`_ldap._tcp.ad.lab.test`, `_kerberos._udp.ad.lab.test`), which
-Samba's internal DNS publishes automatically. The lab resolver **forwards** `ad.lab.test`
-and the reverse zone to the DC, so members keep one resolver and every other name
-resolves as before. The SSO step needs those PTR records, which closes the reverse-DNS
-gap noted in `docs/decisions.md`.
-
-**Image vs instance (Phase 3).** Bake trust, never identity:
-- **Bake:** `sssd`, `sssd-tools`, `libnss-sss`, `libpam-sss`, `realmd`, `adcli`,
-  `samba-common-bin`, `krb5-user`, `chrony`; the CA root; the `mkhomedir` PAM profile.
-- **Never bake:** a completed join, `/etc/krb5.keytab`, `/etc/sssd/sssd.conf`, the SSSD
-  cache, a hostname. A keytab is the machine's identity; every clone would authenticate
-  as the same computer. A build check fails the image if `/etc/krb5.keytab` exists.
-
-**Secrets (Phase 2, Vault):** `secret/ad/administrator` (used only to provision the DC),
-`secret/ad/joiner` (the delegated join account), `secret/ad/test-users` (demo passwords for
-`verify`). The domain administrator password never reaches a member VM.
-
-**Enterprise hardening on top:**
-- **One-time-password join:** pre-create each computer with
-  `adcli preset-computer --one-time-password`, store the OTP in Vault per host, and join
-  with `realm join --one-time-password`. That removes the joiner password from the VMs;
-  the OTP is spent on use.
-- **LDAPS / signing:** trust the lab CA on the DC and members; require LDAP signing.
-- **MFA:** AD password login over SSH has none. Add it at the broker (Teleport/Boundary
-  with OIDC) or with a PAM module; or federate authentik to AD as an LDAP source so
-  web SSO and host login share one identity.
-- **Cached credentials:** SSSD caches logins by default, so a disabled user may still log
-  in while the DC is unreachable. Decide per tier (`cache_credentials = False` on the
-  backend).
-- **Churn:** ephemeral frontends must `realm leave` (or have their computer object
-  deleted) on destroy, or AD fills with stale computer accounts.
+| **N1** | tiers are isolated | vm-a → `10.0.2.10` on its tier NIC with `wg0` down: no route/timeout |
+| **N2** | the VPN routes subnets | vm-a → vm-b's **tier** address `10.0.2.10` (not its overlay address) succeeds; `ip route get` shows `dev wg0` |
+| **N3** | no internet from tiers | direct `curl https://example.com` fails; through the proxy → 403 and logged |
+| **N4** | mgmt NIC reaches only the host | VM → another VM's NIC0 fails; VM → `HOST_IP:8200` succeeds |
+| **N5** | Terraform runs least-privilege | `iac` key denied an admin-only API call |
+| **E1** | field-level encryption | `psql` shows `vault:v1:…`; API returns `**** 4242` |
+| **E2** | key rotation | rotate → new ciphertext is `vault:v2:…`; v1 ciphertext still decrypts (`verify`: scratch key; `demo`: the real key) |
+| **E3** | rewrap + retire | rewrap to v2; `min_decryption_version=2`; a saved v1 ciphertext fails to decrypt (`verify`: scratch key; `demo`: rewraps every row first) |
+| **T1** | mTLS on the wire | `tcpdump` on app-1 during a request: api ↔ postgres only on TCP 15008, no SQL text |
+| **T2** | workload identity | ztunnel log shows `spiffe://cluster.local/ns/app/sa/api` → `ns/db/sa/postgres` |
+| **Z1** | identity authorization | from the frontend pod, TCP to `postgres.db:5432` is refused; ztunnel logs the deny |
+| **Z2** | STRICT mTLS | a pod in an unlabelled namespace cannot reach `api.app:8000` |
+| **P1** | edge PKI | the gateway certificate chains to `lab.test CA` |
+| **P2** | mesh PKI | a workload certificate chains through the istiod CA to `lab.test CA` |
+| **P3** | Vault speaks only TLS | `http://vault.lab.test:8200` fails; `https://` succeeds |
+| **S1** | no secrets in manifests | the api Deployment has no secret env or mounts; the password is at `kv/app/db` |
+| **S2** | Secrets encrypted at rest | `k3s secrets-encrypt status` = Enabled |
+| **B1** | restore drill | the api reads and decrypts restored rows |
+| **B2** | crypto-shredding | restored rows without the Transit key are unreadable |
+| **D1–D4** [ext] | directory | alice logs in and can `sudo`; bob logs in, no `sudo`; carol refused; disabling alice blocks her next login |
+| **G1–G3** [ext] | gates | bad plan rejected; approved merge verifies; runner denied `sys/` |
+| **O1–O3** [ext] | observability | dashboards populated; tunnel alert fires; mesh-deny alert fires |
+| **V1–V5** | revert | no `cloudstack-*` packages; `/etc/netplan` byte-identical; no lab bridges or containers; listening ports match the baseline; host online |
 
 ---
 
-## Open-source tool choices (2026 review)
+## 13. Examiner walkthrough (`demo`, about 10 minutes)
 
-Researched swaps where a more standard / better-licensed OSS tool fits. Optional;
-decide per phase.
+1. **Show the shape** (1 min): `lab status`, then the architecture diagram in §4.
+2. **VPC isolation and VPN** (2 min): N1 → N2 → bring `wg0` down → N1 again → up.
+   Then N3: the tiers have no internet, and here is the proxy denial in the log.
+3. **The application** (1 min): open `https://app.lab.test`, add a customer.
+4. **Encryption service** (2 min): E1 (`psql` vs the UI), E2, E3. Point out that the
+   API never holds key material.
+5. **Zero trust inside the cluster** (2 min): T1 `tcpdump`, T2 the identities, Z1
+   frontend → database refused, Z2.
+6. **Trust chain** (1 min): P1/P2, `openssl` output ending at `lab.test CA`.
+7. **Backup** (1 min): B2 — a stolen database dump is useless without Vault.
+   Then name what *is* critical: the Vault snapshot and the unseal key.
 
-| Layer (phase) | Plan default | Stronger/again-standard OSS | Why / when |
-|---|---|---|---|
-| IaC engine (4.x) | Terraform | **OpenTofu** | OSI MPL-2.0 under the Linux Foundation/CNCF vs Terraform's BSL (now IBM-owned); drop-in, full provider compat; lower-risk for new/regulated projects |
-| IaC PR automation (8) | Gitea runs `tofu` | **Atlantis** (Apache-2.0) | Standard "plan on PR, apply on comment" gate; alts OpenTaco (ex-Digger, runs in your CI), Terrateam |
-| Secrets (2.2) | Vault | **OpenBao** (MPL-2.0 fork) | Truly-open license, LF governance; namespaces/multi-tenancy free (Enterprise-only in Vault) |
-| Identity/SSO (2.x) | — | **Keycloak** (OIDC) | Anchor SSO for Headscale, OpenBao, Gitea — ties the "identity-based" story together |
-| Image hardening (3.2) | ad-hoc CIS | **dev-sec/ansible-collection-hardening** (or ansible-lockdown) + **OpenSCAP**/SCAP Security Guide | dev-sec applies controls; OpenSCAP *validates* against a CIS profile and reports |
-| TF security scan (6) | tfsec | **Trivy** (`trivy config`) | tfsec is being folded into Trivy; Trivy also does the image scan — one tool |
-| VPN (5) | WireGuard | **Tailscale/Headscale** | Ephemeral nodes + tag ACLs + subnet-router transit for the 3-network churn case (above) |
-| CI platform (8) | Gitea + runner | **GitLab CE** (heavier) | If you want registry/CI/issues in one; Gitea stays the lightweight default |
-
-**Sources (2026):**
-[OpenTofu](https://www.turbogeek.co.uk/opentofu-vs-terraform-2026/) ·
-[Atlantis/alternatives](https://scalr.com/learning-center/selecting-a-terraform-cloud-alternative) ·
-[Headscale](https://bex.co/blog/2026/09/04/headscale-self-hosted-mesh-fleet) ·
-[OpenBao](https://www.openbao.ch/comparison/) ·
-[CIS hardening](https://www.ansiblebyexample.com/articles/ansible-compliance-as-code-cis-benchmarks-stig-hardening)
-
-## Risks
-
-- **CloudStack advanced-zone bring-up** is the most fragile step; the tracker makes
-  it resumable — budget iteration.
-- **Control-plane sprawl:** Vault+MinIO+Gitea add moving parts; keep them in one
-  `docker/` compose project with health checks so `platform` is one command.
-- **Secrets bootstrapping (chicken-and-egg):** Vault/MinIO must exist before
-  Terraform can read creds/state — hence Phase 2 precedes Phase 4; a small
-  two-stage init (unseal/seed Vault, create buckets) handles it.
-- **Template fetch** can take minutes; poll `isready`.
-- **`down` networking** is the one step that can drop host connectivity; `netplan
-  try` + external backup + the Phase 9.3 revert check mitigate it.
-- **Packer needs `/dev/kvm`** — present here; confirm on any target VM.
-- **Headscale (if used for the VPN):** PostgreSQL backup is mandatory (it holds nodes,
-  keys, and ACL state — losing it loses the mesh); no official web console; server-side
-  ACL linting is weak, so validate the HuJSON ACL in CI.
+Close with what was deliberately **not** built and why (§15).
 
 ---
 
-## Live-run lessons (from the core-lab first run — engineer these in)
+## 14. Teardown order (`down`)
 
-The first end-to-end `up` on a **non-pristine host** surfaced failures a fresh VM would
-have hidden. Bake these in so the enterprise build (CI runners, re-used hosts) does not
-repeat them.
+Each line runs that phase's `down()`. The state each step reads is listed so that no
+step depends on something already deleted.
 
-1. **Preflight the apt state; fail fast and loud.** The vendored installer runs
-   `set -euo pipefail`, so any apt source that makes `apt-get update` exit non-zero — a
-   leftover `docker.sources` with an unexpanded `${UBUNTU_CODENAME}`, or a rotated
-   HashiCorp key (`NO_PUBKEY`) — **silently kills the install** mid-run. Run a strict
-   `apt-get update` preflight that dies naming the offending source *before* any heavy
-   step, and make our own repo setup **always (re)install the signing key** rather than
-   skipping because the `.list` already exists (keys rotate).
+| # | Step | Reads | Removes |
+|---|---|---|---|
+| 0 | `backup` | Vault, kubeconfig | nothing — takes a final `lab backup` while the data and its key still exist (`--no-backup` skips it) |
+| 1 | `app` | `state/kubeconfig` | ns `app`, `db` (PVC); Vault `auth/k3s/role/api`, policy `api`, `kv/app/*`, `transit/keys/customers` (deletion allowed first) |
+| 2 | `mesh` | kubeconfig | Istio (`istioctl uninstall --purge`), Gateway API CRDs; **revokes** the istiod CA certificate in Vault |
+| 3 | `cluster` | kubeconfig | cert-manager; Vault `auth/k3s`, policy `cert-manager`; then deletes `state/kubeconfig` |
+| 4 | `directory` [ext] | inventory, AD secrets | `realm leave` on members; Vault `kv/ad/*` |
+| 5 | `tunnel`, `base` | inventory | nothing to undo on VMs that are about to be destroyed; WireGuard public keys in Vault |
+| 6 | `setup` | Vault (`iac`, MinIO keys) | `terraform destroy`; then the state object; then `state/inventory.json` |
+| 7 | `image` | Vault (admin) | the CloudStack template; MinIO `images/*` |
+| 8 | `provision` | — | CloudStack: services, system VMs, `cloud` and `cloud_usage` DBs, installer tracker, packages, NFS exports, drop-ins, repo, `cmk` |
+| 9 | `platform` | — | stops and removes the compose project, volumes, Docker; removes the lab CA from the trust store (the host trust store is part of the baseline) |
+| 10 | host | `/var/backups/lab/netplan.orig/` | restores netplan (`netplan try` with auto-revert); removes `cloudbr0`/`cloud0` |
+| 11 | `state/` | — | deleted last |
+| 12 | reboot | — | — then run `revert-check` |
 
-2. **A reused host's old `cloud` database is poison.** A prior install's
-   `cloud`/`cloud_usage` with an older schema (e.g. missing
-   `configuration.default_value`) makes the 4.22 management server loop on HTTP 503 and
-   never become ready — and the installer tracker's `db_deployed=yes` makes a re-run
-   **skip** redeploying, so it never self-heals. Teardown must drop the databases **and**
-   delete the installer tracker; the enterprise build should assert schema/version
-   compatibility (or always deploy fresh) before trusting an existing DB.
+`/var/lib/lab/` (unseal key, backups) is **kept** by default. `down --purge-secrets`
+removes it after a confirmation prompt naming every file.
 
-3. **All-in-one agent↔management startup is a race.** The KVM agent must not connect
-   before the management API is serving. The readiness gate polls `/client/` for a real
-   HTTP 200 (not just an open port), but systemd's default `TimeoutStartSec=90s` is
-   shorter than the gate's wait budget, so on first boot — where management init takes
-   minutes — the agent **start times out**. Raise `TimeoutStartSec` on
-   `cloudstack-agent` above the readiness budget, gate on a 200 (not port-open), and
-   expect multi-minute first-boot management init.
+---
 
-4. **Teardown must not depend on state it just deleted, and must be `set -e`-safe.**
-   `restore_netplan` read the backup path from the tracker that `remove_files` had
-   already deleted, and a lookup helper that returned non-zero on a missing key aborted
-   `down` under `set -e` **before the reboot**. Rules: keep the netplan backup *outside*
-   the repo and reference it **directly** (not via a tracker); make tracker/lookup
-   helpers return success on "not found"; order teardown so network restore never
-   depends on deleted markers; keep the reboot out of the reach of an earlier failure.
+## 15. Decisions and alternatives not built
 
-5. **Leftovers from prior runs cause silent, confusing failures.** Custom systemd
-   drop-ins, `/usr/local/sbin` wait scripts, extra bridges, and third-party apt sources
-   from earlier installs all bit us. Teardown must remove **everything** the lab and its
-   vendored installer create; CI/enterprise runs should start from an
-   **ephemeral/throwaway host or image** so no cross-run state exists, and/or run a
-   preflight that refuses to proceed when prior-install artifacts are detected.
-
-6. **Make provision idempotency health-based, not flag-based.** The core lab guards the
-   install with a `cloudstack_installed=yes` tracker flag that is only written *after* a
-   fully successful run — so a mid-run failure (e.g. the zone-deploy timeout) leaves the
-   flag unset and re-runs re-enter the installer. The enterprise build should gate on
-   **actual health**: skip provision only when the management API returns `200` **and** a
-   deployed, Enabled zone exists **and** the required offerings are present. Pair this
-   with lesson 2 — on a *fresh* provision (no installer tracker yet), **drop any
-   pre-existing `cloud`/`cloud_usage` DB** so the installer can never inherit an ancient,
-   un-migratable schema. (A fresh deploy seeds the DB at the `4.0.0` baseline and the
-   management server migrates it to the target on first start; that migration is normal
-   but can run long — gate on `200`, don't assume a fixed timeout.)
-
-7. **Scripts invoked directly need the executable bit.** `cmd_image` ran
-   `image-build-all.sh` directly; a freshly-authored file without `+x` fails with
-   "Permission denied." Set `+x` on every script (git preserves it once committed) or
-   invoke via `bash <script>`.
-
-8. **A sourced helper must not set generic globals.** `cloudmonkey-install.sh` set
-   `SOURCE_DIR`, which clobbered the `SOURCE_DIR` of the scripts that sourced it, sending
-   `packer build` / `terraform -chdir` to the wrong directory. Give sourced files
-   private variable names (e.g. `CMK_DIR`).
-
-9. **Keep Packer's build target and `${path.root}` paths consistent with the layout.**
-   Moving the `.pkr.hcl` files into a `hcl/` subdir broke both the build invocation and
-   the `http_content` / `output_directory` paths. Point the build at the subdir and use
-   `${path.root}/../…` for sibling dirs; add a build-skip when the artifact already
-   exists locally (so a failed upload re-run doesn't rebuild or hit "output dir exists").
-
-10. **The Chainguard `minio-client` entrypoint is `mc`.** `docker run <img> sh -c "…"`
-    passes `sh` to `mc` ("not a recognized command"); override with `--entrypoint sh`.
-
-11. **Terraform's cloudstack provider can't create an untagged shared network** — its
-    `vlan` field is numeric, and a tagged VLAN isn't host-reachable on a flat LAN.
-    Create the mgmt shared network out-of-band via `cmk` (`vlan=untagged`) and hand its
-    UUID to Terraform as a variable.
-
-12. **ConfigDrive userdata is delivered by the VM's default NIC's network.** With a
-    ConfigDrive-pinned image, the default NIC's network offering must serve
-    `UserData=ConfigDrive` or the SSH key never lands — shared networks default to
-    VirtualRouter userdata, so create a shared offering with `UserData=ConfigDrive`.
-
-13. **Pick the right Terraform inventory plugin.** `ansible_host`/`ansible_group`
-    resources are read by `cloud.terraform.terraform_provider` (point `project_path` at
-    the initialized project), NOT `terraform_state` (which only maps native cloud-instance
-    types like `aws_instance`). Paths these plugins receive must be **absolute** (they run
-    `terraform` from elsewhere), and `terraform_state` requires the config file be named
-    `*terraform_state.yml`.
-
-14. **SSH-launched background processes must detach all three stdio.** A long-running
-    listener started over SSH hangs/aborts unless **stdin** is redirected too
-    (`nohup … </dev/null >/dev/null 2>&1 &`), not just stdout/stderr.
-
-15. **A WireGuard Endpoint must never fall within its own AllowedIPs.** Endpoint = peer
-    tier IP while `AllowedIPs` covered that tier → the handshake routed *into* the tunnel
-    and never completed. Run the tunnel transport over an underlay the tunnel does not
-    route (here, the mgmt network); for the enterprise build use a **dedicated transit
-    network** for the VPN underlay, separate from the data tiers and the admin network.
-
-16. **Remote verification listeners must outlive the SSH session.** The `verify` demo
-    service started over SSH with `nohup`/`setsid` didn't persist, so the "service
-    reachable over the tunnel" check saw a connection-refused (RST) and failed. Start
-    such helpers as **transient `systemd-run` units** (stopped on teardown) so they run
-    independently of the SSH connection. (A fast `rc=7` refused vs. a `rc=28` timeout also
-    distinguishes "no listener" from "firewall dropped it" — useful when debugging.)
-
-**Meta-lesson:** the first batch (1–6) appeared only because the test host was *reused* —
-so make "fresh, ephemeral host" a hard precondition (a dedicated CI runner image or a
-disposable VM) with the preflight checks as the safety net. The rest (7–16) are build /
-integration-design bugs to fix in code: tight CloudStack/Terraform/Ansible/WireGuard
-integration has many sharp edges, so budget real end-to-end iteration and keep every
-cross-tool assumption (paths, NIC defaults, userdata delivery, tunnel underlay) explicit.
+| Decision | Chosen | Not built, and why |
+|---|---|---|
+| IaC engine | Terraform | OpenTofu: drop-in and openly licensed; a one-line swap via `TF_BIN` |
+| Secrets/KMS | Vault | OpenBao: its advantage (free namespaces) is unused by a single tenant |
+| PKI | one CA in Vault + istiod sub-CA | two-tier root/intermediate: without an offline root it adds shape, not safety |
+| VPN | WireGuard site-to-site | Tailscale/Headscale: better for many ephemeral nodes with tag ACLs; overkill for two sites |
+| Mesh | Istio ambient | Linkerd: simpler install, but sidecars per pod and edge-only open-source releases |
+| CNI | k3s flannel | Cilium: its flow visibility is covered by ztunnel's deny logs for meshed traffic |
+| Ingress | Istio Gateway | Traefik (disabled), NGINX Gateway Fabric: a second controller outside the mesh's identity model |
+| DB credentials | static, in Vault KV | Vault database engine: short-lived users per pod; costs refresh logic in the api and a Vault → Postgres path through STRICT mTLS |
+| App delivery | images built, scanned, pinned | code in ConfigMaps + pip at start: unpinned, unscanned, needs internet from the tier |
+| Directory [ext] | Samba AD DC | FreeIPA: needs a RHEL-family guest and a second image pipeline |
+| Egress control | proxy allow-list | ACL allow-list by CIDR: registries and mirrors sit behind CDNs, so CIDR lists rot |
+| Privileged access | the host as bastion, AD logins [ext] | Teleport/Boundary with an SSH CA and session recording: the production answer, out of scope |

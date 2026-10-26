@@ -1,30 +1,141 @@
-# Editor and OS noise
+# .gitignore
+#
+# THE RULE. Every path in this repository is exactly one of three things, and
+# knowing which one it is decides whether it belongs in git. When you add
+# something, decide its bucket first and put the entry in that section.
+#
+#   1. COMMITTED CONFIG - non-secret settings that make the lab portable.
+#      Ports, hostnames, image tags and digests, provider version pins.
+#      Clone this elsewhere and it stands up the same. Not listed here.
+#
+#   2. MACHINE-LOCAL STATE - real, but not portable. Container data, rendered
+#      files, anything holding an address discovered on this host. Deleting it
+#      costs a re-run, nothing more.
+#
+#   3. SECRETS - never, on any branch. If one lands in history, ROTATING THE
+#      SECRET IS THE FIX; deleting the file is not.
+#
+# Two traps worth knowing before you edit this file.
+#
+#   A pattern containing a slash is relative to THIS file's directory. So
+#   `docker/vault/certs/` stops matching the moment that tree moves. Where a
+#   rule can be written without a slash it is, because a bare `certs/` matches
+#   at any depth and survives a reorganisation. `reference/` keeps its own
+#   .gitignore for the same reason.
+#
+#   A rule that matches nothing looks exactly like no rule. `git check-ignore`
+#   answers for a path whether or not it exists, so assert on the paths you
+#   care about rather than reading this file and believing it. Phase 7.2 wires
+#   those assertions into `make lint`.
+#
+# Why this file exists before anything generates a secret: the first run that
+# writes a private key must not also be the run that decides whether it is
+# ignored.
+
+
+# --- 1. Committed config ----------------------------------------------------
+#
+# Nothing is ignored here, but two things are easy to ignore by mistake:
+#
+#   .terraform.lock.hcl   COMMIT IT. It pins provider versions and is what
+#                         makes an init reproducible on another machine.
+#   *.tmpl                COMMIT the templates. Their rendered output is
+#                         bucket 2 and is ignored below.
+
+
+# --- 2. Machine-local state -------------------------------------------------
+
+# Editor and OS noise.
 .DS_Store
 *.swp
+*~
 
-# CloudStack installer checkpoints and logs. 
+# Our own run state: tracker, generated inventory, scratch.
+/state/
+
+# Container runtime state, at any depth.
+data/
+logs/
+
+# Rendered from a committed .tmpl. The template is the source of truth.
+.env
+*.rendered
+docker/coredns/zones/*.zone
+docker/proxy/conf/*.conf
+
+# CloudStack's vendored installer writes these beside itself.
 cloudstack-installer-tracker.conf
 cloudstack-installer.log
 installer.log
 
-# CoreDNS.
-services/coredns/.env
-services/coredns/zones/*.zone
+# Gitea runner registration. Single-use token exchanged for this file.
+.runner
 
-# vault
-services/vault/data/
-services/vault/logs/
-services/vault/certs/
-services/vault/.env
-services/vault/vault-init.json*
+# Terraform working state. The lock file is bucket 1 - see above.
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+tfplan
+plan.json
+crash.log
+crash.*.log
+
+# Packer output. A qcow2 is 1-2 GB and is rebuilt from the template.
+packer/output-*/
+packer/packer_cache/
+*.qcow2
+*.img
+
+# Ansible generated inventory and retry files.
+ansible/inventory/generated*
+*.retry
+
+# MinIO client config - holds endpoint aliases AND their credentials.
+.mc/
+
 
 # --- 3. Secrets -------------------------------------------------------------
+#
+# Anything matching here is a credential. There is no branch on which one of
+# these may be committed.
+
 secrets/
+
+# TLS material, at any depth. Ignoring the directory rather than the extension
+# means the key and its certificate go together and nothing depends on
+# guessing an extension correctly.
+certs/
 *.pem
 *.key
 *.key.enc
+*.crt
+*.csr
+
+# Vault's two tier-1 credentials - the only two that cannot live in Vault,
+# because they are what opens it. Kept in separate files so that rotating the
+# token never rewrites the file holding the irreplaceable unseal key.
+vault-init.json*
+unseal-key*
+root-token*
+
+# Vault AppRole. Both halves are credentials.
+*role-id*
+*secret-id*
+
+# SSH keys.
+id_rsa
+id_ed25519
 *_rsa
+*_ed25519
+
+# WireGuard private keys. Generated on the VM and never moved (see the
+# wireguard role) - so one appearing here means something went wrong.
+*.wgkey
+privatekey*
+
+# Terraform variable files. Credentials arrive as TF_VAR_* from Vault at run
+# time; a .tfvars file on disk is how that discipline gets broken.
 *.tfvars
-.runner
-
-
+*.tfvars.json
+!*.tfvars.example

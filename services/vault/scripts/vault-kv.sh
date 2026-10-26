@@ -40,9 +40,6 @@ configure_kv_mount() {
 
     case "$mount_type" in
         kv)
-            # v1 and v2 both report "kv" here; only the option tells them
-            # apart, and the read paths differ - secret/<path> against
-            # secret/data/<path>. Everything written later assumes v2.
             printf '%s' "$response" |
                 jq -e '.data["secret/"].options.version == "2"' >/dev/null ||
                 die "Expected kv v2 at secret/. Refusing to use it."

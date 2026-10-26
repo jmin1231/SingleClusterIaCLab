@@ -1,0 +1,32 @@
+# .editorconfig - whitespace, settled once so no diff is ever about it.
+# https://editorconfig.org
+
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 4
+
+# Four spaces for shell, matching `shfmt -i 4`. The Makefile's recipes and
+# `.tf` files are the two places that cannot follow suit.
+[*.{sh,bash}]
+indent_size = 4
+
+[{Makefile,*.mk}]
+indent_style = tab
+
+# terraform fmt is not configurable: two spaces, and it rewrites anything else.
+[*.{tf,tfvars,hcl}]
+indent_size = 2
+
+[*.{yml,yaml,json}]
+indent_size = 2
+
+# Markdown uses two trailing spaces as a hard line break, so trimming them
+# silently changes rendered output.
+[*.md]
+trim_trailing_whitespace = false

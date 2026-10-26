@@ -1,0 +1,15 @@
+# .trivyignore
+#
+# One finding per line, each with a comment saying WHY it is accepted and who
+# accepted it. An entry without a reason is indistinguishable from an entry
+# nobody can justify, and that is how an ignore file becomes the place problems
+# go to be forgotten.
+#
+# Nothing belongs here merely because upstream has not patched it. `scan`
+# passes --ignore-unfixed, which already drops unfixed CVEs; this file is only
+# for findings that ARE fixable and that we are choosing to carry anyway.
+#
+# Format:
+#   CVE-2026-12345  # <why accepted> - <date> - <who>
+#
+# Empty on purpose.

@@ -105,7 +105,18 @@ configure_pki_root() {
 create_pki_root() {
     log "Generating root CA..."
 
+    local body
     local response
+
+    # jq builds the body so the CA's name can come from CA_CN - a single-quoted
+    # literal would not expand it, and jq handles the quoting.
+    body="$(jq -n --arg cn "${CA_CN}" '{
+        common_name: $cn,
+        ttl: "87600h",
+        key_type: "rsa",
+        key_bits: 4096,
+        issuer_name: "lab-root"
+    }')"
 
     if ! response="$(curl -fsS --max-time 10 \
         --cacert "${CA_CRT}" \
@@ -113,13 +124,7 @@ create_pki_root() {
         --header "X-Vault-Token: ${TOKEN}" \
         --header "Content-Type: application/json" \
         --request POST \
-        --data '{
-            "common_name": "SingleClusterIaCLab Root CA",
-            "ttl": "87600h",
-            "key_type": "rsa",
-            "key_bits": 4096,
-            "issuer_name": "lab-root"
-        }' \
+        --data "$body" \
         "${VAULT_API}/v1/pki/root/generate/internal")"; then
         die "Could not create the root CA."
     fi

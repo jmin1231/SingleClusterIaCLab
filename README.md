@@ -227,6 +227,9 @@ docs/           build-plan.md — follow this. Plus decisions.md,
                 failure-log.md, network-plan.md, resource-budget.md,
                 vault-lesson.md
 reference/      the finished lab, stopped. Read it AFTER you attempt a step
+                cloudstack-vpc-securitygroup/ — separate self-contained lab:
+                VPC security groups enforced per-VM with nftables, driven by
+                Terraform + Ansible
 <everything else you write goes here>
 ```
 

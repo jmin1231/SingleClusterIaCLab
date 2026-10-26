@@ -8,7 +8,7 @@ VPC with isolated tiers, and an identity-based overlay as the only route between
 Everything is secrets-managed, remote-stated, policy-gated and pipeline-driven, with a
 `down` that restores the host and proves it.
 
-It satisfies JQR 191 (*construct a VPC and implement a VPN to provide access*) while
+It builds a VPC and a VPN that provides access between its tiers, while
 mirroring how a platform team actually runs this: central accounts, SSO, short-lived
 credentials, default-deny networking and a reviewable change path.
 
@@ -19,9 +19,11 @@ history where it is inconvenient enough to be deliberate*. The sole exception is
 vendored upstream CloudStack installer, which is third-party code we re-vendor, never
 author.
 
-**Resource sizing is out of scope here.** Tools get tailored or cut once it runs.
-`docs/resource-budget.md` is written against a Kubernetes estate this plan does not
-have and needs rewriting regardless.
+**Target host: one nested VM — 32 GB RAM · 16 cores · 200 GB disk.** Sized in
+**Resource plan** below. `docs/resource-budget.md` is written against a Kubernetes estate
+this plan does not have and is superseded by that section. The short version: memory and
+CPU are comfortable, **disk is the only binding constraint**, and the retention policy at
+0.6 is what decides how much of this plan can be built.
 
 This document is a **design review plus a step list**. The review comes first because
 nine findings change the phase ordering, and two of them decide whether the lab is
@@ -37,7 +39,8 @@ achievable at all.
 | **Host login** | local accounts, Ansible-placed SSH keys | **Active Directory** — central accounts, groups, sudo policy, Kerberos |
 | **Service login** | local admin password per service | **SSO** — OIDC brokered from AD, MFA on privileged groups |
 | **SSH access** | static `authorized_keys` | **Vault SSH CA** — short-lived signed certificates, principals from AD groups |
-| **Phases / steps** | 10 phases | 14 phases, 70 steps — identity and access are new, the overlay is built once |
+| **Resources** | unstated — the source design budgets none | **32 GB · 16 cores · 200 GB nested**; compute comfortable, **disk binding**, retention gates scope |
+| **Phases / steps** | 10 phases | 14 phases, 74 steps — identity and access are new, the overlay is built once |
 
 Three identity planes now exist, and `14.0-1` is explicit that conflating them is where
 the confusion starts. They must never cross:
@@ -51,6 +54,64 @@ the confusion starts. They must never cross:
 A human never gets an AppRole. A machine never gets an OIDC login. Keycloak is **not**
 a directory — it has no KDC, no machine enrolment, no host keytabs, and a VM cannot be
 joined to it. That is what AD is for, and it is why both exist.
+
+---
+
+## Resource plan
+
+The source design mentions no resource of any kind — a vocabulary audit of
+`PLAN-enterprise.md` finds **zero** occurrences of RAM, memory, GB, vCPU, storage, nested
+or retention, and its 24 hits for "core" are all the `[core]` phase tag. Full analysis in
+[`plan-enterprise-review.md`](plan-enterprise-review.md).
+
+### Memory — 32 GB, comfortable
+
+Steady state ≈16.2 GB: host 2.5, CloudStack management 2.5 (`-Xmx` **pinned** to 2 GB),
+MySQL 1.0 (`innodb_buffer_pool_size` trimmed to 512 MB), the two system VMs 1.5, routers
+1.0, the Docker control plane ≈2.4, and the guest tiers ≈5.1. Add a CI job (+1.5),
+observability (+2.0) and a Packer build (+4.0) and the worst realistic concurrency is
+**≈23.8 GB of 32**.
+
+So observability is affordable and should not be treated as a stretch goal. **Do not
+overcommit memory** — `mem.overprovisioning.factor` stays at 1, because memory overcommit
+trades a scheduler error you can read for an OOM kill you have to diagnose.
+
+### CPU — 16 cores, not a constraint, but set the factor anyway
+
+Guest allocation is 6–7 vCPU (two system VMs, one or two routers, two or three tier VMs),
+host services 3–4 under CI load, plus 2 for a Packer build: **11–13 of 16** at the busiest
+moment.
+
+**Set `cpu.overprovisioning.factor` to 2 explicitly** (1.8). At 16 cores the default
+*happens* to work for this plan, and that is the problem — the first addition past it
+reintroduces *"Insufficient capacity"*, which **blocks provisioning rather than degrading
+performance**, weeks after the decision that caused it.
+
+**Nested overhead: budget 2–3× every time estimate.** L2 VM exits trap through L1's KVM to
+L0. More cores make the lab hold more, not run faster — core count does not help a
+mostly-serial installer. The 16 cores do buy runner `capacity: 2` for parallel CI, 4 cores
+to Packer, and tier-mid without a budget argument.
+
+### Disk — 200 GB, and the only thing constraining the design
+
+| | GB |
+|---|---|
+| Host, Docker images and volumes | 60 |
+| CloudStack secondary storage (system template + 2 of ours) | 9 |
+| CloudStack primary storage — thin VMs, realistic growth | 70 |
+| Packer — ISO cache + transient build and output | 15 |
+| MinIO — image versions, **a second copy of each** | 6 |
+| Logs | 4 |
+| **Plan as written** | **≈164** |
+| *plus* the domain controller VM and its backups | +20 |
+| *plus* tier-mid | +15 |
+| **Full build — three tiers, AD, SSO, observability, CI** | **≈199 of 200** |
+
+**That last row is the finding.** 32 GB and 16 cores make the complete build comfortable
+on compute and **impossible on disk** — 199 of 200 with no margin, and qcow2 files only
+grow. With 0.6's retention policy the full build fits with ~40 GB spare; without it the
+lab runs out around week three, and the symptom will be CloudStack failing to start a VM
+for reasons that look nothing like a full filesystem.
 
 ---
 
@@ -313,6 +374,50 @@ builds the raw version once for comparison.
   must either re-provision the domain or restore it. Decide which; they are different
   scripts.
 
+### From the resource review — findings the source design has no vocabulary for
+
+**R36 · Nested virtualization is the deployment model, and nothing verifies it.**
+The source says *"Packer needs `/dev/kvm` — present here; confirm on any target VM"*, which
+materially understates it: **every CloudStack guest is an L2 nested VM** — both system VMs,
+every router, every tier VM. Nested virt is not a Packer prerequisite, it is a prerequisite
+for the control plane to reach a usable state at all. It is set on **L0** and cannot be
+fixed from inside the guest; get it wrong and you rebuild the VM. The plan's current first
+proof is the system VMs coming up, which is 90 minutes and several thousand installer lines
+into the run. *Fix:* a gate at 0.5 that boots one throwaway L2 guest first.
+
+**R37 · Every golden image is stored twice, and nothing prunes either copy.**
+The image is published to MinIO `images/<version>/` with a `latest` pointer, then registered
+in CloudStack **by URL** — which makes the SSVM download and keep **its own copy** in
+secondary storage. ~6 GB per version, versioned retention explicit, and no step anywhere
+deletes anything. Combined with the absence of any retention policy at all, this is the
+single largest line item on a 200 GB disk. *Fix:* one registry of record (0.6, 4.3).
+
+**R38 · There is no resume story, and on a nested VM that is a daily event.**
+"Reboot" appears four times in the source design and all four are in the teardown path.
+After a host restart: **Vault is sealed** — running, listening, answering everything `503`,
+with `docker ps` reporting healthy, so the first symptom is some unrelated service failing
+to read a secret; the **hypervisor agent may not have reconnected**, so the host sits in
+`Alert` while the API still cheerfully reports VMs `Running`; and **container start order is
+undefined**, which matters because the proxy resolves Gitea's container name at startup.
+*Fix:* a `resume` subcommand (5.8), stubbed in the dispatch from 0.4.
+
+**R39 · Secret zero is unaddressed.**
+The runner reads secrets from Vault via AppRole — but an AppRole needs a role-id **and a
+secret-id**, so the runner needs a credential in order to get credentials. That is the one
+credential in the design that cannot itself be issued at run time, and the source design is
+silent on it. Silence defaults to a long-lived secret-id pasted into Gitea, which is exactly
+the *"no long-term keys in Gitea"* outcome the CI phase claims to achieve. *Fix:* name the
+mechanism and its trust boundary in 3.1.
+
+**R40 · The mgmt "bastion" is a flat network, not a bastion — and it probably costs a
+router.** The source adds a *"mgmt/bastion shared network"* and gives every VM an interface
+on it, then claims the management plane is *"out-of-band from the data path"*. A shared
+network every VM sits on is a flat management plane — a legitimate lab choice, but the
+out-of-band claim does not hold, and there is no jump host, no session logging and no
+separate access control. Separately, an advanced-zone shared network normally gets **its own
+virtual router**: another vCPU, another 512 MB and another thing to restart on reboot, none
+of which the source counts. *Fix:* 5.2 states which it is and whether a router is wanted.
+
 ---
 
 ## Decisions taken (reject any on review)
@@ -335,6 +440,10 @@ builds the raw version once for comparison.
 | D14 | **CloudStack 4.21** | R17, measured. |
 | D15 | **Committed address plan wins** | R18. |
 | D16 | **No Kubernetes** | Not in scope. The identity and overlay work is the subject. |
+| D17 | **Disk is the binding constraint, not RAM or CPU** | At 32 GB / 16 cores the full build is ≈23.8 GB of memory and 11–13 of 16 cores — both comfortable. It is **199 GB of 200**. Retention (0.6) therefore decides scope. |
+| D18 | **`cpu.overprovisioning.factor = 2`, `mem.overprovisioning.factor = 1`, swap off** | CPU overcommit is free on idle lab guests; memory overcommit trades a readable scheduler error for an OOM kill; swap off removes Vault's `disable_mlock` exposure. |
+| D19 | **MinIO is the registry of record; CloudStack keeps only `latest`** | R37 — registering by URL makes the SSVM keep its own copy, so versioning in both stores doubles the largest artifact on the tightest resource. |
+| D20 | **Observability is not a stretch goal** | The source design tags it `[ent, stretch]` on an unstated budget. At 32 GB it costs ~2 GB and is what makes 11.5's authentication plane auditable. |
 
 ---
 
@@ -408,9 +517,9 @@ state/                    tracker, generated inventory — gitignored
 
 ## Phases and steps
 
-**70 steps, 14 phases.** Each is one working session with one exit check, and a step is
+**74 steps, 14 phases.** Each is one working session with one exit check, and a step is
 done when the check **exits zero**, not when it prints something plausible. `[core]` is
-the JQR demo; `[ent]` is hardening layered on.
+the network-isolation demo; `[ent]` is hardening layered on.
 
 Two structural choices keep the count down. **The tailnet is built once, at Phase 7, with
 pre-auth keys** — it does not wait for AD or Keycloak, so `demo` passes before the
@@ -420,11 +529,21 @@ an ADR instead of built for comparison (R22).
 
 ### Phase 0 · Scaffolding
 
-- **0.0** Remove the prior attempt from the root: `bootstrap.sh`, `lib/common.sh`,
-  `cloudstack/`, `services/`. History preserves them; `reference/` stays as the explicitly
-  frozen prior lab. **Blocked on committing the uncommitted work in
-  `services/vault/scripts/`, which exists only in the working tree.**
-  *Exit:* the root holds only files this plan created; `git show` still retrieves the old.
+- **0.0 ✅** Removed the prior attempt's code from the root — `bootstrap.sh`,
+  `lib/common.sh`, `cloudstack/`, `services/` — after `0b9f294` committed the
+  working-tree-only Vault work so history preserves it. `reference/` stays as the
+  explicitly frozen prior lab; `docs/`, `README.md` (stale until 13.1),
+  `PLAN-enterprise.md` and `oss-stack-reference.md` stay as design material.
+  *Exit:* no prior-attempt code in the root, and every removed file retrievable:
+  `git show 0b9f294:<path>`. **Done.**
+
+  **Provenance for 1.4.** The vendored CloudStack installer is third-party code we
+  re-vendor rather than author, and our copy is the one at `0b9f294`:
+  ```sh
+  git show 0b9f294:cloudstack/scripts/cloudstack-install.sh   # 2704 lines, upstream + local edits
+  git show 0b9f294:cloudstack/cloudstack-install-all.sh       #  137 lines, the prior wrapper (do NOT reuse)
+  ```
+  1.4 restores the first and writes the wrapper new.
 - **0.1 ✅** `.gitignore` with the three-bucket rule, plus `.editorconfig`,
   `.shellcheckrc`, `.yamllint`, `.trivyignore`. Checked by `tests/gitignore-assert.sh` in
   **both** directions — paths that must be ignored (none of which exist yet, which is the
@@ -436,7 +555,7 @@ an ADR instead of built for comparison (R22).
   scan `ip route get` for the `src`/`via` keywords rather than field positions, since
   `via` appears only when the target is off-link. *Exit:* both resolve, double-sourcing is
   a no-op, both execute-guards fire. **Passing.**
-- **0.3** Finish `lib.sh`: the transcript and the tracker.
+- **0.3 ✅** Finish `lib.sh`: the transcript and the tracker.
   The transcript has four traps already paid for — one `exec` redirect in `main()`
   **after** `verify_root` (at file scope a non-root run dies on a permission error instead
   of the readable message), so children inherit the descriptor and the 2,704-line vendored
@@ -450,14 +569,60 @@ an ADR instead of built for comparison (R22).
   that credential in a file permanently. The tracker's `is_done` tests **`== yes`** (R27).
   *Exit:* a `die` mid-run still produces a complete, timestamped, ANSI-free log, the
   terminal keeps colour, newest 20 retained; and a harness proves `key=no` and a deleted
-  line both read not-done while `key=yes` reads done.
-- **0.4** `bootstrap.sh` dispatch — `up down platform provision image template tailnet
-  identity sso lint scan policy setup verify demo status`, all stubs, with `usage()` and
+  line both read not-done while `key=yes` reads done. **Done** — `tests/lib-assert.sh`,
+  15 assertions.
+
+  The volume case is the one that bites. With five lines the transcript is complete
+  whether or not the EXIT trap waits, because the `die`'s own message lands last either
+  way — so a small test passes vacuously. Removing the wait and logging 200 lines gives
+  **142 / 198 / 164 across three runs**, a race on how much the writer has drained,
+  against 200 every time with it. The assertion is on an exact count, so the test can
+  actually fail.
+- **0.4** `bootstrap.sh` dispatch — `up down resume platform provision image template
+  tailnet identity sso lint scan policy setup verify demo status`, all stubs, with
+  `usage()` and
   up-front `[[ -x ]]` resolution of every sub-installer — plus the `lab=singlecluster`
   label and `log-opts` conventions (R32, R34) and their ADRs, applied from the first
   compose file written.
   *Exit:* bare invocation prints usage, every subcommand reaches a stub and exits 0, and a
   grep proves the label and log-opts conventions are documented before anything uses them.
+  `resume` is in the list from the start (R38) even though 5.8 implements it, so the command
+  map is honest about the lab's most frequent operation.
+- **0.5 [core]** The **nested-virtualization gate** and host preflight (R36). None of this
+  is fixable from inside the guest, so it runs before anything is installed.
+  On **L0**, before the lab VM exists: VMware — *Virtualize Intel VT-x/EPT* and
+  `vhv.enable = "TRUE"`; KVM/libvirt — `<cpu mode='host-passthrough'/>` plus
+  `kvm_intel nested=1`; Proxmox — CPU type `host`; Hyper-V —
+  `Set-VMProcessor -ExposeVirtualizationExtensions $true` **and Dynamic Memory off**. On any
+  Windows host, Hyper-V and WSL2 claim the hypervisor and must be disabled or nothing else
+  gets VT-x. Do not give L1 every core L0 has.
+  Inside L1: `egrep -c '(vmx|svm)' /proc/cpuinfo`, `/dev/kvm` present, `kvm-ok`, and
+  `/sys/module/kvm_intel/parameters/nested` reads `Y`.
+  Then the two host facts that quietly decide the disk budget: **check the root filesystem
+  actually spans the disk** — Ubuntu's installer defaults to an LVM layout that sizes root
+  well below the disk and leaves the rest of the volume group **unallocated** (`df -h /`,
+  `vgs`, `lsblk`), and fix it in the storage layout rather than growing it later; and
+  **disable swap**, because at 32 GB there is no capacity argument for it and Vault runs
+  with `disable_mlock`, so its plaintext secrets can otherwise be paged to disk — which
+  makes the plan's *"secrets never on disk in clear"* principle false.
+  *Exit:* all four L1 checks pass, **and one throwaway L2 guest boots to a login prompt**
+  — the behavioural test, not the flag check, because the flags can be right while the
+  guest still will not run. Root spans the disk; `swapon --show` is empty.
+- **0.6 [core]** The **retention policy** (R37), written before anything starts producing
+  artifacts, because at 199 GB of 200 it is what decides scope rather than hygiene.
+  | What | Policy |
+  |---|---|
+  | Registry of record | **pick one.** MinIO holds versions; CloudStack holds only `latest`. Never version in both |
+  | MinIO image versions | keep newest 2, prune on publish |
+  | CloudStack templates | delete the superseded template when registering its replacement |
+  | CI-built container images | delete every run with `if: always()` — a failed job must still clean up |
+  | Container logs | `log-opts` `max-size`/`max-file` on **every** service; the default `json-file` driver has no size limit, on a disk shared with CloudStack's storage |
+  | journald | cap `SystemMaxUse`, and size `SystemKeepFree` for what CloudStack needs rather than for journald |
+  | Packer | cache the ISO outside the repo and reuse it; `packer_cache/` is not a build artifact |
+  | Thin volumes | enable `discard` and run `fstrim` on a timer, or thin provisioning only ever grows |
+  *Exit:* every row has an owning step that enforces it, and `df` after a full
+  build-then-rebuild cycle is **flat, not monotonically rising** — which is the only check
+  that proves retention runs rather than merely being documented.
 
 ### Phase 1 · Host, CloudStack, reversibility
 
@@ -520,6 +685,18 @@ an ADR instead of built for comparison (R22).
   machine gets its identity avoids a whole class of first-boot mystery — plus mgmt and
   identity shared-network offerings.
   *Exit:* `cmk list …offerings` shows all five.
+- **1.8 [core]** Capacity and tuning, set **before** Phase 5 deploys anything.
+  **`cpu.overprovisioning.factor = 2`** and **`mem.overprovisioning.factor = 1`** — CPU
+  overcommit is free because lab guests idle, memory overcommit trades a readable scheduler
+  error for an OOM kill. At 16 cores the CPU default happens to work for this plan, which
+  is exactly why it gets set deliberately: the first addition past it reintroduces
+  *"Insufficient capacity"*, which blocks provisioning rather than slowing it, weeks after
+  the decision that caused it. Then pin CloudStack's JVM `-Xmx` to 2 GB — an unpinned heap
+  claims several GB it does not need and claims it from the guests — and trim MySQL's
+  `innodb_buffer_pool_size` to 512 MB.
+  *Exit:* both factors read back as set; `cmk list capacity` shows CPU and memory capacity
+  consistent with the Resource plan; and a deliberate over-allocation is **refused with
+  "Insufficient capacity"** rather than succeeding and overcommitting memory.
 
 ### Phase 2 · Names and trust
 
@@ -596,8 +773,15 @@ an ADR instead of built for comparison (R22).
   it again). Both `ensure`-shaped — create if absent, leave alone if present, **never
   rotate silently**. Usernames are not generated: a username is an identity, not a secret.
   Break-glass passwords land here (D9).
+  **And secret zero** (R39), which is the one credential that cannot be issued at run
+  time: an AppRole needs a role-id *and* a secret-id, so the runner needs a credential to
+  get credentials. Name the mechanism and its trust boundary — a secret-id delivered at
+  runner provisioning time, a response-wrapped token with a short TTL, or Vault Agent
+  auto-auth. Any is defensible; silence defaults to a long-lived secret-id pasted into
+  Gitea, which is exactly the outcome Phase 11 claims to avoid.
   *Exit:* `vault kv get` returns a seeded value **via AppRole**, not the root token; an ADR
-  records the direction of every secret; re-running changes nothing.
+  records the direction of every secret and the secret-zero mechanism; re-running changes
+  nothing.
 - **3.2 [core]** Capture the CloudStack `iac` key (R28). **`getUserKeys` to read, never
   `registerUserKeys`** — that one mints new keys and invalidates the old. Four states, one
   refusal: absent + remote has one → capture; absent + none → generate; present + matches →
@@ -700,8 +884,15 @@ an ADR instead of built for comparison (R22).
 - **4.3 [core]** Version, publish, register: tag by content hash, `latest` pointer, **skip
   build and publish when the hash is unchanged**, then register the template by URL and poll
   `isready`, idempotent by name+version.
-  *Exit:* a versioned object in MinIO, a second run with no input change skips both, and the
-  template is ready without a duplicate.
+  **Enforce 0.6's retention here** (R37), because this is the step that creates the problem:
+  registering by URL makes the SSVM **download and keep its own copy** in secondary
+  storage, so every version costs ~6 GB across two stores and nothing in the source design
+  deletes either. MinIO is the registry of record and keeps the newest two; CloudStack keeps
+  only `latest`, and the superseded template is deleted as part of registering its
+  replacement — not by a separate cleanup nobody runs.
+  *Exit:* a versioned object in MinIO, a second run with no input change skips both, the
+  template is ready without a duplicate, and **three successive publishes leave two objects
+  in MinIO and one template in CloudStack** — the check that proves pruning happens.
 - **4.4 [ent]** The build in CI — the hardest thing this pipeline does, nested virtualization
   inside a job container. `PACKER_LOG=1` plus a grep for qemu/kvm lines on failure is the
   difference between a debuggable failure and "Qemu failed to start". Delete built images
@@ -729,7 +920,15 @@ an ADR instead of built for comparison (R22).
   network on the bridge draws from the `.11–.50` range CloudStack claimed by **liveness
   probe rather than reservation** — anything of ours that is stopped when the installer runs
   can have its address taken.
-  *Exit:* `cmk list networks` shows all six with the committed CIDRs; a re-plan is empty.
+  **Say what the mgmt network is** (R40): every VM has an interface on it, so it is a flat
+  management plane, not a bastion — there is no jump host, no session logging and no
+  separate access control, and the "out-of-band from the data path" claim does not hold
+  while anything on it can reach every tier directly. Either build a jump host or call it
+  what it is. Decide too whether it gets **its own virtual router** — an advanced-zone
+  shared network normally does, which is another vCPU, another 512 MB and another thing
+  `resume` must restart — or use an L2 offering to avoid one.
+  *Exit:* `cmk list networks` shows all six with the committed CIDRs; a re-plan is empty;
+  and an ADR records the management-plane decision and the router count.
 - **5.3 [core]** The ACLs (R13): **frontend↔backend denied outright**, frontend↔transit and
   transit↔backend permitted, Tailscale's UDP **41641** and TCP **443** to the control plane
   on the overlay legs, SSH from mgmt, AD's ports from every tier to the identity network
@@ -762,6 +961,21 @@ an ADR instead of built for comparison (R22).
   called.
   *Exit:* `iac` completes a full apply **and is denied** a named global-admin operation.
   Both halves, or the step is not done.
+- **5.8 [core]** `resume` (R38) — placed here because this is the first point at which
+  every component that needs resuming exists. On a nested VM a host restart is a daily
+  event, not an incident, and three things are broken after one in ways that do not look
+  like what they are: **Vault is sealed** and answering everything `503` while `docker ps`
+  reports healthy, so the first symptom is an unrelated service failing to read a secret;
+  the **hypervisor agent may not have reconnected**, leaving the host in `Alert` while the
+  API still reports VMs `Running` — a control plane reporting its database rather than
+  reality; and **container start order is undefined**, which bites because the proxy
+  resolves Gitea's container name at startup.
+  So: unseal Vault, wait for the agent and assert the system VMs and router are actually
+  running, bring containers up in dependency order, then re-run `verify`. Extended
+  additively as later phases add components — Headscale at 7.1, the DC at 8.2, Keycloak at
+  9.1 — each of which must be added to `resume` in its own step, not retrofitted.
+  *Exit:* `reboot`, then a single `resume` returns the lab to a state where `verify`
+  passes, with **no manual step**; and running it twice is a no-op.
 
 ### Phase 6 · Ansible and the base estate
 
@@ -788,7 +1002,8 @@ an ADR instead of built for comparison (R22).
 ### Phase 7 · The tailnet — *built once, no identity dependency*
 
 - **7.1 [core]** Headscale and its database on the host, certificate from Vault, a name, a
-  proxy vhost — **and its backup in the same step** (R7), because that database holds every
+  proxy vhost — **and its backup in the same step** (R7), **and its line in `resume`**
+  (5.8), because that database holds every
   node, key and ACL, and losing it ends the mesh rather than degrading it: every node
   re-registers by hand.
   *Exit:* `headscale nodes list` answers over TLS, and a backup restores into a working
@@ -813,8 +1028,8 @@ an ADR instead of built for comparison (R22).
   pair that passes under a broken MTU (R26). Tailscale sets 1280 itself, which removes the
   common case but not the failure mode.
   *Exit:* both verdicts print, a large file transfers without stalling, and stopping
-  `tailscaled` on the transit breaks frontend→backend and nothing else. **This is the JQR
-  191 claim, and it passes here — before any identity work.**
+  `tailscaled` on the transit breaks frontend→backend and nothing else. **This is the
+  network-isolation claim, and it passes here — before any identity work.**
 
 ### Phase 8 · Active Directory — *the host identity plane*
 
@@ -827,8 +1042,10 @@ an ADR instead of built for comparison (R22).
   that cannot find a KDC.
   *Exit:* from a tier VM and from the DC, both a public name and a lab name resolve; a
   deliberately broken forward is detected rather than hanging.
-- **8.2 [core]** Samba AD DC provisioning (D1), idempotent, and time as a **security**
-  dependency. `samba-tool domain provision` is a once-ever operation like `operator init`,
+- **8.2 [core]** Samba AD DC provisioning (D1), idempotent, time as a **security**
+  dependency, and **the DC's line in `resume`** (5.8) — it is a Terraform-created VM that
+  every other VM depends on for login, so it must come back before anything else that
+  authenticates (R35). `samba-tool domain provision` is a once-ever operation like `operator init`,
   so it needs the same four-state guard — a half-provisioned DC must not be re-provisioned
   over. Kerberos rejects tickets outside five minutes of skew and **the error says nothing
   about time**, so the DC becomes the authoritative source for domain members (R29).
@@ -864,7 +1081,8 @@ an ADR instead of built for comparison (R22).
 ### Phase 9 · Access — *SSO and privileged access*
 
 - **9.1 [core]** Keycloak, its database, a certificate from Vault, a name, a proxy vhost, its
-  admin account as break-glass in Vault — and **LDAP user federation AD → Keycloak**
+  admin account as break-glass in Vault, **its line in `resume`** (5.8) — and **LDAP user
+  federation AD → Keycloak**
   (D4), read-only, with group mapping. One-way, so there is exactly one place a user is
   disabled. Keycloak is **not** a directory: no KDC, no machine enrolment, no host keytabs,
   and a VM cannot be joined to it. AD is the source of truth; Keycloak brokers it to OIDC.
@@ -1053,7 +1271,7 @@ Four levels, each a real command:
 
 1. **Per step** — the *Exit* check, exiting zero.
 2. **The demo** — `bootstrap.sh demo`: direct inter-tier path BLOCKED, overlay path
-   CONNECTED through the transit. This is the JQR 191 claim.
+   CONNECTED through the transit. This is the network-isolation claim.
 3. **The identity claim** — 13.2's joiner/mover/leaver drill, with a measured leaver window.
 4. **The whole claim** — 12.6's loop. Nothing else proves the lab is code.
 
@@ -1070,6 +1288,14 @@ believed it.
 
 ## Risks
 
+- **Disk is the binding constraint** (D17). The full build is 199 GB of 200 before
+  retention. 0.6 is not hygiene — skip it and the lab dies around week three, with
+  CloudStack failing to start a VM for reasons that look nothing like a full filesystem.
+- **Nested virtualization gates the control plane, not just Packer** (R36). Every
+  CloudStack guest is an L2 VM. It is set on L0, cannot be fixed from inside, and 0.5's
+  throwaway-guest boot is the only cheap proof.
+- **Budget 2–3× every time estimate.** L2 VM exits trap through L1's KVM to L0. More cores
+  make the lab hold more, not run faster.
 - **CloudStack advanced-zone bring-up is the most fragile step.** The tracker makes it
   resumable; budget iteration, not a clean first run.
 - **12.4 holds the largest unbudgeted work here** — an uninstall path upstream does not

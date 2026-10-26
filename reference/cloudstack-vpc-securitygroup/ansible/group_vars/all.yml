@@ -1,0 +1,26 @@
+ansible_user: ubuntu
+ansible_ssh_private_key_file: ../state/lab_ssh_key
+
+# Security groups: named, stateful, default-deny-inbound rule sets attached to VMs
+# (attachment = the VM's security_groups in terraform/tf_files/compute.tf). A rule
+# allows a port from a CIDR (from_cidr) or from every VM in another group
+# (from_group); traffic not matched by any attached group is dropped. Outbound is
+# open, and replies to allowed connections always get back in.
+security_groups:
+  sg_admin:
+    description: SSH and ping from the management network
+    ingress:
+      - { proto: tcp, port: 22, from_cidr: "{{ mgmt_cidr }}" }
+      - { proto: icmp, from_cidr: "{{ mgmt_cidr }}" }
+  sg_web:
+    description: public entry point
+    ingress:
+      - { proto: tcp, port: 80, from_cidr: 0.0.0.0/0 }
+  sg_app:
+    description: application API, web tier only
+    ingress:
+      - { proto: tcp, port: 8080, from_group: sg_web }
+  sg_db:
+    description: database, app tier only
+    ingress:
+      - { proto: tcp, port: 5432, from_group: sg_app }

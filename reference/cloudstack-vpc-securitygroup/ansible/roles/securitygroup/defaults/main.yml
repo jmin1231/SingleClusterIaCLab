@@ -1,0 +1,3 @@
+nft_config_file: /etc/nftables.conf
+# The security groups this VM belongs to (its Ansible groups that name a group).
+sg_attached: "{{ group_names | select('in', security_groups) | list }}"

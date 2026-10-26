@@ -1,0 +1,9 @@
+# {{ ansible_managed }}
+# Sourced by dhcpcd-run-hooks: keep the VPC routed via the tier gateway.
+if [ "$interface" = "{{ tier_nic.stdout }}" ]; then
+    case "$reason" in
+        BOUND|RENEW|REBIND|REBOOT|STATIC)
+            ip route replace {{ vpc_cidr }} via {{ tier_gateway }} dev {{ tier_nic.stdout }}
+            ;;
+    esac
+fi

@@ -1,0 +1,18 @@
+$ORIGIN lab.test.
+$TTL 300
+
+@   IN  SOA ns.lab.test. admin.lab.test. (
+    1789069784  ; serial
+    7200            ; refresh
+    3600            ; retry
+    1209600         ; expire
+    300             ; minimum TTL
+)
+
+@ IN NS ns.lab.test.
+
+ns          IN A    10.1.0.39
+cloudstack  IN A    10.1.0.39
+gitea       IN A    10.1.0.39
+vault       IN A    10.1.0.39
+proxy       IN A    10.1.0.39

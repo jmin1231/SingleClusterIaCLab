@@ -1,36 +1,25 @@
 # SingleClusterIaCLab
 
-A single-host infrastructure lab, built from scratch as a learning exercise: a
-private cloud on one Ubuntu host, three network tiers inside it, and a real
-application deployed end to end.
+One Ubuntu 24.04 host becomes a small, enterprise-shaped private cloud:
+CloudStack IaaS, a VPC with isolated tiers and a WireGuard site-to-site VPN, and a
+k3s application platform with Vault as the encryption service and CA, all behind an
+Istio ambient mesh.
 
-Built by following [`docs/build-plan.md`](docs/build-plan.md).
-[`docs/build-order.md`](docs/build-order.md) is the original sixteen-phase
-syllabus — superseded as the plan, kept for its per-step explanations.
+**[`PLAN-enterprise.md`](PLAN-enterprise.md) is the plan, and the only one.**
+It covers scope, addresses, secrets, phases, verification and teardown. Build from it.
 
-## Status
-
-**This lab is being rebuilt from nothing, by hand.**
-
-A complete working version sits in [`reference/`](reference/) — CloudStack,
-CoreDNS, a self-signed CA inside Vault, Gitea with a runner, a reverse proxy, and
-a CI toolbox, all from one `bootstrap.sh`. **Nothing in it runs**; its containers
-are stopped and the root does not depend on it.
-
-Follow [`docs/build-plan.md`](docs/build-plan.md). It gives you what each piece
-has to do, the decisions inside it, and the traps — not the code. Attempt a step,
-get its *Done when* passing, **then** open the reference. A file you can open is
-a file you will copy, so if the temptation is strong, read it from history
-instead:
+## Usage
 
 ```sh
-git show 91b02cf:bootstrap.sh
+sudo ./bootstrap.sh up            # build everything (--core: required parts only)
+sudo ./bootstrap.sh demo          # prove every requirement
+sudo ./bootstrap.sh down          # remove it all and reboot
+sudo ./bootstrap.sh revert-check  # after the reboot: host matches its baseline
 ```
 
-Phases 7–13 — Packer, Terraform, Ansible, Kubernetes, GitOps, observability,
-operations — exist in **no** version of this lab. There is nothing to check
-against there.
+Host: 8 cores, 32 GB RAM (the ceiling the lab is budgeted to), 250 GB disk, `/dev/kvm` (PLAN §5).
 
+<<<<<<< HEAD
 ### What changed from the original design
 
 Five things were cut (decision `S-1`) and the build order itself inverted:
@@ -250,3 +239,6 @@ keep.
   what was chosen, what was rejected, and why.
 - **So are failures.** See [`docs/failure-log.md`](docs/failure-log.md) — what
   broke, what it actually was, and where the search should have started.
+=======
+*This README is a stub; PLAN Phase 14.1 replaces it.*
+>>>>>>> refs/remotes/origin/main

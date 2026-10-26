@@ -1,0 +1,35 @@
+
+lab.test:53 {
+    errors
+    log
+
+    file /etc/coredns/zones/lab.test.zone lab.test {
+        reload 30s
+        reload_by_mtime
+    }
+}
+
+# Phase 14.0 (optional, decision 14.0-2): uncomment once the Samba AD DC is up.
+# The DC owns ad.lab.test and the VPC reverse zone; CoreDNS forwards to the DC's
+# public IP, whose port forward admits 53/udp+tcp from this host only.
+# Replace DC_PUBLIC_IP with that address.
+#
+# ad.lab.test:53 {
+#     errors
+#     log
+#     forward . DC_PUBLIC_IP
+# }
+#
+# 0.10.in-addr.arpa:53 {
+#     errors
+#     log
+#     forward . DC_PUBLIC_IP
+# }
+
+.:53 {
+    errors
+    log
+    cache
+
+    forward . 8.8.8.8 1.1.1.1
+}

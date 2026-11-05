@@ -1,0 +1,32 @@
+#cloud-config
+autoinstall:
+  version: 1
+  interactive-sections: []
+
+  locale: en_US.UTF-8
+  keyboard:
+    layout: us
+
+  identity:
+    hostname: ubuntu
+    username: ${image_username}
+    password: "${image_password_hash}"
+
+  storage:
+    layout:
+      name: lvm
+
+  early-commands:
+    - systemctl stop ssh.service || true
+    - systemctl stop ssh.socket || true
+
+  ssh:
+    install-server: yes
+    allow-pw: yes
+
+  packages:
+    - sudo
+
+  late-commands:
+    - echo '${image_username} ALL=(ALL) NOPASSWD:ALL' > /target/etc/sudoers.d/${image_username}
+    - chmod 0440 /target/etc/sudoers.d/${image_username}

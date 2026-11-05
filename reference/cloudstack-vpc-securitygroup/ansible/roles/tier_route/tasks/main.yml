@@ -1,0 +1,29 @@
+# The mgmt NIC holds the default route, so without this, traffic to another tier
+# would leave by the mgmt network and never cross the VPC. Route the whole VPC via
+# this VM's tier gateway (the VPC router) instead, now and on every DHCP renewal.
+
+- name: Find the tier NIC (the interface holding tier_ip)
+  ansible.builtin.shell: "ip -o -4 addr show | awk -v ip='{{ tier_ip }}' 'index($4, ip \"/\") == 1 {print $2; exit}'"
+  register: tier_nic
+  changed_when: false
+  failed_when: tier_nic.stdout | length == 0
+
+- name: Persist the VPC route across DHCP renewals (dhcpcd hook)
+  ansible.builtin.template:
+    src: dhcpcd.exit-hook.j2
+    dest: /etc/dhcpcd.exit-hook
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Route the VPC via the tier gateway
+  ansible.builtin.shell: |
+    want="{{ vpc_cidr }} via {{ tier_gateway }} dev {{ tier_nic.stdout }}"
+    if ip -4 route show {{ vpc_cidr }} | grep -q "via {{ tier_gateway }} dev {{ tier_nic.stdout }}"; then
+      echo unchanged
+    else
+      ip route replace ${want}
+      echo changed
+    fi
+  register: vpc_route
+  changed_when: vpc_route.stdout == "changed"

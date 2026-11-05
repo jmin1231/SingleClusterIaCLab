@@ -1,0 +1,57 @@
+#!/usr/sbin/nft -f
+# {{ ansible_managed }}
+# Security groups attached to {{ inventory_hostname }}: {{ sg_attached | join(', ') }}
+flush ruleset
+
+table inet filter {
+    # Group membership: the tier IP of every VM in each security group. Rules that
+    # say "from_group" match these sets, so adding a VM to a group updates every
+    # rule that references it on the next run.
+{% for sg in security_groups %}
+{%   set members = groups.get(sg, []) | map('extract', hostvars, 'tier_ip') | list %}
+    set members_{{ sg }} {
+        type ipv4_addr
+{%   if members %}
+        elements = { {{ members | join(', ') }} }
+{%   endif %}
+    }
+{% endfor %}
+
+    chain input {
+        type filter hook input priority 0; policy drop;
+
+        iif "lo" accept
+        # stateful: replies to allowed connections (and their ICMP errors) get back in
+        ct state established,related accept
+        ct state invalid drop
+
+        # keep the DHCP leases on both NICs
+        udp dport 68 accept
+
+{% for sg in sg_attached %}
+        jump {{ sg }}
+{% endfor %}
+    }
+
+{% for sg in sg_attached %}
+    # {{ sg }}: {{ security_groups[sg].description }}
+    chain {{ sg }} {
+{%   for r in security_groups[sg].ingress %}
+{%     set src = ('@members_' ~ r.from_group) if r.from_group is defined else r.from_cidr %}
+{%     if r.proto == 'icmp' %}
+        ip saddr {{ src }} ip protocol icmp accept
+{%     else %}
+        ip saddr {{ src }} {{ r.proto }} dport {{ r.port }} accept
+{%     endif %}
+{%   endfor %}
+    }
+
+{% endfor %}
+    chain forward {
+        type filter hook forward priority 0; policy drop;
+    }
+
+    chain output {
+        type filter hook output priority 0; policy accept;
+    }
+}

@@ -9,10 +9,11 @@
 #   changes its caller's error handling is a library that makes failures appear
 #   in the wrong file.
 #
-#   Grows in three passes, per the build plan:
-#     0.2  output, guards, apt, host facts   <- this pass
-#     0.3  the install transcript
-#     0.4  the step tracker
+#   Contents, per the build plan:
+#     0.2  output, guards, apt, host facts
+#     0.3  the install transcript, the step tracker
+#
+#   Verified by tests/lib-assert.sh.
 #
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
@@ -165,6 +166,209 @@ bridge_ip() {
     [[ -n "${addr}" ]] || die "Interface ${bridge} has no global IPv4 address. It is created by cloudstack/cloudstack-install-all.sh - has that run?"
 
     printf '%s\n' "${addr}"
+}
+
+# ---------------------------- The transcript --------------------------------
+#
+# One file per run, under LAB_LOG_DIR, capturing everything this script and its
+# CHILDREN print - which is the point: children inherit file descriptors, so a
+# single redirect here captures the 2,704-line vendored CloudStack installer for
+# free. Per-call-site teeing would capture only the scripts we wrote, which are
+# the ones least likely to surprise us.
+#
+# Four traps, all previously paid for:
+#
+#   1. start_transcript is called from main() AFTER verify_root - never at file
+#      scope. At file scope a non-root invocation dies on "cannot create
+#      /var/log/lab: Permission denied" instead of the readable message.
+#   2. The terminal is saved on fd 3 and 4 before the redirect, so the EXIT trap
+#      can put output back and so tee has somewhere to write.
+#   3. ANSI is stripped on the FILE branch only. Making log() conditional on
+#      [[ -t 1 ]] looks equivalent and is wrong: after the redirect stdout is a
+#      pipe, so the test is false and colour disappears from the terminal too.
+#   4. The EXIT trap WAITS for the writer. A die() can otherwise exit before the
+#      last lines are flushed, truncating the log exactly when it matters. One
+#      process substitution containing a whole pipeline is what makes this work -
+#      $! is the subshell running the pipeline, and it does not exit until every
+#      member has drained. `tee >(...)` would leave $! pointing at tee while the
+#      inner stripper was still writing, reintroducing the truncation.
+#
+# Timestamps come from bash's own printf. NOT `ts` (moreutils, not installed) and
+# NOT awk's strftime (a gawk extension - awk on a dev box is often gawk, but a
+# fresh Ubuntu is mawk, so that choice fails only on the machine it was written
+# to serve).
+#
+# `set -x` is deliberately NOT used. cloudstack-install.sh runs
+# `cloudstack-setup-databases cloud:cloud@localhost --deploy-as=root:`, and trace
+# would put that credential in a file permanently.
+
+LAB_LOG_DIR="${LAB_LOG_DIR:-/var/log/lab}"
+LAB_LOG_KEEP="${LAB_LOG_KEEP:-20}"
+LAB_LOG_FILE=""
+LAB_LOG_WRITER=""
+
+utc_stamp() { TZ=UTC printf '%(%Y%m%dT%H%M%SZ)T\n' -1; }
+
+start_transcript() {
+    # Idempotent: a sub-installer sourced into an already-redirected run must not
+    # start a second writer.
+    if [[ -n "${LAB_LOG_WRITER}" ]]; then
+        return 0
+    fi
+
+    install -d -m 0750 "${LAB_LOG_DIR}" ||
+        die "Cannot create ${LAB_LOG_DIR}. start_transcript must run after verify_root."
+
+    # Named so the files sort chronologically: retention then orders by NAME, and
+    # a copy or a restore cannot reshuffle it the way rewritten mtimes would.
+    LAB_LOG_FILE="${LAB_LOG_DIR}/bootstrap-$(utc_stamp).log"
+    : >"${LAB_LOG_FILE}" || die "Cannot write ${LAB_LOG_FILE}"
+    chmod 0640 "${LAB_LOG_FILE}"
+
+    # Save the real terminal before anything is redirected (trap 2).
+    exec 3>&1 4>&2
+
+    exec > >(
+        TZ=UTC
+        # tee: raw to the terminal on fd 3, raw onward down the pipe.
+        # sed -u: unbuffered, or the file lags a crashed run by a whole block.
+        # printf: a builtin, so no fork per line across a 2,700-line install.
+        tee /dev/fd/3 |
+            sed -u 's/\x1b\[[0-9;]*[a-zA-Z]//g' |
+            while IFS= read -r line; do
+                printf '%(%Y-%m-%dT%H:%M:%SZ)T %s\n' -1 "${line}"
+            done >>"${LAB_LOG_FILE}"
+    ) 2>&1
+
+    LAB_LOG_WRITER=$!
+
+    # EXIT, not RETURN: a RETURN trap does not fire on die().
+    trap finish_transcript EXIT
+
+    log "Transcript: ${LAB_LOG_FILE}"
+}
+
+finish_transcript() {
+    local code=$?
+
+    [[ -n "${LAB_LOG_WRITER}" ]] || return "${code}"
+
+    # Put output back on the terminal first, so anything printed from here on is
+    # not swallowed by a pipe nobody is reading any more.
+    exec 1>&3 2>&4
+
+    # Trap 4: let the writer drain before the shell exits.
+    wait "${LAB_LOG_WRITER}" 2>/dev/null || true
+    LAB_LOG_WRITER=""
+
+    sweep_transcripts
+
+    return "${code}"
+}
+
+# Keep the newest LAB_LOG_KEEP, swept by the script that writes them so nothing
+# external has to be configured. Sorted by name - see start_transcript.
+sweep_transcripts() {
+    local -a logs=()
+    local f
+
+    for f in "${LAB_LOG_DIR}"/bootstrap-*.log; do
+        [[ -f "$f" ]] || continue
+        logs+=("$f")
+    done
+
+    ((${#logs[@]} > LAB_LOG_KEEP)) || return 0
+
+    mapfile -t logs < <(printf '%s\n' "${logs[@]}" | sort -r)
+
+    local i
+    for ((i = LAB_LOG_KEEP; i < ${#logs[@]}; i++)); do
+        rm -f -- "${logs[i]}"
+    done
+}
+
+# ------------------------------ The tracker ---------------------------------
+#
+# Which steps are already done, so a re-run is a no-op and a failed run resumes.
+#
+# THE BUG THIS DOES NOT REPEAT: the vendored installer decides what to skip with
+#
+#     is_step_tracked() { [[ -n "${tracker_values[$key]:-}" ]]; }
+#
+# which tests for a NON-EMPTY VALUE, not for `yes`. So `db_deployed=no` reads as
+# *done* and the step is skipped. Two full installer runs were lost to editing
+# `yes` into `no` and watching nothing happen. tracker_is_done compares against
+# `yes` and nothing else.
+#
+# Read straight from the file rather than caching in an associative array: each
+# installer is its own process, so a cache loaded at start goes stale the moment
+# a sibling writes. The file is a few dozen lines; the read is free.
+
+LAB_TRACKER_FILE="${LAB_TRACKER_FILE:-${LAB_STATE_DIR}/tracker.conf}"
+
+_tracker_init() {
+    install -d -m 0755 "$(dirname -- "${LAB_TRACKER_FILE}")"
+
+    [[ -f "${LAB_TRACKER_FILE}" ]] && return 0
+
+    cat >"${LAB_TRACKER_FILE}" <<'EOF'
+# Step tracker. One key=value per line; `yes` means done and nothing else does.
+# To genuinely re-run a step, DELETE ITS LINE (or blank the value) - setting it
+# to `no` is what the vendored installer mis-reads as done.
+EOF
+}
+
+# Keys are our own identifiers ([A-Za-z0-9_]), so they are safe in a pattern.
+# Last occurrence wins, so an appended re-set is authoritative.
+tracker_get() {
+    local key="$1"
+
+    [[ -f "${LAB_TRACKER_FILE}" ]] || return 0
+
+    awk -F= -v k="${key}" \
+        '$1 == k { v = substr($0, index($0, "=") + 1) } END { print v }' \
+        "${LAB_TRACKER_FILE}"
+}
+
+tracker_set() {
+    local key="$1"
+    local value="$2"
+    local tmp
+
+    _tracker_init
+
+    # Rewrite through a temp file and rename, so an interrupted write cannot
+    # leave a half-truncated tracker - which would read as "nothing is done"
+    # and re-run steps that had succeeded.
+    tmp="$(mktemp "${LAB_TRACKER_FILE}.XXXXXX")" ||
+        die "Cannot create a temporary tracker file beside ${LAB_TRACKER_FILE}"
+
+    grep -v "^${key}=" "${LAB_TRACKER_FILE}" >"${tmp}" || true
+    printf '%s=%s\n' "${key}" "${value}" >>"${tmp}"
+
+    chmod 0644 "${tmp}"
+    mv "${tmp}" "${LAB_TRACKER_FILE}"
+}
+
+tracker_is_done() {
+    [[ "$(tracker_get "$1")" == "yes" ]]
+}
+
+tracker_done() { tracker_set "$1" yes; }
+
+# The documented way to force a step to re-run.
+tracker_forget() {
+    local key="$1"
+    local tmp
+
+    [[ -f "${LAB_TRACKER_FILE}" ]] || return 0
+
+    tmp="$(mktemp "${LAB_TRACKER_FILE}.XXXXXX")" ||
+        die "Cannot create a temporary tracker file beside ${LAB_TRACKER_FILE}"
+
+    grep -v "^${key}=" "${LAB_TRACKER_FILE}" >"${tmp}" || true
+    chmod 0644 "${tmp}"
+    mv "${tmp}" "${LAB_TRACKER_FILE}"
 }
 
 # ------------------------------ Conventions ---------------------------------

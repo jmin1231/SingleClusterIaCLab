@@ -1,0 +1,16 @@
+# runtime state: logs, tracker, generated inventory, SSH key, passwords
+/state/
+*.log
+# cloudstack-install.sh run standalone (without CS_STATE_DIR) writes here
+/cloudstack-installer-tracker.conf
+
+# terraform (local state; .terraform.lock.hcl is committed)
+terraform/tf_files/.terraform/
+terraform/tf_files/*.tfstate
+terraform/tf_files/*.tfstate.backup
+terraform/tf_files/.terraform.tfstate.lock.info
+
+# packer build artifacts (output_directory = builds/ in ubuntu.pkr.hcl)
+/builds/
+packer_cache/
+*.qcow2

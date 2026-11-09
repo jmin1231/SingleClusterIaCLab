@@ -306,20 +306,22 @@ In three weeks 2.2, 2.5c and 2.5e are fast-track (§3.8): keep their cards and f
 their rebuilds.
 
 **Concepts (E targets):** nftables tables/chains/hooks/priority; `ct state` and `ct status dnat`;
-why Docker's published ports skip the input chain; drop vs reject (timeout vs refused); Vault
-seal/unseal and Shamir shares; Raft storage; audit devices (and why a full audit disk is an
-outage); PKI mount TTL tuning; roles vs policies; AppRole `role_id`/`secret_id`; why the root
-token is revoked; `lab-bootstrap` vs `lab-pipeline`.
+why netavark's published ports are DNAT'd past the input chain into forward; why netavark's
+ACCEPT-only FORWARD rules make the lab's table the only default deny, and so why every lab
+container `Requires=lab-nftables.service`; key-only sshd and its lockout guards; drop vs reject
+(timeout vs refused); Vault seal/unseal and Shamir shares; Raft storage; audit devices (and why a
+full audit disk is an outage); PKI mount TTL tuning; roles vs policies; AppRole
+`role_id`/`secret_id`; why the root token is revoked; `lab-bootstrap` vs `lab-pipeline`.
 
 **Sample cards (one of each type):**
 
 | Type | Front | Back (short) |
 |---|---|---|
 | Concept | What does `fib saddr type local` match? | Packets whose source is one of the host's own addresses (the host talking to itself). |
-| Why | Why is the lab's ruleset loaded by its own unit, never via `/etc/nftables.conf`? | That file starts with `flush ruleset`, which would wipe Docker's rules. |
+| Why | Why is the lab's ruleset loaded by its own unit, never via `/etc/nftables.conf`? | That file starts with `flush ruleset`, which would wipe netavark's iptables-nft rules (its NAT and published-port DNAT). |
 | Failure mode | Symptom: a host from outside every §5 range gets *connection refused* on 443. What is wrong? | Something is rejecting instead of dropping (or a different listener answered); the plan's rule says drop → timeout. |
 | Command | Show whether Vault is sealed, and its storage type. | `vault status` |
-| Parsons | Order the forward-chain rules: (a) `ct status != dnat` + VMNET source → drop, (b) established/related → accept, (c) everything else falls through to Docker, (d) `ct status dnat` matched by original port and source | b, d, a, c |
+| Parsons | Order the forward-chain rules: (a) VMNET source → drop, (b) established/related → accept, (c) everything else dropped by the policy, (d) `ct status dnat` matched by original port and source, (e) Vault's fixed address → be-1 6443 and Gitea's → public 443 accepted | b, d, a, e, c |
 | Diagram | Draw from memory: who holds the unseal key, the root token (until when), the `lab-bootstrap` AppRole and the `lab-pipeline` identity, and what each can read. | Compare with §6 of the plan. |
 
 **Rebuild drills:** (1) `nftables-lab.nft` from the plan's 2.2 bullet list, checked by the
@@ -332,7 +334,7 @@ token is denied `pki/issue/host-svc`.
 
 | Inject | Symptom you are given | Evidence command |
 |---|---|---|
-| Load the ruleset through `/etc/nftables.conf` | Containers lose outbound access after a reboot | `nft list ruleset \| grep -c DOCKER` |
+| Load the ruleset through `/etc/nftables.conf`, then `systemctl restart nftables` | Containers lose outbound access and published ports stop answering until they restart | `nft list ruleset \| grep -c NETAVARK` |
 | Leave `DNSStubListener` on | CoreDNS container restarts: bind on :53 fails | `ss -lunp 'sport = :53'` |
 | Generate the CA before tuning `max_lease_ttl` | Certificates expire after about 32 days | `vault read pki/cert/ca` → check the `NotAfter`, `vault read sys/mounts/pki/tune` |
 | Make the audit log directory read-only | Vault stops answering every request | `vault audit list`, container logs |

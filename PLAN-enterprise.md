@@ -248,7 +248,8 @@ Preflight validates them. The values below are the defaults and examples.
 | CloudStack public range (VPC source NAT and public IPs) | on the LAN, e.g. `.190–.209` |
 | `VMNET_CIDR` (mgmt shared network) | `10.250.0.0/24` on host-only bridge `cloudbr1`; router DHCP `.100–.199`; lab VMs get **fixed** addresses from that range through `cloudstack_nic`'s `ip_address` (fe-1 `.110`, tun-1 `.111`, be-1 `.112`), and each VM's userdata writes that address into a **static** netplan for eth1, so nothing depends on a lease or on the mgmt router being up; the router itself must take an address outside `.110–.112` (checked in 3.3a) |
 | `VMNET_HOST_IP` | `10.250.0.1`, the host's address on `cloudbr1`: every VM reaches the control plane here |
-| Container address pool (Podman) | `172.30.0.0/16` (pinned in `containers.conf`; must not overlap any range here): default network `.0.0/24`, `lab_edge` `.1.0/24`, `lab_backend` `.2.0/24`, `lab_egress` `.3.0/24` |
+| `OPERATOR_LOGIN` | the operator's login on the host, the only account sshd admits (2.2); preflight refuses it without an authorized key |
+| Container address pool (Podman) | `172.30.0.0/16` (pinned in `containers.conf`; must not overlap any range here): default network `.0.0/24`, `lab_edge` `.1.0/24`, `lab_backend` `.2.0/24`, `lab_egress` `.3.0/24` (fixed: Vault `.3.10`, Gitea `.3.11`, the only two addresses 2.2 lets out; any other container gets an address from `.3.128/25`) |
 
 **VPC `10.0.0.0/16`**
 
@@ -278,7 +279,7 @@ publish **no** host ports: they are reached only through the gateway.
 
 | Service | Port | Allowed from | Name → address |
 |---|---|---|---|
-| SSH | 22 | LAN | `host.lab.test` → `HOST_IP` |
+| SSH (key-only, `OPERATOR_LOGIN` only, new connections rate-limited; 2.2) | 22 | LAN | `host.lab.test` → `HOST_IP` |
 | CoreDNS | 53 tcp/udp | LAN, VMs | — |
 | aardvark-dns (container name resolution; forwards other names to CoreDNS from the host) | 1053 tcp/udp | containers | — |
 | chrony (NTP server) | 123/udp | VMs | — |
@@ -747,7 +748,8 @@ are in §17.
   - `/etc/netplan` hashes, bridges, the `/etc/resolv.conf` link, nftables ruleset
   - trust-store contents; local users and groups; loaded kernel modules; the sysctl
     values the lab touches (`net.ipv4.ip_forward`, `net.bridge.*`)
-  - `/etc/hosts`, the hostname, every crontab
+  - `/etc/hosts`, the hostname, every crontab; the effective sshd settings (`sshd -T`,
+    after `install -d -m 0755 /run/sshd`, as in 2.2)
   - a SHA-256 manifest of `/etc`, so V5 catches drift nobody listed (logrotate rules,
     AppArmor profile changes, installer edits). It is compared against an explicit
     ignore list in `src/lab/revert.py` (`ld.so.cache`, `ssl/certs/` hash links, `*-`
@@ -773,6 +775,12 @@ are in §17.
   - strict `apt-get update` (fail naming any broken source)
   - config values valid and non-overlapping (the runner's sub-ID range, 2.10, also
     against every range already in `/etc/subuid` and `/etc/subgid`)
+  - `OPERATOR_LOGIN` is a local user, not root, with at least one key in the file
+    `sshd -T -C user=<login>` names as `authorizedkeysfile` (normally
+    `~/.ssh/authorized_keys`), and that file and its directories are owned by the user
+    and not group- or world-writable, since sshd's `StrictModes` ignores it otherwise
+    (2.2 makes SSH key-only for that login alone, so without a usable key the operator
+    would be locked out)
   - **leftovers vs resume:** if `/var/lib/lab/install-id` exists and matches the
     baseline, this is the lab's own partial install, and `up` resumes; otherwise
     **refuse** leftovers (existing `cloud` DB or `/var/lib/mysql`, `cloudbr0`,
@@ -781,12 +789,13 @@ are in §17.
     ruleset), lab containers, networks or quadlet units, third-party apt sources)
     naming each one
   Exit: passes on a fresh host; deliberately fails on a host with a planted
-  `cloudbr0` and no marker. (Once Phase 2 exists: passes, and resumes, after an `up`
-  interrupted in Phase 2.)
+  `cloudbr0` and no marker, and on an `OPERATOR_LOGIN` with no authorized key. (Once
+  Phase 2 exists: passes, and resumes, after an `up` interrupted in Phase 2.)
 
   ⤷ **Needs** 1.1 · **Recalls** `path.baseline`, `path.install-id` · **Produces**
   `preflight.py` checks, `lab status --capacity` · **Records** `net.host` (`HOST_IP`,
-  LAN NIC, `LAN_CIDR`, `LAN_GATEWAY` as configured), `host.memory` · **Check** Exit
+  LAN NIC, `LAN_CIDR`, `LAN_GATEWAY` as configured), `host.memory`, `host.operator`
+  (login, its authorized-keys file) · **Check** Exit
 - **1.3 Toolchain.** Pinned CLIs into `/opt/lab/bin`, each verified against a
   SHA-256 in `versions.py`: terraform, packer, ansible (venv in `/opt/lab/ansible`,
   with the `cloud.terraform` collection), conftest, trivy, cmk (CloudMonkey, CloudStack's
@@ -843,17 +852,21 @@ vault-shell` (a subshell with `VAULT_TOKEN` from the `lab-bootstrap` AppRole).
   (`EnvironmentFile=`), not Podman secrets, whose `file` driver would keep a second copy
   in container storage. Podman never updates an existing network, so when a `.network`
   file changes `lab platform` stops the units on it, runs `podman network rm` and starts
-  them again (rule 19). Networks, each with a fixed `NetworkName=`, a fixed `Subnet=`
-  and `DNS=10.250.0.1` (aardvark-dns forwards other names to CoreDNS **[verify that
-  aardvark-dns 1.4 honours a network's `DNS=`; if not, it forwards to the host's
-  resolver, `127.0.0.1`, which is CoreDNS too]**):
+  them again (rule 19). Networks, each with a fixed `NetworkName=` and a fixed `Subnet=`
+  and no `DNS=`: aardvark-dns answers container names and forwards every other name to
+  the host's resolver, which from 2.3a is `127.0.0.1`, CoreDNS:
   - `lab_edge` (`172.30.1.0/24`): Traefik only; its 443 and 80 are the only published
     web ports
   - `lab_backend` (`172.30.2.0/24`, `Internal=true`, no route out, no published ports):
     Gitea, MinIO, and Prometheus, Loki and Grafana (2.7b), reached only by Traefik and
     each other
-  - `lab_egress` (`172.30.3.0/24`, normal bridge, outbound only as 2.2 allows): Vault
-    (to k3s's API), Gitea (push mirror to GitHub)
+  - `lab_egress` (`172.30.3.0/24`, normal bridge, outbound only as 2.2 allows, with
+    `IPRange=172.30.3.128/25` so no other container takes a fixed address): Vault at
+    `172.30.3.10` (to k3s's API) and Gitea at `172.30.3.11` (push mirror to GitHub), set
+    in each `.container` with `Network=lab_egress.network:ip=<address>` (Gitea is on two
+    networks, so a plain `IP=` would be ambiguous) **[verify that quadlet 4.9.3 keeps
+    the `:ip=` option on a `.network` file reference, and that netavark accepts a fixed
+    address outside `IPRange=`]**. 2.2 lets only these two addresses out
   - CoreDNS and Squid use `Network=host`, so they see real client addresses (the
     `view` plugin and Squid's ACL depend on it) and are filtered by the input chain
   Each service has a health check (`HealthCmd=`) and is started by its own step below.
@@ -863,13 +876,14 @@ vault-shell` (a subshell with `VAULT_TOKEN` from the `lab-bootstrap` AppRole).
   from Docker Hub directly: the host itself is not behind Squid); `lab platform` renders
   the units, `/usr/libexec/podman/quadlet -dryrun` accepts every one (quadlet skips a
   file with a key it does not know **[verify that 4.9.3 has every key used here:
-  `NetworkName=`, `VolumeName=`, `DNS=`, `HealthCmd=`, `Pull=`]**), and it creates the
-  three networks with the names and subnets above; a re-run changes nothing.
+  `NetworkName=`, `VolumeName=`, `IPRange=`, `HealthCmd=`, `Pull=`]**), and it creates
+  the three networks with the names, subnets and range above; a re-run changes nothing.
 
   ⤷ **Needs** 2.1a, 1.3 · **Recalls** `net.vmnet`, `code.versions`, `decision.runtime` ·
   **Produces** `platform.py` (render + units), `platform/` quadlet units, the
-  `containers.conf` drop-in · **Records** `podman.pool`, `podman.networks`,
-  `path.platform` · **Check** Exit
+  `containers.conf` drop-in · **Records** `podman.pool`, `podman.networks` (names,
+  subnets, Vault's and Gitea's fixed `lab_egress` addresses), `path.platform` ·
+  **Check** Exit
 - **2.1c Spike: netavark's firewall driver and rule order** (a gate: 2.2 is written
   against what this proves). Facts to confirm on this host: `podman info` names
   netavark as the network backend; netavark 1.4 uses its iptables driver (its other
@@ -901,17 +915,25 @@ vault-shell` (a subshell with `VAULT_TOKEN` from the `lab-bootstrap` AppRole).
   - `nft -f` of the scratch table and `systemctl restart` of the container, in either
     order, leave both rule sets in place
   Exit: every point above holds; the scratch table, network and container are removed.
-  If any fails, 2.2 waits and `decision.podman-fw` is opened.
+  If any fails, 2.2 waits and `decision.podman-fw` is opened. Its named fallback is
+  Podman 5.x with netavark ≥ 1.10, whose nftables driver (chosen with
+  `firewall_driver = "nftables"` in the lab's `containers.conf` drop-in) keeps its rules
+  in its own table, from a third-party apt repository: today the openSUSE Build Service
+  `home:alvistack` repository for `xUbuntu_24.04` **[verify that it is still maintained
+  and ships netavark ≥ 1.10 for 24.04, and the `firewall_driver` key at that
+  version]**. That adds a repository and its key (the key pinned by fingerprint,
+  packages by version, both removed by `down` and checked by V1), and this spike is
+  re-run against it. Returning to Docker is the last resort.
 
   ⤷ **Needs** 2.1b · **Recalls** `podman.pool`, `net.vmnet` · **Produces** nothing kept
   · **Records** `spike.netavark-fw` (driver, versions, chain names, the rule order that
   passed) · **Check** Exit
-- **2.2 Host firewall.** The lab's own nftables table `inet lab`, so netavark's and
-  libvirt's iptables-nft rules are never edited. It is persisted as its own file,
-  `/etc/lab/nftables-lab.nft` (`table inet lab` declared empty, deleted, then recreated,
-  all in one `nft -f` transaction, so the first load after boot, with no table yet,
-  does not fail and a bad file changes nothing), loaded by its
-  own unit `lab-nftables.service`, **never** through `/etc/nftables.conf`, whose
+- **2.2 Host firewall and SSH hardening.** The lab's own nftables table `inet lab`, so
+  netavark's and libvirt's iptables-nft rules are never edited. It is persisted as its
+  own file, `/etc/lab/nftables-lab.nft` (`table inet lab` declared empty, deleted,
+  then recreated, all in one `nft -f` transaction, so the first load after boot, with
+  no table yet, does not fail and a bad file changes nothing), loaded by its own unit
+  `lab-nftables.service`, **never** through `/etc/nftables.conf`, whose
   default `flush ruleset` would wipe netavark's rules. Netavark only adds ACCEPT rules
   (2.1c), so this table is the only default deny on forwarded traffic, and no lab
   container runs without it: at boot, or with the table missing, Traefik's 443 would be
@@ -927,7 +949,9 @@ vault-shell` (a subshell with `VAULT_TOKEN` from the `lab-bootstrap` AppRole).
     `established,related`; then new traffic to `127.0.0.0/8` from any interface but
     `lo` dropped (netavark sets `route_localnet` on bridges with published ports; after
     `established,related`, so replies to the host's own connections to a published port
-    on `127.0.0.1` still pass); then each §5 port from its listed sources, and
+    on `127.0.0.1` still pass); then new connections to tcp 22 through a per-source
+    meter (a dynamic set: `add @ssh_meter { ip saddr limit rate over 10/minute burst 10
+    packets } drop`); then each §5 port from its listed sources, and
     aardvark-dns on 1053 from the container pool. Rules match addresses, never
     interface names, because Phase 3 moves `HOST_IP` onto `cloudbr0`.
   - nat chain at `dstnat - 1`: TCP and UDP port 53 from the container pool to a local
@@ -940,11 +964,30 @@ vault-shell` (a subshell with `VAULT_TOKEN` from the `lab-bootstrap` AppRole).
        listed for that port and dropped otherwise
     3. source in `VMNET_CIDR` → drop: the host never routes between VMs or out to the
        LAN for them
-    4. from `lab_egress`'s subnet only: to `10.250.0.112` tcp 6443 → accept (Vault to
-       the k3s API); tcp 443 to an address outside `10.0.0.0/8`, `172.16.0.0/12` and
-       `192.168.0.0/16` → accept (Gitea's push mirror to GitHub)
+    4. from Vault's fixed address `172.30.3.10` only: to `10.250.0.112` tcp 6443 →
+       accept (Vault to the k3s API); from Gitea's fixed address `172.30.3.11` only:
+       tcp 443 to an address outside `10.0.0.0/8`, `172.16.0.0/12` and `192.168.0.0/16`
+       → accept (Gitea's push mirror to GitHub). Any other container on `lab_egress`
+       gets neither
     5. everything else is dropped by the policy. An accept here still passes netavark's
        FORWARD rules, which run after this chain
+  - **SSH** (the host is the operator's bastion, §15 "Privileged access"): a lab drop-in
+    `/etc/ssh/sshd_config.d/00-lab.conf`. Ubuntu's `sshd_config` includes the drop-ins
+    first and sshd keeps the first value it reads, so the file's name sorts before any
+    other (cloud-init's `50-cloud-init.conf` may set `PasswordAuthentication yes`). It
+    sets `PasswordAuthentication no`, `KbdInteractiveAuthentication no`,
+    `PermitRootLogin no`, `AllowUsers <OPERATOR_LOGIN>`, `X11Forwarding no`,
+    `AllowAgentForwarding no`, `PermitTunnel no`, `AllowStreamLocalForwarding no` and
+    `AllowTcpForwarding local`, so `ssh -D`, `-L` and `-J` through the host still work
+    and `-R` (TCP or socket) does not. Hardware-backed keys (`ed25519-sk`) are
+    recommended to the operator, not enforced. Lockout guards:
+    the file is written only if the 1.2a key check still passes; `sshd -t` validates the
+    result first (it needs `/run/sshd`, which socket activation may not have created yet,
+    so `install -d -m 0755 /run/sshd` runs before it **[verify]**), and a failure
+    removes the file; then `systemctl try-reload-or-restart ssh` reloads a running sshd
+    (Ubuntu's unit has `ExecReload=`, so it is not restarted), and the open session stays (an idle, socket-activated sshd reads
+    the file when it next starts). No fail2ban: with keys only, guessing gets nowhere,
+    and the meter keeps the noise down
   Exit (each test from a network namespace, `ip netns add t; ip link add veth-t type
   veth peer name veth-h; ip link set veth-t netns t`, with an address from the source
   range under test on `veth-t` and `veth-h` attached to `cloudbr1`), against a
@@ -955,18 +998,29 @@ vault-shell` (a subshell with `VAULT_TOKEN` from the `lab-bootstrap` AppRole).
   cannot reach a LAN address; from a namespace attached to `lab_edge`'s bridge (with
   `route_localnet` on inside it and a route to `127.0.0.1` through the bridge gateway),
   a temporary listener on the host's `127.0.0.1` times out **[verify that the
-  namespace can send it]**. A test container on `lab_egress` reaches tcp 443 on an
-  external address (by address: CoreDNS comes in 2.3a), while `LAN_GATEWAY` times
-  out, and against a namespace listener at `10.250.0.112` tcp 6443 answers and tcp 22
-  times out; a container on `lab_backend` resolves another by name, also
-  with `dig +tcp`. With a broken rules file, `lab-nftables.service` fails and no lab
-  container starts.
+  namespace can send it]**. A test container on `lab_egress` at Gitea's address
+  (Gitea comes in 2.8; on a re-run after 2.4a or 2.8, the test runs by `podman exec` in
+  Vault or Gitea instead) reaches tcp 443 on an external address (by address: CoreDNS
+  comes in 2.3a), while `LAN_GATEWAY` times out; one at Vault's address answers a
+  namespace listener at `10.250.0.112` tcp 6443, while tcp 22 times out; a container on
+  `lab_egress` at any other address gets neither; a container on `lab_backend` resolves
+  another by name, also with `dig +tcp`. With a broken rules file,
+  `lab-nftables.service` fails and no lab container starts. SSH, from a LAN machine,
+  in a new session while the one that applied the drop-in stays open until these pass:
+  a password login is refused (`-o PreferredAuthentications=password` gets
+  `Permission denied (publickey)`); root is refused even with a temporary authorized
+  key; the operator's key login works and its `ssh -D` reaches a temporary listener on
+  `10.250.0.1` (`curl --socks5-hostname`); a temporary local user with a key is
+  refused (that user and root's temporary key are removed after);
+  out of 30 new connections within a minute from one source, the later ones time out.
+  A broken drop-in fails `sshd -t`, is removed, and sshd keeps its old settings.
 
   ⤷ **Needs** 2.1c · **Recalls** `net.host`, `net.vmnet`, `podman.pool`,
-  `podman.networks`, `spike.netavark-fw` · **Produces** `/etc/lab/nftables-lab.nft`,
-  `lab-nftables.service`, its `Requires=` in every lab `.container` · **Records**
-  `fw.host`, `cmd.netns-test` (the namespace recipe, reused by later firewall tests) ·
-  **Check** Exit
+  `podman.networks`, `spike.netavark-fw`, `host.operator` · **Produces**
+  `/etc/lab/nftables-lab.nft`, `lab-nftables.service`, its `Requires=` in every lab
+  `.container`, the sshd drop-in · **Records** `fw.host`, `cmd.netns-test` (the
+  namespace recipe, reused by later firewall tests), `host.sshd` (drop-in path,
+  settings) · **Check** Exit; H1
 - **2.3a CoreDNS.** Forward and reverse zones from §5, one zone file for `lab.test`
   (every asker gets the same answer, §5); upstream forwarding. Records `setup` writes
   (5.4b) go into the file with the SOA serial bumped, and the `file` plugin's `reload`
@@ -1280,7 +1334,8 @@ vault-shell` (a subshell with `VAULT_TOKEN` from the `lab-bootstrap` AppRole).
   Exit; O5 (write path)
 - **2.8 Gitea and registry.** Behind the gateway (`https://gitea.lab.test`); SQLite
   database inside the Gitea volume (one user, no database network hop); admin in
-  Vault; on `lab_backend` and `lab_egress`. Users: `operator` (write to `lab/lab`),
+  Vault; on `lab_backend` and `lab_egress` (at `172.30.3.11`, 2.1b). Users: `operator`
+  (write to `lab/lab`),
   `lab-ci` (a bot: `write:package` on org `lab`, its token in `kv/lab/pipeline/gitea-ci`)
   and `lab-flux` (a bot: Read on `lab/lab` only, token scoped `read:repository` in
   `kv/lab/pipeline/gitea-flux`, for Flux, 8.1b).
@@ -2326,7 +2381,8 @@ run by the learner under `lab k3s-admin`, and the API audit log (8.2d) records i
     - `frontend.container`: the frontend image by digest, read-only root, non-root
       (`User=`), listening on `127.0.0.1:8080` only;
       `API_URL=https://api.backend.lab.test:8000` with
-      `AddHost=api.backend.lab.test:10.99.1.2`; `/etc/frontend/tls` mounted read-only;
+      `PodmanArgs=--add-host=api.backend.lab.test:10.99.1.2` (`AddHost=` came after
+      quadlet 4.9.3 **[verify]**); `/etc/frontend/tls` mounted read-only;
       its `ssl.SSLContext` trusts `lab app root` only (never the system store) and
       presents the client certificate; HTML list and add form, no database driver, no
       Vault access
@@ -2653,12 +2709,12 @@ so they come after 12.1c.
   scratch Transit key that is deleted afterwards, so `verify` changes nothing. Built in
   four steps; each check reuses the commands of the Exit that first proved it.
   - **12.1a Framework and network checks:** the check runner (pass/fail line,
-    evidence, exit code) and N1–N6.
-    Exit: N1–N6 pass; breaking one (e.g. `wg0` down) fails `verify` naming it.
+    evidence, exit code), N1–N6 and H1.
+    Exit: N1–N6 and H1 pass; breaking one (e.g. `wg0` down) fails `verify` naming it.
 
     ⤷ **Needs** 8.7f · **Recalls** `net.overlay`, `wg.hub-log`, `vm.<name>`,
-    `cs.account.iac` · **Produces** `verify.py` · **Records** `verify.checks` (module,
-    IDs done) · **Check** Exit; N1–N6
+    `cs.account.iac`, `host.sshd` · **Produces** `verify.py` · **Records** `verify.checks`
+    (module, IDs done) · **Check** Exit; N1–N6, H1
   - **12.1b Data, secrets, mesh and API-access checks:** E1–E3 (scratch key), S1–S4,
     the required mTLS checks T1, T2, Z1, Z2, P2, and K1 (access half: the `lab-access`
     identities and `lab-pipeline`), A1. They run as `lab-ci`, with
@@ -2891,9 +2947,10 @@ cluster first.*
 | MinIO community edition distribution | 2.7 | upstream changed how community images and binaries ship; the image is pinned by digest and kept as a `podman save` archive in `/var/lib/lab/images/`, which `down` keeps (2.7). If it can no longer be pulled at all, Garage or SeaweedFS (both S3-compatible, both work as a Terraform S3 backend) replace it behind the same `minio.lab.test` name |
 | Vault audit device unwritable | 2.4a | daily rotation with `SIGHUP`, disk-usage warning in `lab status` |
 | The gateway is a single point of failure for every web service | 2.6 | Vault, CoreDNS, Squid and SSH never depend on it, so unseal, DNS and break-glass access survive a gateway outage; `lab status` names it first when it is down |
+| SSH hardening locks the operator out of the host | 1.2a, 2.2 | preflight refuses an `OPERATOR_LOGIN` with no authorized key, and 2.2 re-checks it; `sshd -t` validates before the reload, and a reload keeps the open session; the host's local console still logs in, and `down` removes the drop-in |
 | ServiceLB exposes the backend gateway on every node address | 8.7d | be-1's nftables admit 8000 only on `wg1` from `10.99.0.2`; P4 and Z1 test the tier and mgmt addresses too |
 | PR code runs on the host with the pipeline identity | 2.10 | accepted for one operator (§15); `main` is protected, so nothing reaches `deliver` without a merge; with no `docker` group and rootless builds, it runs with `lab-runner`'s rights, not root's |
-| Podman comes from Ubuntu's universe component, paired with an older netavark (4.9.3 with 1.4.0) | 2.1b, 2.1c, 2.2 | security fixes come from the community or Ubuntu Pro, not a vendor repo; versions are pinned and shown by `lab status`; no container port faces the LAN except through the firewall. Netavark features after 1.4 (the nftables driver, `isolate=strict`) are absent, so 2.1c proves the driver, the DNAT path and DNS before 2.2 depends on them |
+| Podman comes from Ubuntu's universe component, paired with an older netavark (4.9.3 with 1.4.0) | 2.1b, 2.1c, 2.2 | security fixes come from the community or Ubuntu Pro, not a vendor repo; versions are pinned and shown by `lab status`; no container port faces the LAN except through the firewall. Netavark features after 1.4 (the nftables driver, `isolate=strict`) are absent, so 2.1c proves the driver, the DNAT path and DNS before 2.2 depends on them. If it fails: Podman 5.x with netavark ≥ 1.10 (nftables driver) from a pinned third-party repository (2.1c names it); Docker is the last resort |
 | aardvark-dns and CoreDNS both want port 53 | 2.1b, 2.3a | aardvark-dns moves to `dns_bind_port` 1053; the lab's own nat rule redirects containers' TCP and UDP port 53 queries to it on every network, since netavark 1.4 does it for UDP only and never on internal networks (2.1c, 2.2) |
 | A mesh CA forging names other clients trust | 2.5f, 8.3a | decided 2026-11-05: the istiod CA is under its own root, `pki_mesh`, which no host or VM trusts (§6); P2 proves the chain ends there and not at `lab.test CA` |
 | One compromised ztunnel impersonates every workload on its node | 8.3b | ambient keeps keys out of pods but in ztunnel; with one node that is every identity (§6). Accepted for the lab; production spreads workloads over hardened nodes |
@@ -2920,6 +2977,7 @@ are required, like the rest.
 | **N4** | mgmt NIC reaches only the host | VM → another VM's mgmt address times out; VM → `10.250.0.1:8200` succeeds; from the host, be-1's `10.250.0.112:9100` and `10.0.3.10:9100` (node-exporter) time out |
 | **N5** | Terraform runs least-privilege | `iac` key denied an admin-only API call |
 | **N6** | the hub forwards one flow only | fe-1 → `10.99.1.2:22` and `:5432` time out and tun-1 logs `lab-hub-drop` |
+| **H1** | host SSH is key-only | `ssh -o PreferredAuthentications=none -o BatchMode=yes` to `HOST_IP` as `OPERATOR_LOGIN`, as root and as an unknown user lists only `publickey` among the methods that can continue; a password attempt gets `Permission denied (publickey)` |
 | **E1** | field-level encryption | `psql` shows `vault:v<n>:…` (any key version); API returns `**** 4242` |
 | **E2** | key rotation | rotate → new ciphertext carries the new version (`vault:v2:…` on first run); the older ciphertext still decrypts (`verify`: scratch key; `demo`: the real key) |
 | **E3** | rewrap + retire | rewrap to the latest version; set `min_decryption_version` to it; a ciphertext saved before the rotation fails to decrypt (`verify`: scratch key; `demo`: rewraps every row first, so it re-runs at any key version) |
@@ -2952,7 +3010,7 @@ are required, like the rest.
 | **C1** | consoles | on the host, each of the five §5 console URLs (Grafana's `https://grafana.lab.test/`, Viewer) returns its login page over TLS verified against `lab.test CA` (no `-k`) and its `lab consoles --show` login works; from a `LAN_CIDR` source none answers |
 | **V1** | packages and sources | the package list equals the baseline's (no CloudStack, Podman (with netavark, aardvark-dns, conmon, crun, `uidmap`, `slirp4netns`, `dbus-user-session`, and `iptables` if the baseline lacked it), libvirt, MySQL, NFS, chrony, qemu or `dnsutils` additions; `systemd-timesyncd` back); apt sources and keys match |
 | **V2** | network | `/etc/netplan` byte-identical; no lab bridges (`cloudbr0`, `cloudbr1`, `cloud0`, `virbr0`, `podman*`); `/etc/resolv.conf` links where it did; no `inet lab` table and no nftables rules beyond the baseline's; the host reaches `LAN_GATEWAY` on `HOST_IP` |
-| **V3** | services and listeners | enabled units, timers and listening ports match the baseline; no containers, no `lab-*` units, no files in `/etc/containers/systemd/`, no resolved drop-ins |
+| **V3** | services and listeners | enabled units, timers and listening ports match the baseline; no containers, no `lab-*` units, no files in `/etc/containers/systemd/`, no resolved drop-ins; no lab sshd drop-in, and `sshd -T` matches the baseline's |
 | **V4** | identity and trust | users, groups and group memberships match; trust-store contents match (no `lab.test CA`) |
 | **V5** | system state and drift | loaded kernel modules, the recorded sysctl values, `/etc/hosts`, the hostname and crontabs match; the `/etc` SHA-256 manifest matches apart from the listed ignores (1.1), which the report prints. `/var/lib/lab/` and `/var/backups/lab/` are expected and excluded |
 
@@ -3009,7 +3067,7 @@ step depends on something already deleted.
 | 6 | `setup` | Vault (`iac`, the `tfstate` MinIO user) | `terraform destroy` (run directly, not through the policy gate, which forbids destroying the public IP); then the state object; the `app.lab.test` and `k3s.lab.test` records |
 | 7 | `image` | Vault (admin) | the CloudStack template; MinIO `images/*` |
 | 8 | `provision` | — | CloudStack: services, system VMs, `cloud` and `cloud_usage` DBs, then **purges** `/var/lib/mysql` (an old `cloud` DB left there would poison a reinstall, rule 2), installer tracker, packages (libvirt included), NFS exports and `/export/*`, `/etc/nfs.conf` pins, the bridge-netfilter udev rule and sysctl file, drop-ins, repo, `cmk` |
-| 9 | `platform` | — | unregisters the runner, removes its service; as `lab-runner`, `podman system reset --force` (its rootless images, owned by sub-UIDs); `loginctl disable-linger lab-runner`; `lab-runner`'s work directory; stops the quadlet units (gateway, Prometheus, Loki and Grafana included), deletes their files in `/etc/containers/systemd/` and runs `daemon-reload`; removes the containers, the three networks and the volumes (theirs included; Loki's bucket goes with MinIO's); purges Podman and every package 2.1b and 2.10 added with it (`uidmap`, `slirp4netns`, `dbus-user-session`, and `iptables` if the baseline lacked it) and the dependencies apt pulled in with them (every package the list holds beyond the baseline's; V1), the `/etc/containers/containers.conf.d/` lab file and `/var/lib/containers`; any netavark chains left in the `ip filter` and `ip nat` tables (V2) **[verify what netavark 1.4 leaves after its last network is removed]**; `lab-nftables.service`, the `inet lab` table and `/etc/lab/`; the systemd-resolved drop-in and the original `/etc/resolv.conf` link; chrony removed and the `systemd-timesyncd` package **reinstalled** and enabled; the Vault and Squid logrotate rules; `/opt/lab/`; `/var/lib/lab/platform`, `/var/lib/lab/certs`, `/var/lib/lab/traefik` (dynamic routes, the users file) and `/var/lib/lab/grafana`; the lab CA from the host trust store |
+| 9 | `platform` | — | unregisters the runner, removes its service; as `lab-runner`, `podman system reset --force` (its rootless images, owned by sub-UIDs); `loginctl disable-linger lab-runner`; `lab-runner`'s work directory; stops the quadlet units (gateway, Prometheus, Loki and Grafana included), deletes their files in `/etc/containers/systemd/` and runs `daemon-reload`; removes the containers, the three networks and the volumes (theirs included; Loki's bucket goes with MinIO's); purges Podman and every package 2.1b and 2.10 added with it (`uidmap`, `slirp4netns`, `dbus-user-session`, and `iptables` if the baseline lacked it) and the dependencies apt pulled in with them (every package the list holds beyond the baseline's; V1), the `/etc/containers/containers.conf.d/` lab file and `/var/lib/containers`; any netavark chains left in the `ip filter` and `ip nat` tables (V2) **[verify what netavark 1.4 leaves after its last network is removed]**; `lab-nftables.service`, the `inet lab` table and `/etc/lab/`; if `decision.podman-fw` chose the fallback, its apt repository and key (2.1c; V1); the sshd drop-in `/etc/ssh/sshd_config.d/00-lab.conf`, then `sshd -t` and a reload, so the original sshd settings return (V3); the systemd-resolved drop-in and the original `/etc/resolv.conf` link; chrony removed and the `systemd-timesyncd` package **reinstalled** and enabled; the Vault and Squid logrotate rules; `/opt/lab/`; `/var/lib/lab/platform`, `/var/lib/lab/certs`, `/var/lib/lab/traefik` (dynamic routes, the users file) and `/var/lib/lab/grafana`; the lab CA from the host trust store |
 | 9a | users | baseline | `userdel`/`groupdel` every user and group the baseline does not have (`lab-runner` with its `/etc/subuid` and `/etc/subgid` lines, `cloud`, `libvirt-qemu`, `libvirt`, and memberships added to `kvm`): package purges leave them behind |
 | 10 | host | `/var/backups/lab/netplan.orig/` | restores the original netplan files, then inside one `netplan try` window deletes `cloud0`, `cloudbr0` and `cloudbr1` (networkd does not release a NIC from a bridge on its own) and applies the restored config; the automation confirms (SIGUSR1) only after it reaches `LAN_GATEWAY` again, otherwise it auto-reverts |
 | 11 | `state/` | — | copies `bootstrap.log` to `/var/backups/lab/down-<timestamp>.log`, then deletes `state/` |
@@ -3058,7 +3116,7 @@ removes it after a confirmation prompt naming every file.
 | Console exposure | host only, each tool's own login, read-only identities everywhere | consoles on the LAN behind SSO (OIDC from a directory): the enterprise answer; needs the directory (above) |
 | Grafana access | a host console behind the gateway, on the one gateway certificate, Viewer login | on be-1 behind its own Istio gateway on the mgmt NIC (the earlier design): a second gateway, a DNAT rule and a `pki/sign/grafana` role; `kubectl port-forward`: plain HTTP on the host's loopback and a helper process to keep alive |
 | CI runner | one runner on the host as `lab-runner` (in `kvm` only; images built with rootless Podman), one label, every job; `main` protected by a required `pr.yml` check with 0 approvals | separate untrusted runners for pull requests (no host access, no deploy credentials), a deploy runner only `main` can reach, a remote BuildKit service, and a required second reviewer: the enterprise answer once more than one person pushes. With one operator, every PR is the operator's own code, so a PR running with host access and the pipeline identity is an accepted, stated risk |
-| Control-plane runtime | **decided 2026-11-09: Podman (systemd quadlets) over Docker Compose.** Rootful quadlets from the Ubuntu 24.04 archive for the host services, TLS at a gateway, Vault direct; rootless Podman for the runner's image builds | Docker Compose (the earlier design): a root daemon, a third-party apt repo and key, and the `docker` group, which made the runner root-equivalent; Docker also set FORWARD to drop and loaded `br_netfilter`, which the lab had to undo (§10 rule 13). Podman has no daemon, each service is a systemd unit (ordering, restarts, `journalctl`), the runner needs no privileged group, and fe-1 already runs quadlets, so the lab learns one runtime. Its costs: netavark adds no forward filtering, so the lab's table is the default deny (2.2), and aardvark-dns moves off port 53 (2.1c). A host k3s cluster with a mesh: the mesh's CA would be Vault running inside it, CloudStack and `/dev/kvm` builds cannot move in, and k3s needs bridge netfilter on, which breaks bridged VM traffic (§10 rule 13). Enterprises keep foundation services (DNS, PKI, SCM, artifact store) outside the platforms they bootstrap |
+| Control-plane runtime | **decided 2026-11-09: Podman (systemd quadlets) over Docker Compose.** Rootful quadlets from the Ubuntu 24.04 archive for the host services, TLS at a gateway, Vault direct; rootless Podman for the runner's image builds | Docker Compose (the earlier design): a root daemon, a third-party apt repo and key, and the `docker` group, which made the runner root-equivalent; Docker also set FORWARD to drop and loaded `br_netfilter`, which the lab had to undo (§10 rule 13). Podman has no daemon, each service is a systemd unit (ordering, restarts, `journalctl`), the runner needs no privileged group, and fe-1 already runs quadlets, so the lab learns one runtime. Its costs: netavark adds no forward filtering, so the lab's table is the default deny (2.2), and aardvark-dns moves off port 53 (2.1c). If the 2.1c spike fails, the named fallback is Podman 5.x with netavark ≥ 1.10 (nftables driver) from a pinned third-party apt repository, today OBS `home:alvistack` **[verify]**, removed by `down`; returning to Docker is the last resort. A host k3s cluster with a mesh: the mesh's CA would be Vault running inside it, CloudStack and `/dev/kvm` builds cannot move in, and k3s needs bridge netfilter on, which breaks bridged VM traffic (§10 rule 13). Enterprises keep foundation services (DNS, PKI, SCM, artifact store) outside the platforms they bootstrap |
 | Supply-chain admission | images scanned and pinned by digest; Pod Security Admission `restricted` | cosign signing at push with a Kyverno/policy-controller verify rule at admission: the production answer for "only our images run"; here digest pinning in reviewed manifests gives the same guarantee for a single registry and operator |
 | Gateway certificates | one certificate for every gateway name, issued by `lab maintain`, Traefik restarted on re-issue | per-hostname certificates hot-reloaded on renewal, or ACME from Vault's PKI (Traefik as an ACME client): the common enterprise pattern; renewal machinery a 3-week build never exercises |
 | Golden-image transport | SSVM copy over plain HTTP from the gateway's `images/` route, checksum verified | direct-download templates over HTTPS with `lab.test CA` uploaded to the KVM host: TLS on that hop, but an extra trust upload and an admin-only registration path |
@@ -3066,7 +3124,8 @@ removes it after a confirmation prompt naming every file.
 | SSH host trust | per-job `known_hosts` with `accept-new` | Vault's SSH CA signing host and user certificates, so host keys are verified and no static key exists: the production answer, out of scope |
 | istiod CA name constraints | DNS constrained to `cluster.local`; IP/URI constraints only if the pinned Vault accepts them (2.5d) | an offline-root PKI where the intermediate is constrained by the signing ceremony itself: out of scope; the pipeline identity that could request it already runs with host access (2.10) |
 | Management network isolation | in-guest nftables on a shared host-only bridge | private VLANs or per-VM L2 isolation, so a VM's root cannot reach another VM's mgmt NIC: needs Open vSwitch PVLAN support in CloudStack |
-| Privileged access | the host as bastion | AD logins (above), Teleport/Boundary with an SSH CA and session recording: the production answer, out of scope |
+| Privileged access | the host as bastion: key-only SSH for `OPERATOR_LOGIN` alone, no root login, local forwarding only (`ssh -D`, `-L`, `-J`), new connections rate-limited (2.2) | AD logins (above), Teleport/Boundary with an SSH CA and session recording: the production answer, out of scope |
+| Bastion and egress tightening | **options, not in the core build** (added 2026-11-09; each folds into 2.2, minutes of work): (a) Gitea's public egress in rule 4 also excludes `100.64.0.0/10` (carrier-grade NAT) and `169.254.0.0/16` (link-local, where cloud metadata services listen), so a compromised Gitea cannot reach a provider's metadata endpoint or a CGNAT neighbour; the 2.2 Exit adds `169.254.169.254:443` timing out from Gitea's address. (b) Preflight and 2.2 refuse any `AllowUsers`, `AllowGroups` or `Match` line in `/etc/ssh/sshd_config` or another `sshd_config.d/` file, since sshd adds up `AllowUsers` lines from every file and a stray one would admit more users (the core Exit already catches it with a temporary user; this names the cause before it applies). (c) A timed undo for the SSH change: before reloading, a transient `systemd-run --on-active=5min` unit removes the drop-in and reloads sshd unless the operator confirms from a new key-based session, the way `netplan try` reverts network changes | (c) is the one with real cost: a second code path that must itself be tested, for a risk the core guards (key check as sshd reads it, `sshd -t`, reload not restart, the first session kept open, the local console) already cover |
 | Defence in depth inside k3s | mesh identity (AuthorizationPolicy) only | Kubernetes NetworkPolicies as an L3 layer under the mesh: worth it with many teams; its interplay with ambient's HBONE port needs care, out of scope |
 | Git provenance | protected `main`, read-only Flux token | Flux verifying signed commits: needs every merge signed by a key Flux trusts, Gitea's merge commits included |
 
@@ -3076,7 +3135,7 @@ removes it after a confirmation prompt naming every file.
 
 | Term | Meaning here |
 |---|---|
-| aardvark-dns | Podman's DNS server for named networks: answers container names on each network's gateway address and forwards other names upstream (here CoreDNS at `10.250.0.1`); on port 1053 here, so CoreDNS keeps 53 |
+| aardvark-dns | Podman's DNS server for named networks: answers container names on each network's gateway address and forwards other names to the host's resolver (here CoreDNS at `127.0.0.1`); on port 1053 here, so CoreDNS keeps 53 |
 | ACL list | a CloudStack VPC tier's firewall: ordered allow/deny rules, ingress and egress |
 | `allow-nothing` | an `AuthorizationPolicy` with an empty spec in Istio's root namespace: every meshed workload denies callers no ALLOW names |
 | Alloy | Grafana Alloy: a telemetry collector that scrapes metrics, reads logs and forwards both (here by remote write to Prometheus and push to Loki on the host) |
@@ -3095,6 +3154,7 @@ removes it after a confirmation prompt naming every file.
 | k8s-monitoring | Grafana's Helm chart that deploys Alloy, the Alloy Operator, kube-state-metrics and node-exporter and writes Alloy's configuration from feature switches |
 | kubernetes-mixin | the community's recording rules and dashboards for Kubernetes (with the node-mixin for node-exporter), rendered from jsonnet |
 | Loki | Grafana's log store: indexes labels only, keeps chunks in object storage (here MinIO) |
+| meter (nftables) | a rule that adds each source to a dynamic set with its own rate limit, so one noisy address is limited without affecting others; here on new SSH connections |
 | `min_decryption_version` | Transit key setting: ciphertext older than this key version can no longer be decrypted |
 | netavark | Podman's network tool: creates bridges and veths and writes the NAT and published-port rules (with its iptables driver at 1.4, through iptables-nft) |
 | `netplan try` / SIGUSR1 | apply a network change that reverts itself unless confirmed; SIGUSR1 is the confirmation |
@@ -3242,7 +3302,7 @@ loop. Import one bead per row.
 | 2.1a | Host-only bridge | 1.2a | 2 | S |
 | 2.1b | Podman and the quadlet units | 2.1a, 1.3 | 2 | M |
 | 2.1c | Spike: netavark's firewall driver and rule order | 2.1b | 2 | S |
-| 2.2 | Host firewall | 2.1c | 2 | M |
+| 2.2 | Host firewall and SSH hardening | 2.1c | 2 | M |
 | 2.3a | CoreDNS | 2.2 | 2 | M |
 | 2.3b | NTP | 2.2 | 2 | S |
 | 2.4a | Vault server | 2.3a | 2 | M |

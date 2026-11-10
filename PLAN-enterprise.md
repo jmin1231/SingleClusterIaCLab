@@ -53,14 +53,15 @@ out, and why, is in §15.
   certificate, read-only console logins, default deny everywhere (ACLs, firewalls,
   mesh). What was weighed and left out is in §15.
 - **Bash at the door, Python inside.** `bootstrap.sh` checks for Python ≥ 3.12 and
-  runs `PYTHONPATH=src exec python3 -B -m lab "$@"`, nothing more. Every phase,
-  check, demo and teardown is Python in `src/lab/`, type-checked with mypy. External
+  changes to its own directory, then runs `exec python3 -B -m lab "$@"` (`-m` puts
+  the repo root on the import path), nothing more. Every phase, check, demo and teardown
+  is Python in the `lab/` package at the repo root (no `src/` level), type-checked with mypy. External
   tools (`cmk`, `terraform`, `ansible-playbook`, `packer`, `kubectl`, `vault`,
   `istioctl`, `flux`, `helm`, `mc`, `podman`) are called through thin wrappers, never
   re-implemented. `lab` itself uses the Python standard library only (`tomllib`,
   `subprocess`, `json`, `urllib`), so running it installs nothing; dev tools live in a
-  gitignored `.venv/` (0.2c). The only shell in the repo is the vendored upstream
-  CloudStack installer, which is third-party.
+  gitignored `.venv/` (0.2c). The only shell in the repo is the shim; CloudStack is
+  installed by an Ansible role (3.1a), not a vendored script.
 - **Bootstrap by hand, everything else by pipeline.** `bootstrap.sh` builds only what
   must exist before CI can run: the host, the control plane, CloudStack and the
   runner (Phases 1–3). From Phase 4 on, every phase is a job in the delivery
@@ -108,7 +109,7 @@ out, and why, is in §15.
   protected. None is ever in git: the `pr.yml` gate rejects a Secret with data under
   `clusters/` (10.1).
 - **Pinned and immutable.** Every version, image digest, provider and chart is
-  pinned in `src/lab/versions.py`. Images are built, scanned and published once, then
+  pinned in `lab/versions.py`. Images are built, scanned and published once, then
   never patched in place. Nothing installs software at container start.
 - **Gates before change.** Lint runs from the first commit. Terraform cannot apply
   without passing the policy gate, on the local path and in CI alike.
@@ -246,9 +247,8 @@ Preflight validates them. The values below are the defaults and examples.
 | `LAN_GATEWAY` / upstream DNS | from the LAN |
 | CloudStack pod (system VM) range | on the LAN, e.g. `.180–.189` |
 | CloudStack public range (VPC source NAT and public IPs) | on the LAN, e.g. `.190–.209` |
-| `VMNET_CIDR` (mgmt shared network) | `10.250.0.0/24` on host-only bridge `cloudbr1`; router DHCP `.100–.199`; lab VMs get **fixed** addresses from that range through `cloudstack_nic`'s `ip_address` (fe-1 `.110`, tun-1 `.111`, be-1 `.112`), and each VM's userdata writes that address into a **static** netplan for eth1, so nothing depends on a lease or on the mgmt router being up; the router itself must take an address outside `.110–.112` (checked in 3.3a) |
+| `VMNET_CIDR` (mgmt shared network) | `10.250.0.0/24` on host-only bridge `cloudbr1`; router DHCP `.100–.199`; lab VMs get **fixed** addresses from that range through `cloudstack_nic`'s `ip_address` (fe-1 `.110`, tun-1 `.111`, be-1 `.112`), and each VM's userdata writes that address into a **static** netplan for eth1, so nothing depends on a lease or on the mgmt router being up; the router itself is pinned outside `.110–.112`, at `.100` (`routerip`, 3.3a) |
 | `VMNET_HOST_IP` | `10.250.0.1`, the host's address on `cloudbr1`: every VM reaches the control plane here |
-| `OPERATOR_LOGIN` | the operator's login on the host, the only account sshd admits (2.2); preflight refuses it without an authorized key |
 | Container address pool (Podman) | `172.30.0.0/16` (pinned in `containers.conf`; must not overlap any range here): default network `.0.0/24`, `lab_edge` `.1.0/24`, `lab_backend` `.2.0/24`, `lab_egress` `.3.0/24` (fixed: Vault `.3.10`, Gitea `.3.11`, the only two addresses 2.2 lets out; any other container gets an address from `.3.128/25`) |
 
 **VPC `10.0.0.0/16`**
@@ -279,7 +279,7 @@ publish **no** host ports: they are reached only through the gateway.
 
 | Service | Port | Allowed from | Name → address |
 |---|---|---|---|
-| SSH (key-only, `OPERATOR_LOGIN` only, new connections rate-limited; 2.2) | 22 | LAN | `host.lab.test` → `HOST_IP` |
+| SSH (as Ubuntu ships it; hardening is a §15 option) | 22 | LAN | `host.lab.test` → `HOST_IP` |
 | CoreDNS | 53 tcp/udp | LAN, VMs | — |
 | aardvark-dns (container name resolution; forwards other names to CoreDNS from the host) | 1053 tcp/udp | containers | — |
 | chrony (NTP server) | 123/udp | VMs | — |
@@ -287,7 +287,7 @@ publish **no** host ports: they are reached only through the gateway.
 | Gateway, plain HTTP: `GET /images/*` only (MinIO's anonymous-read `images` bucket) | 80 | system-VM range | by address: `http://HOST_IP/images/…` (4.3) |
 | Vault (direct, its own TLS) | 8200 | VMs, containers, host | `vault.lab.test` → `10.250.0.1` |
 | Squid | 3128 | VMs, host (Packer build VM) | `proxy.lab.test` → `10.250.0.1` |
-| CloudStack UI/API backend (plain HTTP) | 8080 | host and containers only (the gateway, the installer's readiness probe) | — |
+| CloudStack UI/API backend (plain HTTP) | 8080 | host and containers only (the gateway, 3.1a's readiness probe) | — |
 | CloudStack agent | 8250 | system-VM range, host | — |
 | NFS (rpcbind, mountd, statd, lockd, nfsd; all pinned) | 111 · 20048 · 32765 · 32768 · 2049 | system-VM range | — |
 
@@ -332,16 +332,16 @@ would drop below the **4 GB reserve**.
 | Consumer | Memory |
 |---|---|
 | Host OS + page-cache floor | 2.0 GB |
-| CloudStack management (JVM) + MySQL + KVM agent | 3.0 GB |
+| CloudStack management (JVM) + MySQL + KVM agent (the 4.22 docs' 4 GB management-server minimum, until measured) | 4.0 GB |
 | System VMs: SSVM, CPVM, redundant VPC router pair, mgmt-network router | 2.5 GB |
 | Control plane: CoreDNS, Vault, MinIO, Gitea, Squid, Traefik, Prometheus ~0.55, Loki ~0.4, Grafana ~0.15 | 2.7 GB |
 | fe-1 + tun-1 (1 GB each) + be-1 (6 GB) + KVM overhead | 9.0 GB |
 | Gitea runner (idle host service) | 0.2 GB |
-| **Steady state** | **19.4 GB** |
+| **Steady state** | **20.4 GB** |
 | Peak transient, one job at a time: golden-image build (Packer VM) | +2.0 GB |
 | *(container build + scan, +1.5 GB, never overlaps it: the runner runs one job at a time)* | |
-| **Peak** | **21.4 GB** |
-| **Headroom under 32 GB** (must stay ≥ 4 GB reserve) | **10.6 GB** (10.2 GB with §15's tracing option, Tempo ~0.4) |
+| **Peak** | **22.4 GB** |
+| **Headroom under 32 GB** (must stay ≥ 4 GB reserve) | **9.6 GB** (9.2 GB with §15's tracing option, Tempo ~0.4) |
 
 **What be-1's 6 GB holds** (requests in the manifests must sum to ≤ 4.5 GB): k3s
 server ~0.6, Flux (three controllers) ~0.2, istiod ~0.3, ztunnel + istio-cni ~0.15,
@@ -412,7 +412,7 @@ exist outside Vault, and each one is listed with its location and protection.
 | Console logins (Vault, MinIO, CloudStack, Grafana `operator`) | `kv/lab/bootstrap/{vault,minio,cs,grafana}-operator` | read-only identities created in 3.5c (Grafana's: role Viewer); shown only by `lab consoles --show` on a terminal |
 | Vault Secrets Operator's Vault token | the operator's memory | Kubernetes login as SA `db/vso-db` to role `vso-db`, which may read `kv/data/app/db` only, and as SA `monitoring/vso-monitoring` to role `vso-monitoring`, `kv/data/app/alloy-write` only; 1-hour TTL |
 | Vault token-reviewer JWT | k8s Secret for SA `vault-auth`, and Vault's `auth/k3s/config` | encrypted at rest; read on be-1 by the `k3s` role (from 8.2c); rotated by re-running `lab cluster` |
-| CloudStack DB and MySQL passwords | `/etc/cloudstack/management/db.properties`, MySQL | root-only; generated by the installer; removed in teardown |
+| CloudStack DB password and database encryption keys | `/etc/cloudstack/management/db.properties` and `key`, MySQL, Vault `kv/lab/bootstrap/cloudstack` | root-only; generated per install by 3.1a (never `cloud:cloud` or the `password` key defaults); removed in teardown |
 | Control-plane start-up credentials (MinIO root, Gitea admin, Grafana admin, Loki's MinIO user), the gateway's users file (Alloy's bcrypt hash) and the two host TLS keys (Vault's listener, the gateway) | `/var/lib/lab/platform/*.env`, `/var/lib/lab/traefik/alloy.htpasswd`, `/var/lib/lab/certs/` | root `0600`, rendered from Vault by `lab platform` and `lab maintain`; never in the repo |
 | fe-1's TLS key (`app.lab.test`) | `/etc/caddy/tls/` on fe-1 | generated **on** fe-1; only its CSR leaves the VM, signed by the `app` job through `pki/sign/app-edge`; an `app` run re-signs it when under 10 days remain |
 
@@ -421,8 +421,8 @@ copies of Vault entries, refreshed by `lab platform`), split by who may read it:
 
 - `kv/lab/bootstrap/*` (only `lab-bootstrap`): CloudStack admin API keys, MinIO
   root, Gitea admin, Grafana admin, the runner registration token, the console logins
-- `kv/lab/pipeline/*` (`lab-pipeline` and `lab-bootstrap`): the `iac` and
-  `publisher` API keys, the per-bucket MinIO users (Loki's included), the lab SSH key,
+- `kv/lab/pipeline/*` (`lab-pipeline` and `lab-bootstrap`): the `iac`, `publisher`
+  and `health` API keys, the per-bucket MinIO users (Loki's included), the lab SSH key,
   WireGuard public keys, Flux's Gitea token, the Grafana verify token
 - `kv/lab/breakglass/*` (read: `lab-bootstrap` only; `lab-pipeline` may write
   `k3s-admin` but never read it): the k3s cluster-admin kubeconfig
@@ -550,9 +550,9 @@ pyproject.toml               ruff + mypy + pytest config (no packaging)
 requirements-dev.txt         hash-pinned dev tools for .venv/: ruff, mypy, pytest,
                              yamllint, ansible-lint
 config/lab.toml              environment values (§5), non-secret
-src/lab/
+lab/
   __main__.py                argparse command map (§8)
-  versions.py                every pin: CloudStack, Terraform provider, k3s, Flux, Istio,
+  versions.py                every pin: CloudStack (version, repo key fingerprint), Terraform provider, k3s, Flux, Istio,
                              Gateway API, Helm charts (version + SHA-256), images (by
                              digest: Prometheus, Loki and Grafana included), the
                              kubernetes-mixin and node-mixin commits, Python deps
@@ -563,11 +563,7 @@ src/lab/
   preflight.py toolchain.py platform.py provision.py image.py setup.py base.py tunnel.py
   cluster.py mesh.py app.py monitoring.py backup.py verify.py demo.py consoles.py
   status.py teardown.py revert.py maintain.py
-  vendor/cloudstack-install.sh   the vendored upstream installer (third-party shell):
-                             Apache CloudStack's get.cloudstack.cloud/install.sh, pinned
-                             by version and SHA-256 in versions.py, with vendor/README
-                             recording where and when it was fetched
-platform/                    quadlet units + config: traefik/ (static config, dynamic
+platform/                    compose.yaml + config: traefik/ (static config, dynamic
                              routes), coredns/, vault/, minio/, gitea/, squid/
                              (allowlist.txt), prometheus/ (config, the rendered mixin
                              recording rules), loki/, grafana/ (datasources, dashboard
@@ -578,9 +574,10 @@ observability/dashboards/    Grafana dashboards as JSON, synced to the host by t
 packer/                      qemu template, autoinstall seed, provisioners
 terraform/                   provider + backend, vpc, tiers, acls, compute, ingress, outputs
 policy/                      Conftest/OPA rules over the plan JSON
-ansible/                     roles: base, wireguard_hub, wireguard_spoke, frontend, k3s
-                             (k3s also holds the API audit policy, 8.2d, and the on-node
-                             Flux bootstrap, 8.2c)
+ansible/                     roles: cloudstack (the host install: repo, packages,
+                             databases, `cloudbr0` netplan, 3.1a), base, wireguard_hub,
+                             wireguard_spoke, frontend, k3s (k3s also holds the API
+                             audit policy, 8.2d, and the on-node Flux bootstrap, 8.2c)
 clusters/backend/            everything Flux applies to k3s (no Secret values, ever: 10.1)
   kustomization.yaml         the root: flux-system/ + kustomizations.yaml
   flux-system/               gotk-components.yaml (`flux install --export`, pinned),
@@ -605,7 +602,7 @@ clusters/backend/            everything Flux applies to k3s (no Secret values, e
 app/                         api/ and frontend/ (Flask), each with Dockerfile and
                              requirements.txt (hash-pinned); frontend/ also holds the
                              Caddyfile and the Podman quadlet units for fe-1
-tests/                       pytest for src/lab; verify/demo helpers
+tests/                       pytest for lab/; verify/demo helpers
 .gitea/workflows/            pr.yml (gates on every PR), deliver.yml (Phases 4–12 on
                              main), schedules.yml (nightly backup and verify)
 docs/                        capacity.md, walkthrough.md
@@ -701,12 +698,12 @@ are in §17.
 
 ### Phase 0 — Scaffolding
 
-- **0.1 Shim and package.** `bootstrap.sh`; `src/lab/__init__.py`; `lib/log.py`
+- **0.1 Shim and package.** `bootstrap.sh`; `lab/__init__.py`; `lab/lib/log.py`
   (`[+]/[!]/[x]` to the console, timestamped `state/bootstrap.log`); `lib/tracker.py`
   (atomic JSON writes via temp file + `os.replace`); `.gitignore` (`/state/`,
   `/.venv/`, `__pycache__/`, `.mypy_cache/`, `.ruff_cache/`, `*.tfstate*`,
   `.terraform/`, `/builds/`).
-  Exit: `PYTHONPATH=src python3 -c 'import lab.lib.log'`.
+  Exit: from the repo root, `python3 -c 'import lab.lib.log'`.
 
   ⤷ **Needs** — · **Recalls** — · **Produces** `bootstrap.sh`, `lib/log.py`,
   `lib/tracker.py`, `.gitignore` · **Records** `path.repo` (checkout, remotes),
@@ -748,11 +745,10 @@ are in §17.
   - `/etc/netplan` hashes, bridges, the `/etc/resolv.conf` link, nftables ruleset
   - trust-store contents; local users and groups; loaded kernel modules; the sysctl
     values the lab touches (`net.ipv4.ip_forward`, `net.bridge.*`)
-  - `/etc/hosts`, the hostname, every crontab; the effective sshd settings (`sshd -T`,
-    after `install -d -m 0755 /run/sshd`, as in 2.2)
+  - `/etc/hosts`, the hostname, every crontab
   - a SHA-256 manifest of `/etc`, so V5 catches drift nobody listed (logrotate rules,
     AppArmor profile changes, installer edits). It is compared against an explicit
-    ignore list in `src/lab/revert.py` (`ld.so.cache`, `ssl/certs/` hash links, `*-`
+    ignore list in `lab/revert.py` (`ld.so.cache`, `ssl/certs/` hash links, `*-`
     backup files, `machine-id`, conffiles a package reinstall rewrites), and the V5
     report prints what it ignored as well as what failed
 
@@ -775,31 +771,24 @@ are in §17.
   - strict `apt-get update` (fail naming any broken source)
   - config values valid and non-overlapping (the runner's sub-ID range, 2.10, also
     against every range already in `/etc/subuid` and `/etc/subgid`)
-  - `OPERATOR_LOGIN` is a local user, not root, with at least one key in the file
-    `sshd -T -C user=<login>` names as `authorizedkeysfile` (normally
-    `~/.ssh/authorized_keys`), and that file and its directories are owned by the user
-    and not group- or world-writable, since sshd's `StrictModes` ignores it otherwise
-    (2.2 makes SSH key-only for that login alone, so without a usable key the operator
-    would be locked out)
   - **leftovers vs resume:** if `/var/lib/lab/install-id` exists and matches the
     baseline, this is the lab's own partial install, and `up` resumes; otherwise
     **refuse** leftovers (existing `cloud` DB or `/var/lib/mysql`, `cloudbr0`,
     `virbr0`, `cloudstack-*` packages, Docker (its FORWARD-drop policy would undercut
     2.2), an active `ufw` or `firewalld` (each sets FORWARD to drop or rewrites the
-    ruleset), lab containers, networks or quadlet units, third-party apt sources)
+    ruleset), lab containers, networks, `lab-platform.service`, third-party apt sources)
     naming each one
   Exit: passes on a fresh host; deliberately fails on a host with a planted
-  `cloudbr0` and no marker, and on an `OPERATOR_LOGIN` with no authorized key. (Once
+  `cloudbr0` and no marker. (Once
   Phase 2 exists: passes, and resumes, after an `up` interrupted in Phase 2.)
 
   ⤷ **Needs** 1.1 · **Recalls** `path.baseline`, `path.install-id` · **Produces**
   `preflight.py` checks, `lab status --capacity` · **Records** `net.host` (`HOST_IP`,
-  LAN NIC, `LAN_CIDR`, `LAN_GATEWAY` as configured), `host.memory`, `host.operator`
-  (login, its authorized-keys file) · **Check** Exit
+  LAN NIC, `LAN_CIDR`, `LAN_GATEWAY` as configured), `host.memory` · **Check** Exit
 - **1.3 Toolchain.** Pinned CLIs into `/opt/lab/bin`, each verified against a
   SHA-256 in `versions.py`: terraform, packer, ansible (venv in `/opt/lab/ansible`,
   with the `cloud.terraform` collection), conftest, trivy, cmk (CloudMonkey, CloudStack's
-  CLI), kubectl, istioctl, flux, helm, vault, mc, tflint, kubeconform. Host packages, from the Ubuntu
+  CLI), docker-compose (v2, run against Podman's socket, 2.1b), kubectl, istioctl, flux, helm, vault, mc, tflint, kubeconform. Host packages, from the Ubuntu
   archive at pinned versions: `qemu-system-x86` and `qemu-utils` (Packer), `dnsutils`
   (`dig`). Every package the lab adds is removed by
   `down`, so V1 holds. An archive is never extracted whole: the one named member is read
@@ -827,63 +816,74 @@ vault-shell` (a subshell with `VAULT_TOKEN` from the `lab-bootstrap` AppRole).
 
   ⤷ **Needs** 1.2a · **Recalls** `path.netplan-orig`, `net.host` · **Produces** the lab
   netplan file · **Records** `net.vmnet` (bridge, host address, file name) · **Check** Exit
-- **2.1b Podman and the quadlet units** (decided 2026-11-09, §15 "Control-plane
-  runtime"). Podman from the Ubuntu 24.04 archive at a pinned version (4.9.3, with
-  netavark and aardvark-dns 1.4.0, and `iptables`, which netavark 1.4 calls; each
-  installed by name, since Podman only recommends or suggests them); no third-party apt
-  repo or key. `iptables -V` must report `nf_tables`; the legacy variant is refused. A
-  lab drop-in `/etc/containers/containers.conf.d/` file pins the container pool
-  (`default_subnet = 172.30.0.0/24` for the default `podman` network, and
-  `default_subnet_pools` of `172.30.0.0/16`, size 24) and moves aardvark-dns to
-  `dns_bind_port = 1053`, since CoreDNS holds port 53 on every host address. Every
-  service is a **rootful quadlet**: `lab platform` renders the repo's `platform/` into
-  `/var/lib/lab/platform/` (config, root-owned) and the units into
-  `/etc/containers/systemd/` (`lab-<service>.container`, `.network`, `.volume`), then
-  runs `systemctl daemon-reload`, so the running control plane never depends on the
-  operator's checkout. systemd starts and orders the units: a unit naming a `.network`
-  or `.volume` file depends on it, and `After=`/`Requires=` order containers on each
-  other. Each `.container` sets `ContainerName=<service>`, the name the other services
-  and the health commands use, and carries `[Install] WantedBy=multi-user.target`
-  (quadlet units cannot be `systemctl enable`d) and `[Service] Restart=on-failure`; each
-  `.volume` sets `VolumeName=` (e.g. `prometheus-data`). Images are fully qualified and
-  pinned by digest, with no `AutoUpdate=` (they change only through `versions.py`);
-  `lab platform` pulls every image before it starts a unit, so a first start does not
-  hit the unit's start timeout. Credentials stay in the root `0600` `*.env` files
-  (`EnvironmentFile=`), not Podman secrets, whose `file` driver would keep a second copy
-  in container storage. Podman never updates an existing network, so when a `.network`
-  file changes `lab platform` stops the units on it, runs `podman network rm` and starts
-  them again (rule 19). Networks, each with a fixed `NetworkName=` and a fixed `Subnet=`
-  and no `DNS=`: aardvark-dns answers container names and forwards every other name to
-  the host's resolver, which from 2.3a is `127.0.0.1`, CoreDNS:
+- **2.1b Podman and Compose** (decided 2026-11-09, Compose chosen over quadlets
+  2026-11-10, §15 "Control-plane runtime"). Podman from the Ubuntu 24.04 archive at a
+  pinned version (4.9.3, with netavark and aardvark-dns 1.4.0, and `iptables`, which
+  netavark 1.4 calls; each installed by name, since Podman only recommends or suggests
+  them); no third-party apt repo or key. `iptables -V` must report `nf_tables`; the
+  legacy variant is refused. A lab drop-in `/etc/containers/containers.conf.d/` file
+  pins the container pool (`default_subnet = 172.30.0.0/24` for the default `podman`
+  network, and `default_subnet_pools` of `172.30.0.0/16`, size 24) and moves
+  aardvark-dns to `dns_bind_port = 1053`, since CoreDNS holds port 53 on every host
+  address. The services are defined in **one Compose file** and run by rootful Podman:
+  - Compose is the `docker-compose` v2 binary, pinned with its SHA-256 in `versions.py`
+    and installed by 1.3 into `/opt/lab/bin`, talking to rootful Podman's API socket
+    (`podman.socket`, `/run/podman/podman.sock`, `root:root 0660`) through
+    `DOCKER_HOST`. Ubuntu's `podman-compose` package is not used (older; health-gated
+    `depends_on` and `ip_range` **[verify]**)
+  - `lab platform` renders the repo's `platform/` into `/var/lib/lab/platform/` (config
+    and `compose.yaml`, root-owned), so the running control plane never depends on the
+    operator's checkout. The file names its project (`name: lab`), and each service
+    sets `container_name: <service>`, the name the other services and the health
+    commands use
+  - one systemd unit, `lab-platform.service` (`Type=oneshot`, `RemainAfterExit=yes`,
+    `Requires=` and `After=` `lab-nftables.service` and `podman.socket`, `WantedBy=
+    multi-user.target`), runs `docker-compose up -d` at boot and `docker-compose stop`
+    on stop, so no lab container starts without the firewall table (2.2)
+  - every service has `restart: unless-stopped`: Podman restarts a crashed container
+    itself, and Podman's `podman-restart.service` (which starts only `always`
+    containers at boot, with no firewall ordering) is left disabled; the boot start is
+    `lab-platform.service`'s
+  - images are fully qualified and pinned by digest (they change only through
+    `versions.py`); `lab platform` pulls every image first. Credentials stay in root
+    `0600` `*.env` files (`env_file:`), not Compose or Podman secrets, whose `file`
+    driver would keep a second copy in container storage. Named volumes have fixed
+    names (`name: prometheus-data`)
+  - Podman never updates an existing network, so when a network's definition changes
+    `lab platform` stops the services on it, runs `podman network rm` and brings them up
+    again (rule 19)
+
+  Networks, each with a fixed `name:` and a fixed `subnet` and no DNS override:
+  aardvark-dns answers container names and forwards every other name to the host's
+  resolver, which from 2.3a is `127.0.0.1`, CoreDNS:
   - `lab_edge` (`172.30.1.0/24`): Traefik only; its 443 and 80 are the only published
     web ports
-  - `lab_backend` (`172.30.2.0/24`, `Internal=true`, no route out, no published ports):
-    Gitea, MinIO, and Prometheus, Loki and Grafana (2.7b), reached only by Traefik and
-    each other
+  - `lab_backend` (`172.30.2.0/24`, `internal: true`, no route out, no published
+    ports): Gitea, MinIO, and Prometheus, Loki and Grafana (2.7b), reached only by
+    Traefik and each other
   - `lab_egress` (`172.30.3.0/24`, normal bridge, outbound only as 2.2 allows, with
-    `IPRange=172.30.3.128/25` so no other container takes a fixed address): Vault at
-    `172.30.3.10` (to k3s's API) and Gitea at `172.30.3.11` (push mirror to GitHub), set
-    in each `.container` with `Network=lab_egress.network:ip=<address>` (Gitea is on two
-    networks, so a plain `IP=` would be ambiguous) **[verify that quadlet 4.9.3 keeps
-    the `:ip=` option on a `.network` file reference, and that netavark accepts a fixed
-    address outside `IPRange=`]**. 2.2 lets only these two addresses out
-  - CoreDNS and Squid use `Network=host`, so they see real client addresses (the
+    `ip_range: 172.30.3.128/25` so no other container takes a fixed address): Vault at
+    `172.30.3.10` (to k3s's API) and Gitea at `172.30.3.11` (push mirror to GitHub),
+    set with `ipv4_address` under the service's `lab_egress` entry **[verify that
+    Podman 4.9's API keeps `ip_range` and that netavark accepts a fixed address outside
+    it]**. 2.2 lets only these two addresses out
+  - CoreDNS and Squid use `network_mode: host`, so they see real client addresses (the
     `view` plugin and Squid's ACL depend on it) and are filtered by the input chain
-  Each service has a health check (`HealthCmd=`) and is started by its own step below.
-  Podman 4.9's quadlet has no `Notify=healthy`, so systemd reports a unit started when
-  its container starts; `lab platform` waits on health itself (`podman healthcheck run`).
+
+  Each service has a `healthcheck:` and is added to the file, and started with
+  `docker-compose up -d --wait <service>`, by its own step below; `lab platform` also
+  checks health itself (`podman healthcheck run`).
   Exit: `podman run --rm` of a pinned `docker.io/library/hello-world` works (pulled
-  from Docker Hub directly: the host itself is not behind Squid); `lab platform` renders
-  the units, `/usr/libexec/podman/quadlet -dryrun` accepts every one (quadlet skips a
-  file with a key it does not know **[verify that 4.9.3 has every key used here:
-  `NetworkName=`, `VolumeName=`, `IPRange=`, `HealthCmd=`, `Pull=`]**), and it creates
-  the three networks with the names, subnets and range above; a re-run changes nothing.
+  from Docker Hub directly: the host itself is not behind Squid); `docker-compose
+  config` accepts the rendered file; `lab platform` creates the three networks with
+  the names, subnets and range above (`podman network inspect`); `lab-platform.service`
+  is enabled and active; a re-run changes nothing.
 
   ⤷ **Needs** 2.1a, 1.3 · **Recalls** `net.vmnet`, `code.versions`, `decision.runtime` ·
-  **Produces** `platform.py` (render + units), `platform/` quadlet units, the
-  `containers.conf` drop-in · **Records** `podman.pool`, `podman.networks` (names,
-  subnets, Vault's and Gitea's fixed `lab_egress` addresses), `path.platform` ·
-  **Check** Exit
+  **Produces** `platform.py` (render + compose), `platform/compose.yaml`,
+  `lab-platform.service`, the `containers.conf` drop-in · **Records** `podman.pool`,
+  `podman.networks` (names, subnets, Vault's and Gitea's fixed `lab_egress`
+  addresses), `path.platform` · **Check** Exit
 - **2.1c Spike: netavark's firewall driver and rule order** (a gate: 2.2 is written
   against what this proves). Facts to confirm on this host: `podman info` names
   netavark as the network backend; netavark 1.4 uses its iptables driver (its other
@@ -912,8 +912,12 @@ vault-shell` (a subshell with `VAULT_TOKEN` from the `lab-bootstrap` AppRole).
     aardvark-dns on 1053 only once the scratch table redirects its port 53 queries;
     on a normal network netavark's own redirect does it for UDP, and `dig +tcp`
     answers only with the scratch table's TCP redirect
-  - `nft -f` of the scratch table and `systemctl restart` of the container, in either
-    order, leave both rule sets in place
+  - `nft -f` of the scratch table and a restart of the container, in either order,
+    leave both rule sets in place
+  - through `docker-compose` on the Podman socket: a throwaway network with `ip_range`
+    and a container at a fixed address outside that range come up as declared, an
+    `internal: true` network has no route out, and `up -d --wait` returns only once the
+    container's health check passes
   Exit: every point above holds; the scratch table, network and container are removed.
   If any fails, 2.2 waits and `decision.podman-fw` is opened. Its named fallback is
   Podman 5.x with netavark ≥ 1.10, whose nftables driver (chosen with
@@ -928,7 +932,7 @@ vault-shell` (a subshell with `VAULT_TOKEN` from the `lab-bootstrap` AppRole).
   ⤷ **Needs** 2.1b · **Recalls** `podman.pool`, `net.vmnet` · **Produces** nothing kept
   · **Records** `spike.netavark-fw` (driver, versions, chain names, the rule order that
   passed) · **Check** Exit
-- **2.2 Host firewall and SSH hardening.** The lab's own nftables table `inet lab`, so
+- **2.2 Host firewall.** The lab's own nftables table `inet lab`, so
   netavark's and libvirt's iptables-nft rules are never edited. It is persisted as its
   own file, `/etc/lab/nftables-lab.nft` (`table inet lab` declared empty, deleted,
   then recreated, all in one `nft -f` transaction, so the first load after boot, with
@@ -940,8 +944,8 @@ vault-shell` (a subshell with `VAULT_TOKEN` from the `lab-bootstrap` AppRole).
   open to the LAN through `HOST_IP`. So `lab-nftables.service` is `Type=oneshot` with
   `RemainAfterExit=yes`, ordered like Ubuntu's own `nftables.service`
   (`DefaultDependencies=no`, `Before=network-pre.target`, so the table is in place
-  before any interface comes up), every lab `.container` gets `After=` and
-  `Requires=lab-nftables.service`, and a rule change is applied with `systemctl reload`
+  before any interface comes up), `lab-platform.service` (2.1b), which starts every
+  lab container, has `After=` and `Requires=lab-nftables.service`, and a rule change is applied with `systemctl reload`
   (`ExecReload=` runs `nft -f`), never a restart, so it never restarts Vault.
   - input chain, default drop: `iif lo` and `fib saddr type local` (the packet's
     source is one of the host's own addresses: the host talking to itself, e.g.
@@ -949,9 +953,8 @@ vault-shell` (a subshell with `VAULT_TOKEN` from the `lab-bootstrap` AppRole).
     `established,related`; then new traffic to `127.0.0.0/8` from any interface but
     `lo` dropped (netavark sets `route_localnet` on bridges with published ports; after
     `established,related`, so replies to the host's own connections to a published port
-    on `127.0.0.1` still pass); then new connections to tcp 22 through a per-source
-    meter (a dynamic set: `add @ssh_meter { ip saddr limit rate over 10/minute burst 10
-    packets } drop`); then each §5 port from its listed sources, and
+    on `127.0.0.1` still pass); then each §5 port from its listed sources (tcp 22
+    from `LAN_CIDR`, so the operator keeps SSH), and
     aardvark-dns on 1053 from the container pool. Rules match addresses, never
     interface names, because Phase 3 moves `HOST_IP` onto `cloudbr0`.
   - nat chain at `dstnat - 1`: TCP and UDP port 53 from the container pool to a local
@@ -971,23 +974,8 @@ vault-shell` (a subshell with `VAULT_TOKEN` from the `lab-bootstrap` AppRole).
        gets neither
     5. everything else is dropped by the policy. An accept here still passes netavark's
        FORWARD rules, which run after this chain
-  - **SSH** (the host is the operator's bastion, §15 "Privileged access"): a lab drop-in
-    `/etc/ssh/sshd_config.d/00-lab.conf`. Ubuntu's `sshd_config` includes the drop-ins
-    first and sshd keeps the first value it reads, so the file's name sorts before any
-    other (cloud-init's `50-cloud-init.conf` may set `PasswordAuthentication yes`). It
-    sets `PasswordAuthentication no`, `KbdInteractiveAuthentication no`,
-    `PermitRootLogin no`, `AllowUsers <OPERATOR_LOGIN>`, `X11Forwarding no`,
-    `AllowAgentForwarding no`, `PermitTunnel no`, `AllowStreamLocalForwarding no` and
-    `AllowTcpForwarding local`, so `ssh -D`, `-L` and `-J` through the host still work
-    and `-R` (TCP or socket) does not. Hardware-backed keys (`ed25519-sk`) are
-    recommended to the operator, not enforced. Lockout guards:
-    the file is written only if the 1.2a key check still passes; `sshd -t` validates the
-    result first (it needs `/run/sshd`, which socket activation may not have created yet,
-    so `install -d -m 0755 /run/sshd` runs before it **[verify]**), and a failure
-    removes the file; then `systemctl try-reload-or-restart ssh` reloads a running sshd
-    (Ubuntu's unit has `ExecReload=`, so it is not restarted), and the open session stays (an idle, socket-activated sshd reads
-    the file when it next starts). No fail2ban: with keys only, guessing gets nowhere,
-    and the meter keeps the noise down
+  - SSH itself is left as Ubuntu ships it; hardening it is a §15 option ("Host SSH
+    hardening")
   Exit (each test from a network namespace, `ip netns add t; ip link add veth-t type
   veth peer name veth-h; ip link set veth-t netns t`, with an address from the source
   range under test on `veth-t` and `veth-h` attached to `cloudbr1`), against a
@@ -1005,22 +993,14 @@ vault-shell` (a subshell with `VAULT_TOKEN` from the `lab-bootstrap` AppRole).
   namespace listener at `10.250.0.112` tcp 6443, while tcp 22 times out; a container on
   `lab_egress` at any other address gets neither; a container on `lab_backend` resolves
   another by name, also with `dig +tcp`. With a broken rules file,
-  `lab-nftables.service` fails and no lab container starts. SSH, from a LAN machine,
-  in a new session while the one that applied the drop-in stays open until these pass:
-  a password login is refused (`-o PreferredAuthentications=password` gets
-  `Permission denied (publickey)`); root is refused even with a temporary authorized
-  key; the operator's key login works and its `ssh -D` reaches a temporary listener on
-  `10.250.0.1` (`curl --socks5-hostname`); a temporary local user with a key is
-  refused (that user and root's temporary key are removed after);
-  out of 30 new connections within a minute from one source, the later ones time out.
-  A broken drop-in fails `sshd -t`, is removed, and sshd keeps its old settings.
+  `lab-nftables.service` fails and no lab container starts. SSH from a LAN machine
+  still logs in.
 
   ⤷ **Needs** 2.1c · **Recalls** `net.host`, `net.vmnet`, `podman.pool`,
-  `podman.networks`, `spike.netavark-fw`, `host.operator` · **Produces**
-  `/etc/lab/nftables-lab.nft`, `lab-nftables.service`, its `Requires=` in every lab
-  `.container`, the sshd drop-in · **Records** `fw.host`, `cmd.netns-test` (the
-  namespace recipe, reused by later firewall tests), `host.sshd` (drop-in path,
-  settings) · **Check** Exit; H1
+  `podman.networks`, `spike.netavark-fw` · **Produces**
+  `/etc/lab/nftables-lab.nft`, `lab-nftables.service`, its `Requires=` in
+  `lab-platform.service` · **Records** `fw.host`, `cmd.netns-test` (the
+  namespace recipe, reused by later firewall tests) · **Check** Exit
 - **2.3a CoreDNS.** Forward and reverse zones from §5, one zone file for `lab.test`
   (every asker gets the same answer, §5); upstream forwarding. Records `setup` writes
   (5.4b) go into the file with the SOA serial bumped, and the `file` plugin's `reload`
@@ -1053,13 +1033,14 @@ vault-shell` (a subshell with `VAULT_TOKEN` from the `lab-bootstrap` AppRole).
   device cannot be written, so a full disk or a broken rotation is an outage; the
   rotation keeps 14 days and `lab status` warns when the volume is over 80%).
   - Every restart comes back **sealed**, and a sealed Vault is running but unhealthy
-    (`sys/health` 503). So the quadlet's health check (`HealthCmd=`) accepts sealed
+    (`sys/health` 503). So the service's `healthcheck:` accepts sealed
     (`/v1/sys/health?sealedcode=200&uninitcode=200`) and nothing waits for "unsealed"
     before the unseal step: in the precursor a rollout that waited on readiness before
     unsealing deadlocked. Seal state is reported by `lab status`, not the health check.
-  - Vault's config is a bind-mounted file, which systemd does not watch; `lab platform`
-    compares each file it renders with the one in place and restarts the units whose
-    unit or config files changed (rule 19), then unseals straight after.
+  - Vault's config is a bind-mounted file, which Compose does not watch; `lab platform`
+    compares each file it renders with the one in place and restarts the services whose
+    config files changed (`docker-compose restart <service>`, rule 19), then unseals
+    straight after.
   - The pinned image's user decides `mlock`: an image that runs as non-root without
     `IPC_LOCK` (Vault 2.x) needs `disable_mlock = true` (recommended with Raft anyway).
   Exit: `vault status` (against the bootstrap certificate) shows Initialized false,
@@ -1149,7 +1130,7 @@ vault-shell` (a subshell with `VAULT_TOKEN` from the `lab-bootstrap` AppRole).
   ⤷ **Needs** 2.4b · **Recalls** `vault.addr`, `path.vault-init`, `decision.mesh-root` ·
   **Produces** the two mounts in `platform.py` · **Records** `vault.mount.pki_mesh`,
   `vault.mount.pki_app`, `vault.pki_app.roles` · **Check** Exit
-- **2.5d Policies.** Policies `lab-bootstrap` and `lab-pipeline`, from `src/lab/policies/`.
+- **2.5d Policies.** Policies `lab-bootstrap` and `lab-pipeline`, from `lab/policies/`.
   `lab-bootstrap` is the operator's automation identity, so it is broad by
   necessity. It still enumerates paths instead of using `*`: `kv/lab/*`, `kv/app/*`;
   `transit/keys/*` and `transit/encrypt|decrypt|rewrap/*`; `pki/issue/*`,
@@ -1163,7 +1144,7 @@ vault-shell` (a subshell with `VAULT_TOKEN` from the `lab-bootstrap` AppRole).
   The **bodies** of the workload policies `api`, `vso-db` and `vso-monitoring` (read
   `kv/data/app/alloy-write` only) and of the console policy
   `operator-ui` are written here,
-  by bootstrap (the root token now, `lab-bootstrap` from 2.5e on), from `src/lab/policies/` (a change to them is a bootstrap-side
+  by bootstrap (the root token now, `lab-bootstrap` from 2.5e on), from `lab/policies/` (a change to them is a bootstrap-side
   change, applied by `lab platform` or `lab maintain`, never by a pipeline job).
   `lab-pipeline` is narrower, so the pipeline can configure what it deploys but
   cannot widen any policy, and cannot mint a certificate for a control-plane name:
@@ -1204,7 +1185,7 @@ vault-shell` (a subshell with `VAULT_TOKEN` from the `lab-bootstrap` AppRole).
   constraints in `openssl x509 -text` and chains to `lab mesh root`, not `lab.test CA`.
 
   ⤷ **Needs** 2.5a, 2.5c, 2.5f · **Recalls** `vault.mount.*`, `vault.pki.roles`,
-  `vault.pki_app.roles`, `decision.mesh-root` · **Produces** `src/lab/policies/*.hcl` ·
+  `vault.pki_app.roles`, `decision.mesh-root` · **Produces** `lab/policies/*.hcl` ·
   **Records**
   `vault.policy.*` (files), `vault.sign-intermediate` (path and pinned parameters, read
   by 8.3a); whether the IP/URI constraints were accepted · **Check** Exit
@@ -1263,7 +1244,7 @@ vault-shell` (a subshell with `VAULT_TOKEN` from the `lab-bootstrap` AppRole).
   images route · **Records** `minio.url`, `minio.users` (KV path per user),
   `minio.images-http` (the `:80` URL form); `path.images-archive` · **Check** Exit
 - **2.7b Telemetry stores and Grafana** (R6, R7; decided 2026-11-09, §15
-  "Observability"). Three quadlet containers on `lab_backend` (internal, no published
+  "Observability"). Three Compose services on `lab_backend` (internal, no published
   ports), images pinned by digest, each with a health check:
   - `prometheus`: `--web.enable-remote-write-receiver`,
     `--storage.tsdb.retention.time=7d`, `--storage.tsdb.retention.size=2GB`, volume
@@ -1396,8 +1377,9 @@ vault-shell` (a subshell with `VAULT_TOKEN` from the `lab-bootstrap` AppRole).
     `podman`, `crun` and `buildah` AppArmor profiles Ubuntu ships, and the lab never
     switches that sysctl off **[verify `podman info` and a `podman build` as
     `lab-runner` from `lab-runner.service` at 4.9]**
-  `host` jobs need no container engine, so act_runner gets no `podman.socket` and no
-  `DOCKER_HOST` **[verify act_runner at its pin starts with no container engine when its
+  `host` jobs need no container engine, so act_runner gets no `DOCKER_HOST`, and
+  `lab-runner` cannot open rootful Podman's socket (`root:root 0660`; checked in the
+  Exit) **[verify act_runner at its pin starts with no container engine when its
   only label is `host`]**.
   **Accepted risk:** a pull request can edit its own workflow, so PR code runs with
   the same host access as `main`: `lab-runner`'s rights (the pipeline AppRole, `/dev/kvm`,
@@ -1405,8 +1387,9 @@ vault-shell` (a subshell with `VAULT_TOKEN` from the `lab-bootstrap` AppRole).
   acceptable for a single-operator lab where every PR is the operator's own; §15 names
   what an enterprise does instead.
   Exit: the runner shows Online in Gitea (the workflow tests are in 3.5a, once `main`
-  exists); every Phase 2 quadlet unit is active and its container healthy (`lab status`);
-  `id lab-runner` lists no `docker` group, and `podman info` as `lab-runner` reports
+  exists); `lab-platform.service` is active and every Phase 2 container healthy (`lab status`);
+  `id lab-runner` lists no `docker` group, `lab-runner` gets permission denied on
+  `/run/podman/podman.sock`, and `podman info` as `lab-runner` reports
   rootless with its own ID range.
 
   ⤷ **Needs** 2.7, 2.7b, 2.8, 2.9 · **Recalls** `gitea.repo`, `vault.policy.*`, `dns.zones`,
@@ -1423,10 +1406,67 @@ Where to look when it goes wrong, from the first step: the management server log
 and system VM state (`cmk list systemvms`). What broke and how it was fixed goes into
 the registry as `gotcha.*` keys (§17.1) as it happens.
 
-- **3.1a Install.** The vendored installer (`src/lab/vendor/`, §7), all-in-one:
-  management server, MySQL (bound to `127.0.0.1`), NFS server, KVM agent. Readiness
-  means `/client/api` on 8080 returns 200, not an open port; agent `TimeoutStartSec`
-  above the readiness wait. Then, before anything else talks to it:
+Every Phase 3 call is adopt-before-create: it looks the object up by name and creates
+it only on a definite NotFound (rule 18), so a re-run of `up` converges instead of
+duplicating or skipping. The calls are hand-written `cmk`. Provider
+`cloudstack/cloudstack` 0.7.0 (2026-09-21) also has resources for zone, physical
+network, traffic type, pod, cluster, host, storage, IP ranges, offerings, roles,
+accounts and global configuration, so 3.1c–3.3a could be declared in Terraform
+instead; only the untagged mgmt network would still need `cmk` (its `vlan` is an
+integer). That is an alternative, not the build: the `cmk` calls keep the admin keys
+out of any Terraform state **[verify] those resources against 4.22.1.1 before
+switching**.
+
+- **3.1a Install.** CloudStack **4.22.1.1** (LTS, end of life 2027-12-01; Ubuntu
+  24.04, Java 17), all-in-one, installed by a short Ansible role
+  (`ansible/roles/cloudstack/`, run against the host by `provision.py`):
+  - the `download.cloudstack.org` noble `4.22` repository, its key fetched and checked
+    against the fingerprint in `versions.py` (a `signed-by` keyring), and an apt pin
+    on the exact version, so an upgrade never moves the schema underneath. First,
+    `apt-get update` must succeed and `apt-cache policy cloudstack-management` must
+    offer the pinned version; otherwise stop, naming the repository (its noble 4.22
+    index was broken for months, which is why the previous build stayed on 4.21)
+  - `cloudstack-management`, `cloudstack-agent` (configured when 3.1c adds the host),
+    MySQL (bound to `127.0.0.1`, with the `my.cnf` settings the 4.22 install guide
+    lists) and the NFS server (`/export/primary` and `/export/secondary` exported to
+    `HOST_IP` and the §5 pod range only, never `*`)
+  - the netplan file that creates `cloudbr0` and moves the LAN NIC and `HOST_IP` onto
+    it (1.1 backed up `/etc/netplan`), applied inside a `netplan try` window that is
+    confirmed only once `LAN_GATEWAY` answers
+  - `cloudstack-setup-databases` (only as the database guard below allows), then
+    `cloudstack-setup-management` while the `cloudstack-management` unit is not yet
+    enabled
+
+  None of the upstream `get.cloudstack.cloud` script's insecure defaults are carried
+  over. No libvirt `auth_tcp="none"`: libvirt's TCP listener stays off, since one host
+  never migrates VMs (**[verify]** what the agent setup writes to `libvirtd.conf` at
+  4.22.1.1). AppArmor stays enforcing for libvirt; a denial is fixed with a local
+  profile rule for the named path, never by disabling the profile **[verify]**. No
+  `ufw allow from any`: the host firewall is 2.2's. No `admin`/`password` and no
+  `cloud:cloud`: the `cloud` database password and the database encryption keys
+  (`-m`, `-k`, which default to `password`) are generated per install into Vault
+  `kv/lab/bootstrap/cloudstack`, written there before the databases are deployed.
+
+  **The database guard.** The previous build's installer decided from a tracker file
+  that recorded presence, not value, and re-marked its database step done whenever a
+  `cloud` database existed, so a re-run never rebuilt or updated the database. Here no
+  file decides: 3.1a asks MySQL directly whether `cloud` exists, with a query that
+  tells "absent" apart from an error (rule 18).
+  - absent: `cloudstack-setup-databases` deploys `cloud` and `cloud_usage`
+  - present: nothing is deployed or changed, and the password and keys are read back
+    from Vault, never regenerated (new keys cannot decrypt the existing database); if
+    Vault lacks them or `db.properties` disagrees with them, 3.1a refuses. The newest
+    `cloud.version` row must equal the pinned version (**[verify]** how a patch
+    release records itself there); otherwise 3.1a stops before the management server
+    starts, naming both versions (an older schema loops on 503, rule 2). A `cloud`
+    database with no version row, or without `cloud_usage` beside it, is a
+    half-finished deploy and is refused the same way. Every refusal says the way out
+    is `down` then `up`
+  - a deliberate rebuild is `down` (which drops `cloud` and `cloud_usage`, §14) and
+    then `up`; there is no flag for it
+
+  Readiness means `/client/api` on 8080 returns 200, not an open port; agent
+  `TimeoutStartSec` above the readiness wait. Then, before anything else talks to it:
   - change the default `admin` password (generated into Vault
     `kv/lab/bootstrap/cloudstack`), and generate the admin's API key pair into the
     same path; every later admin call uses those keys
@@ -1437,14 +1477,17 @@ the registry as `gotcha.*` keys (§17.1) as it happens.
   - the KVM agent's `host.reserved.mem.mb` (§5)
   Exit: `/client/api` returns 200 through `https://cloudstack.lab.test` (the gateway
   route from 2.6 now has a backend); `cmk` logs in with the admin API keys; the old
-  default password is rejected; `virsh net-list --all` shows no `default`; if the
-  installer has already moved `HOST_IP` onto `cloudbr0`, the Phase 2 services still
-  answer on it.
+  default password is rejected; `virsh net-list --all` shows no `default`; `HOST_IP`
+  is on `cloudbr0` and the Phase 2 services still answer on it; a second run changes
+  nothing (Ansible reports no changes, no database is deployed); with the newest
+  `cloud.version` row changed by hand (and changed back afterwards), 3.1a refuses,
+  naming both versions.
 
   ⤷ **Needs** 2.6, 2.10 · **Recalls** `gw.hosts`, `fw.host`, `net.host`,
-  `vault.mount.kv` · **Produces** `provision.py` (install), `vendor/` + README,
-  `lib/cloudstack.py` · **Records** `cs.api`, `cs.version`, `vault.kv.cs-admin`,
-  `cs.nfs-ports`; which step moved `HOST_IP` · **Check** Exit
+  `vault.mount.kv`, `path.toolchain` · **Produces** `provision.py` (install),
+  `ansible/roles/cloudstack/`, `lib/cloudstack.py` · **Records** `cs.api`,
+  `cs.version`, `cs.repo`, `vault.kv.cs-admin`, `cs.nfs-ports`; the `cloudbr0` netplan
+  file · **Check** Exit
 - **3.1b Bridge netfilter** (before the zone, so no system VM ever starts with its
   bridged traffic filtered). **Off**, so bridged VM traffic never meets the host's
   forward chains (the lab's has policy drop, 2.2). Podman's netavark does not load `br_netfilter` (2.1c), but anything
@@ -1464,10 +1507,12 @@ the registry as `gotcha.*` keys (§17.1) as it happens.
   guest; tag `vpc`); physical network 2 on `cloudbr1` from 2.1a (guest; tag `vmnet`,
   for the mgmt shared network). With guest traffic on two physical networks, CloudStack
   places networks by tag, so every network offering in 3.3a carries the matching tag.
-  `cloudbr0` takes `HOST_IP`: the vendored installer writes the netplan that creates
-  `cloudbr0` and moves the LAN NIC and `HOST_IP` onto it (which is why 1.1 backs up
-  `/etc/netplan`). `cloud0` is the link-local bridge the KVM agent creates for talking
-  to system VMs.
+  `cloudbr0` has carried `HOST_IP` since 3.1a. `cloud0` is the link-local bridge the
+  KVM agent creates for talking to system VMs. The host is added by key, not password:
+  the management server's public key (`/var/lib/cloudstack/management/.ssh/id_rsa.pub`)
+  goes into root's `authorized_keys` with `from="<HOST_IP>"`, and `addHost` is called
+  with no password **[verify at 4.22.1.1]**. Ubuntu's default `PermitRootLogin
+  prohibit-password` admits a key, and `from=` keeps that key usable from the host only.
   Exit: `cmk list hosts` shows the KVM host Up in a Disabled Advanced zone with both
   physical networks and their tags; host services from Phase 2 still reachable on
   `HOST_IP`.
@@ -1476,19 +1521,32 @@ the registry as `gotcha.*` keys (§17.1) as it happens.
   zone build in `provision.py` · **Records** `cs.zone`, `cs.physnet.vpc`,
   `cs.physnet.vmnet`; the host's id · **Check** Exit
 - **3.1d Storage, system VMs, enable.** Primary storage: NFS export `/export/primary`
-  on the host; secondary storage: `/export/secondary`. The system VM template for the
-  pinned CloudStack version is seeded into secondary storage with the installer's
-  `cloud-install-sys-tmplt` before the zone is enabled, so the SSVM (secondary
-  storage VM: copies templates) and CPVM (console proxy VM: the UI's VM console) can
-  start. Also before enabling, the global setting `secstorage.allowed.internal.sites =
-  HOST_IP/32`, so the SSVM starts allowed to download templates from the host's private
-  address (4.3).
-  Exit: `cmk list zones` shows an Enabled Advanced zone; SSVM and CPVM Running; host
-  services from Phase 2 still reachable on `HOST_IP`.
+  on the host; secondary storage: `/export/secondary`. Adding the first secondary
+  storage registers the system VM template for the pinned version by itself (since
+  4.16). 3.1d waits until that template is Ready, and seeds it with the package's
+  `cloud-install-sys-tmplt` only if it is still missing when the wait ends; both happen
+  before the zone is enabled, so the SSVM (secondary storage VM: copies templates) and
+  CPVM (console proxy VM: the UI's VM console) can start. Also before enabling, the
+  global setting `secstorage.allowed.internal.sites = HOST_IP/32`, so the SSVM starts
+  allowed to download templates from the host's private address (4.3).
+  **Platform-health gate** (H2, in `lib/cloudstack.py`): `/client/api` returns 200;
+  the host is `Up`; the SSVM and CPVM exist and are `Running`; and every system VM
+  and router that `cmk list systemvms` and `cmk list routers listall=true` call
+  `Running` has a running libvirt domain of the same instance name in
+  `virsh --readonly list` (the read-only socket needs no `libvirt` group
+  **[verify]**). Bootstrap runs it with the admin keys; jobs and `verify` with the
+  read-only `health` account's (3.2a). CloudStack's database is a claim, not a fact:
+  after a host reboot it kept reporting dead VMs `Running`, because nothing reconciled
+  it. The gate stops at
+  the first failure, host first, and names it. It runs at this Exit and first in every
+  job that calls CloudStack (`golden-image`, `setup`).
+  Exit: `cmk list zones` shows an Enabled Advanced zone; SSVM and CPVM Running; H2
+  passes; host services from Phase 2 still reachable on `HOST_IP`.
 
   ⤷ **Needs** 3.1c · **Recalls** `cs.zone`, `cs.nfs-ports`, `fw.host` · **Produces**
-  storage + enable in `provision.py` · **Records** `cs.storage`, `cs.systemvm-template`,
-  `cs.ssvm-allowed-sites` · **Check** Exit
+  storage + enable in `provision.py`, the health gate in `lib/cloudstack.py` ·
+  **Records** `cs.storage`, `cs.systemvm-template` (registered by itself or seeded),
+  `cs.ssvm-allowed-sites`, `cs.health` · **Check** Exit; H2
 - **3.2a `cmk` and the scoped accounts.** Account `iac` in domain `lab` with a role
   allowing only the APIs Terraform and `lab` call, by their real names:
   - VPC and networks: `createVPC`, `updateVPC`, `deleteVPC`, `createNetwork`,
@@ -1508,42 +1566,55 @@ the registry as `gotcha.*` keys (§17.1) as it happens.
   destroys with `expunge = true`, so a replaced VM's fixed `.10` address is free
   immediately. A second account, `publisher`, has a role with only
   `registerTemplate`, `deleteTemplate`, `listTemplates` and
-  `updateTemplatePermissions`. Both API key pairs are in `kv/lab/pipeline/`.
+  `updateTemplatePermissions`. A third account, `health`, has an Admin-type role with
+  only `listHosts`, `listSystemVms` and `listRouters`, for the H2 gate in jobs and
+  `verify` (**[verify]** that a custom Admin-type role can be cut down this far). All
+  three API key pairs are in `kv/lab/pipeline/`.
   Exit: `cmk` with the `iac` keys lists zones and is denied `cmk list hosts`
-  (admin-only); the `publisher` keys are denied `createVPC`; a re-run creates nothing.
+  (admin-only); the `publisher` keys are denied `createVPC`; the `health` keys list
+  hosts and are denied `createVPC` and `listAccounts`; a re-run creates nothing.
 
   ⤷ **Needs** 3.1d · **Recalls** `cs.api`, `vault.kv.cs-admin` · **Produces** accounts
   and roles in `provision.py` · **Records** `cs.account.iac`, `cs.account.publisher`,
-  `vault.kv.iac`, `vault.kv.publisher` · **Check** Exit; N5
+  `cs.account.health`, `vault.kv.iac`, `vault.kv.publisher`, `vault.kv.health` ·
+  **Check** Exit; N5
 - **3.3a Offerings and the mgmt network.** Compute offerings matching §5 sizes; a
   redundant VPC offering whose UserData provider is **ConfigDrive** (userdata served
   as an attached ISO instead of from the router; a tier offering with ConfigDrive is
   only accepted under such a VPC offering); the VPC tier offering with ConfigDrive; a
   shared offering with DHCP for the mgmt network. The mgmt shared network is created
   with `cmk` on physical network 2 (`vlan=untagged`, `10.250.0.0/24`, gateway
-  `10.250.0.1`, range `.100–.199`), because the Terraform provider cannot create an
-  untagged shared network. It is scoped to domain `lab` so `iac` can attach to it. Jobs
-  look it up by name, like every other CloudStack object.
-  Exit: `cmk list` shows each offering and the mgmt network; a re-run creates nothing;
-  the mgmt network's virtual router took an address outside `.110–.113` (if not, delete
-  and recreate the network before going on).
+  `10.250.0.1`, range `.100–.199`, `routerip=10.250.0.100`), because the Terraform
+  provider cannot create an untagged shared network. `routerip` pins the network's
+  virtual router outside the VMs' fixed `.110–.112` from the start (**[verify]** that
+  it may sit inside the range). It is scoped to domain `lab` so `iac` can attach to
+  it. Jobs look it up by name, like every other CloudStack object.
+  Exit: `cmk list` shows each offering and the mgmt network; a re-run creates nothing.
 
   ⤷ **Needs** 3.2a · **Recalls** `cs.physnet.vmnet`, `cs.physnet.vpc`, `net.vmnet` ·
   **Produces** offerings + mgmt network in `provision.py` · **Records** `cs.offering.*`
   (names), `cs.network.mgmt` (name, id), `net.mgmt.router` · **Check** Exit
-- **3.3b Spike: a mgmt NIC on a VPC VM** (a gate: if it fails, stop before Phase 5,
-  §11). As `iac`, with a throwaway template (the upstream Ubuntu 24.04 cloud image,
-  pinned by URL and checksum, registered by the admin and shared with `iac`): a VM in
-  a test VPC tier accepts a second NIC on the mgmt network at a fixed address
-  (`.199`), gets it, is destroyed and re-created at the same tier address and the same
-  mgmt address, takes a port-forward on its VPC's public IP, and is then deleted with
-  the template.
-  Exit: every part above happened as `iac`; nothing from the spike is left in `cmk list`.
+- **3.3b Spike: a mgmt NIC on a VPC VM** (the go/no-go for the CloudStack design, so
+  it runs in the session 3.3a closes, before 3.5a–3.5c; §11). As `iac`, with a
+  throwaway template (the upstream Ubuntu 24.04 cloud image, pinned by URL and
+  checksum, registered by the admin and shared with `iac`): a VM in a test VPC tier
+  accepts a second NIC on the mgmt network at a fixed address (`.199`), gets it, is
+  destroyed and re-created at the same tier address and the same mgmt address, takes a
+  port-forward on its VPC's public IP, and is then deleted with the template.
+  If the hot-added NIC is refused, the spike tries the named fallback before failing:
+  **deploy-time multi-network**, `deployVirtualMachine` with `networkids` (the tier and
+  the mgmt network) and `iptonetworklist` (both fixed addresses), so both NICs exist
+  at create. The 4.22 docs document a VM on a VPC tier plus shared networks
+  (**[verify]** that the tier becomes the default NIC). The re-create and the
+  port-forward are repeated the same way.
+  Exit: every part above happened as `iac`, by hot-add or by the fallback; the mgmt
+  network's router came up at `10.250.0.100`; nothing from the spike is left in
+  `cmk list`.
 
   ⤷ **Needs** 3.3a, 3.2a · **Recalls** `cs.account.iac`, `cs.offering.*`,
   `cs.network.mgmt` · **Produces** nothing kept · **Records**
-  `spike.mgmt-nic` (pass/fail, what was learned); on a fail, `decision.mgmt-design` is
-  opened and Phase 5 waits · **Check** Exit
+  `spike.mgmt-nic` (hot-add, fallback or fail; what was learned); only if both fail,
+  `decision.mgmt-design` is opened and Phase 5 waits · **Check** Exit
 - **3.5a Seed, workflows and branch protection.** `lab platform` seeds `lab/lab`
   **once**, by pushing the current repository to the still-empty Gitea repo. The seed
   already contains `.gitea/workflows/`:
@@ -1651,7 +1722,8 @@ the registry as `gotcha.*` keys (§17.1) as it happens.
   ISO pin in `versions.py`. Upload to `images/<version>/` with its SHA-256; skip build
   and upload when that version already exists. As `publisher`, register it with
   `registerTemplate` from `http://HOST_IP/images/<version>/…` (the `:80` route, 2.7)
-  with the checksum: the SSVM copies it into secondary storage and CloudStack verifies
+  with the checksum (the job first runs the H2 platform-health gate, 3.1d): the SSVM
+  copies it into secondary storage and CloudStack verifies
   the checksum, so the plain-HTTP fetch cannot swap the image unnoticed. Grant `iac`
   launch permission (`updateTemplatePermissions accounts=iac`); wait for it to be ready
   (a refused URL shows in the template's status: check `cs.ssvm-allowed-sites`).
@@ -1666,13 +1738,13 @@ the registry as `gotcha.*` keys (§17.1) as it happens.
 
   ⤷ **Needs** 4.1b, 3.2a, 2.7 · **Recalls** `minio.url`, `minio.users`,
   `minio.images-http`, `cs.account.publisher`, `vault.kv.publisher`,
-  `cs.ssvm-allowed-sites` · **Produces** publish + register in `image.py`, the
+  `cs.ssvm-allowed-sites`, `cs.health`, `vault.kv.health` · **Produces** publish + register in `image.py`, the
   `golden-image` job · **Records** `img.template`, `cfg.golden-image`; `img.version` ·
   **Check** Exit
 
 ### Phase 5 — Terraform: VPC, tiers, VMs
 
-- **5.1 Provider and remote state.** Pinned `cloudstack/cloudstack` provider and
+- **5.1 Provider and remote state.** Pinned `cloudstack/cloudstack` provider (0.7.0) and
   `ansible/ansible` provider (for the inventory resources, rule 8), lock file
   committed; provider `api_url = https://cloudstack.lab.test/client/api` (through the
   gateway). S3 backend on MinIO: `endpoints.s3 = https://minio.lab.test`,
@@ -1725,13 +1797,13 @@ the registry as `gotcha.*` keys (§17.1) as it happens.
   `policy/fixtures/` · **Records** `policy.dir`, `policy.fixtures` · **Check** Exit
 - **5.3b The gated apply.** The plan JSON carries no credentials, so `lab setup`
   separately checks, before planning, that the API key in use resolves to account `iac`
-  (`listAccounts`). `lab setup` runs **plan → policy → apply**, and apply is unreachable
+  (`listAccounts`), after the H2 platform-health gate (3.1d). `lab setup` runs **plan → policy → apply**, and apply is unreachable
   if the policy fails. This is the first apply: the network goes in here.
   Exit: the real plan passes and is applied by the `setup` job; with a fixture rule
   added, the policy fails and nothing is applied; with admin keys, `setup` refuses
   before planning.
 
-  ⤷ **Needs** 5.3a · **Recalls** `policy.dir`, `cs.account.iac`, `tf.env` · **Produces**
+  ⤷ **Needs** 5.3a · **Recalls** `policy.dir`, `cs.account.iac`, `tf.env`, `cs.health`, `vault.kv.health` · **Produces**
   `setup.py` (plan → policy → apply), the `setup` job · **Records** —; the `setup` command ·
   **Check** Exit; N5
 - **5.4a Compute.** Lab SSH public key from Vault. Each VM's **default NIC
@@ -1740,6 +1812,14 @@ the registry as `gotcha.*` keys (§17.1) as it happens.
   userdata writes that address into a static netplan file for `eth1` (§5), which
   overrides the image's DHCP fallback (4.1b). Policy rules for the NICs (5.3a) go in
   with them.
+  **If 3.3b took the fallback** (**[verify]**): `cloudstack_instance` takes one
+  `network_id`, so `lab setup` deploys the three VMs itself, between applying the
+  network and the ingress, with `deployVirtualMachine` carrying both networks and both
+  fixed addresses (adopted by name on a re-run; expunged and re-deployed when the
+  template or offering changes). Terraform keeps the VPC, tiers, ACLs, public IP,
+  port-forward (the VM found through a data source) and the `ansible_host` resources;
+  `cloudstack_nic` goes, and 5.3a's NIC rules become checks `lab setup` runs on its
+  deploy parameters.
   Exit: apply; all VMs Running and reachable over SSH from the host on their mgmt NIC
   at the fixed address; `networkctl status eth1` shows the static address (so the
   ConfigDrive userdata applied);
@@ -2704,17 +2784,17 @@ so they come after 12.1c.
 
 - **12.1 `verify`.** Every check in §12 except B1–B3 (run by `restore-drill` and
   `dr-drill`), G1–G3 (proven by the pipeline's own history) and V1–V5 (true only after
-  `down`; run by `revert-check`), each implemented once in `src/lab/verify.py` with a
+  `down`; run by `revert-check`), each implemented once in `lab/verify.py` with a
   pass/fail line and the evidence. Non-zero exit on any failure. E2/E3 run against a
   scratch Transit key that is deleted afterwards, so `verify` changes nothing. Built in
   four steps; each check reuses the commands of the Exit that first proved it.
   - **12.1a Framework and network checks:** the check runner (pass/fail line,
-    evidence, exit code), N1–N6 and H1.
-    Exit: N1–N6 and H1 pass; breaking one (e.g. `wg0` down) fails `verify` naming it.
+    evidence, exit code), N1–N6 and H2.
+    Exit: N1–N6 and H2 pass; breaking one (e.g. `wg0` down) fails `verify` naming it.
 
     ⤷ **Needs** 8.7f · **Recalls** `net.overlay`, `wg.hub-log`, `vm.<name>`,
-    `cs.account.iac`, `host.sshd` · **Produces** `verify.py` · **Records** `verify.checks`
-    (module, IDs done) · **Check** Exit; N1–N6, H1
+    `cs.account.iac`, `cs.health`, `vault.kv.health` · **Produces** `verify.py` · **Records** `verify.checks`
+    (module, IDs done) · **Check** Exit; N1–N6, H2
   - **12.1b Data, secrets, mesh and API-access checks:** E1–E3 (scratch key), S1–S4,
     the required mTLS checks T1, T2, Z1, Z2, P2, and K1 (access half: the `lab-access`
     identities and `lab-pipeline`), A1. They run as `lab-ci`, with
@@ -2810,14 +2890,18 @@ so they come after 12.1c.
 ## 10. Rules learned the hard way (build them in)
 
 1. **Preflight apt.** One broken apt source makes `apt-get update` exit non-zero and
-   kills the vendored installer partway through. Fail first and name the source.
-   Always reinstall signing keys; they rotate.
+   kills an install partway through. Fail first and name the source. Always re-fetch
+   signing keys (they rotate) and check them against the pinned fingerprint.
 2. **Old CloudStack databases are poison.** An existing `cloud` DB with an older
-   schema makes the management server loop on 503 forever. Preflight refuses it;
-   teardown drops it and deletes the installer's tracker.
+   schema makes the management server loop on 503 forever. Preflight refuses one the
+   lab did not make; 3.1a never deploys over an existing one, checks its schema
+   version against the pin by asking MySQL (never a tracker file), and refuses a
+   mismatch; teardown drops it.
 3. **Gate on health, with timeouts longer than the gates.** Readiness = HTTP 200 from
    the API, not an open port. Systemd start timeouts must exceed the wait budget.
-   First boot of the management server takes minutes.
+   First boot of the management server takes minutes. And a control plane reports its
+   database, not reality: after a host reboot CloudStack kept dead VMs `Running`, so
+   the health gate compares its view with `virsh` (H2, 3.1d).
 4. **Teardown is the code most likely to be wrong.** It must not depend on state it
    already deleted, must succeed on "not found", and must keep the reboot out of
    reach of an earlier failure.
@@ -2878,10 +2962,10 @@ cluster first.*
     silently replaces a live secret.
 19. **A changed config file restarts nothing by itself.** A ConfigMap change does not
     roll its pods: put the file's SHA-256 in a pod-template annotation
-    (`checksum/config`). A bind-mounted config does not restart its quadlet container,
-    `daemon-reload` restarts nothing, and a changed `.network` is never applied to an
-    existing network: restart the units whose unit or config files changed, and recreate
-    a changed network. Any byte rolls it, comments included (accepted).
+    (`checksum/config`). A bind-mounted config does not restart its container (Compose
+    recreates a service only when its own definition changes), and a changed network
+    definition is never applied to an existing network: restart the services whose
+    config files changed, and recreate a changed network. Any byte rolls it, comments included (accepted).
 20. **Wait on the right thing.** `kubectl wait --for=condition=Available` exists only for
     Deployments; StatefulSets and DaemonSets need `kubectl rollout status`. A pod that
     never appears is explained in its controller's events (the ReplicaSet for a
@@ -2922,12 +3006,14 @@ cluster first.*
 
 | Risk | Where | Mitigation |
 |---|---|---|
-| Advanced-zone bring-up is the most fragile step | 3.1c–3.1d | health-based gates, resumable `up`, generous timeouts |
+| Advanced-zone bring-up is the most fragile step | 3.1c–3.1d | health-based gates, resumable `up`, generous timeouts; every call adopts before it creates |
+| The CloudStack noble apt index breaks (the 4.22 one did, for months) | 3.1a | 3.1a checks that the index resolves and offers the pinned version before installing anything, and names the repository if not; the exact-version pin means a repaired index never moves the version |
+| CloudStack's database disagrees with the hypervisor (dead VMs still `Running` after a host reboot) | 3.1d, 4.3, 5.3b | the H2 platform-health gate compares `cmk` with `virsh` at 3.1d's Exit and first in every job that calls CloudStack, and names the first failure, host first |
 | `HOST_IP` moves to `cloudbr0` mid-build | 3.1a, 3.1c | services bind `0.0.0.0`; `HOST_IP` is static (1.2a); the 3.1a, 3.1c and 3.1d Exits re-check Phase 2 reachability |
 | The host is a VM | all | check nested KVM and foreign-MAC acceptance by hand before the build (§5); `timeouts.nested_factor` stretches every wait; if the outer hypervisor will not pass foreign MACs, system VMs and VPC routers never get LAN connectivity |
 | The SSVM cannot fetch the golden image from the host | 3.1d, 4.3 | CloudStack refuses private-address URLs unless `secstorage.allowed.internal.sites` lists `HOST_IP` (set before the SSVM starts); the template's status in `cmk list templates` names the failure; the checksum guards the plain-HTTP fetch |
 | mgmt NIC added after boot (`cloudstack_nic`) | 4.1b, 5.4a | the image's netplan and the userdata's static file both match eth1, so it configures on hotplug; 5.4a Exit fails fast if eth1 has no address |
-| A shared-network NIC on a VM inside a VPC may be refused by CloudStack | 3.3b | proven by the 3.3b spike before Terraform depends on it. There is no cheap fallback (deploying with both networks hits the same validation): if the spike fails, stop before Phase 5. The candidate redesign is a VPC **private gateway** onto `cloudbr1`, so the host reaches the tiers through the VPC router under ACLs instead of through a second NIC |
+| A shared-network NIC on a VM inside a VPC may be refused by CloudStack | 3.3b, 5.4a | proven by the 3.3b spike, run as soon as 3.3a closes, before Terraform depends on it. The cheap fallback is deploy-time multi-network (`deployVirtualMachine` with `networkids` and `iptonetworklist`, documented in 4.22), done by `lab setup` because `cloudstack_instance` takes one network (5.4a) **[verify]**. Only if that fails too, stop before Phase 5; the candidate redesign is then a VPC **private gateway** onto `cloudbr1`, so the host reaches the tiers through the VPC router under ACLs instead of through a second NIC |
 | Same-node HBONE capture point for T1 | 8.3c, T1 | settled in 8.3c's smoke test before the application depends on it |
 | Istio ambient on k3s (CNI paths) | 8.3b | k3s-specific install values; smoke namespace before any workload; fallback is sidecar mode |
 | Flux applies a manifest before its run-time Secret exists | 8.1b, 8.3a, 8.4a, 8.8a | a gate Kustomization per job health-checks the job's objects and dependents `dependsOn` it; P2 also asserts no `istio-ca-secret` (istiod never started without `cacerts`) |
@@ -2947,7 +3033,6 @@ cluster first.*
 | MinIO community edition distribution | 2.7 | upstream changed how community images and binaries ship; the image is pinned by digest and kept as a `podman save` archive in `/var/lib/lab/images/`, which `down` keeps (2.7). If it can no longer be pulled at all, Garage or SeaweedFS (both S3-compatible, both work as a Terraform S3 backend) replace it behind the same `minio.lab.test` name |
 | Vault audit device unwritable | 2.4a | daily rotation with `SIGHUP`, disk-usage warning in `lab status` |
 | The gateway is a single point of failure for every web service | 2.6 | Vault, CoreDNS, Squid and SSH never depend on it, so unseal, DNS and break-glass access survive a gateway outage; `lab status` names it first when it is down |
-| SSH hardening locks the operator out of the host | 1.2a, 2.2 | preflight refuses an `OPERATOR_LOGIN` with no authorized key, and 2.2 re-checks it; `sshd -t` validates before the reload, and a reload keeps the open session; the host's local console still logs in, and `down` removes the drop-in |
 | ServiceLB exposes the backend gateway on every node address | 8.7d | be-1's nftables admit 8000 only on `wg1` from `10.99.0.2`; P4 and Z1 test the tier and mgmt addresses too |
 | PR code runs on the host with the pipeline identity | 2.10 | accepted for one operator (§15); `main` is protected, so nothing reaches `deliver` without a merge; with no `docker` group and rootless builds, it runs with `lab-runner`'s rights, not root's |
 | Podman comes from Ubuntu's universe component, paired with an older netavark (4.9.3 with 1.4.0) | 2.1b, 2.1c, 2.2 | security fixes come from the community or Ubuntu Pro, not a vendor repo; versions are pinned and shown by `lab status`; no container port faces the LAN except through the firewall. Netavark features after 1.4 (the nftables driver, `isolate=strict`) are absent, so 2.1c proves the driver, the DNAT path and DNS before 2.2 depends on them. If it fails: Podman 5.x with netavark ≥ 1.10 (nftables driver) from a pinned third-party repository (2.1c names it); Docker is the last resort |
@@ -2977,7 +3062,7 @@ are required, like the rest.
 | **N4** | mgmt NIC reaches only the host | VM → another VM's mgmt address times out; VM → `10.250.0.1:8200` succeeds; from the host, be-1's `10.250.0.112:9100` and `10.0.3.10:9100` (node-exporter) time out |
 | **N5** | Terraform runs least-privilege | `iac` key denied an admin-only API call |
 | **N6** | the hub forwards one flow only | fe-1 → `10.99.1.2:22` and `:5432` time out and tun-1 logs `lab-hub-drop` |
-| **H1** | host SSH is key-only | `ssh -o PreferredAuthentications=none -o BatchMode=yes` to `HOST_IP` as `OPERATOR_LOGIN`, as root and as an unknown user lists only `publickey` among the methods that can continue; a password attempt gets `Permission denied (publickey)` |
+| **H2** | CloudStack platform healthy | `/client/api` returns 200; the KVM host is `Up`; SSVM and CPVM are `Running`; every system VM and router `cmk` lists as `Running` has a running domain of the same instance name in `virsh --readonly list` |
 | **E1** | field-level encryption | `psql` shows `vault:v<n>:…` (any key version); API returns `**** 4242` |
 | **E2** | key rotation | rotate → new ciphertext carries the new version (`vault:v2:…` on first run); the older ciphertext still decrypts (`verify`: scratch key; `demo`: the real key) |
 | **E3** | rewrap + retire | rewrap to the latest version; set `min_decryption_version` to it; a ciphertext saved before the rotation fails to decrypt (`verify`: scratch key; `demo`: rewraps every row first, so it re-runs at any key version) |
@@ -3010,7 +3095,7 @@ are required, like the rest.
 | **C1** | consoles | on the host, each of the five §5 console URLs (Grafana's `https://grafana.lab.test/`, Viewer) returns its login page over TLS verified against `lab.test CA` (no `-k`) and its `lab consoles --show` login works; from a `LAN_CIDR` source none answers |
 | **V1** | packages and sources | the package list equals the baseline's (no CloudStack, Podman (with netavark, aardvark-dns, conmon, crun, `uidmap`, `slirp4netns`, `dbus-user-session`, and `iptables` if the baseline lacked it), libvirt, MySQL, NFS, chrony, qemu or `dnsutils` additions; `systemd-timesyncd` back); apt sources and keys match |
 | **V2** | network | `/etc/netplan` byte-identical; no lab bridges (`cloudbr0`, `cloudbr1`, `cloud0`, `virbr0`, `podman*`); `/etc/resolv.conf` links where it did; no `inet lab` table and no nftables rules beyond the baseline's; the host reaches `LAN_GATEWAY` on `HOST_IP` |
-| **V3** | services and listeners | enabled units, timers and listening ports match the baseline; no containers, no `lab-*` units, no files in `/etc/containers/systemd/`, no resolved drop-ins; no lab sshd drop-in, and `sshd -T` matches the baseline's |
+| **V3** | services and listeners | enabled units, timers and listening ports match the baseline; no containers, no `lab-*` units, `podman.socket` as in the baseline, no resolved drop-ins |
 | **V4** | identity and trust | users, groups and group memberships match; trust-store contents match (no `lab.test CA`) |
 | **V5** | system state and drift | loaded kernel modules, the recorded sysctl values, `/etc/hosts`, the hostname and crontabs match; the `/etc` SHA-256 manifest matches apart from the listed ignores (1.1), which the report prints. `/var/lib/lab/` and `/var/backups/lab/` are expected and excluded |
 
@@ -3066,8 +3151,8 @@ step depends on something already deleted.
 | 5 | `tunnel`, `base` | inventory | nothing to undo on VMs that are about to be destroyed; WireGuard public keys in Vault (`kv/lab/pipeline/wg/*`) |
 | 6 | `setup` | Vault (`iac`, the `tfstate` MinIO user) | `terraform destroy` (run directly, not through the policy gate, which forbids destroying the public IP); then the state object; the `app.lab.test` and `k3s.lab.test` records |
 | 7 | `image` | Vault (admin) | the CloudStack template; MinIO `images/*` |
-| 8 | `provision` | — | CloudStack: services, system VMs, `cloud` and `cloud_usage` DBs, then **purges** `/var/lib/mysql` (an old `cloud` DB left there would poison a reinstall, rule 2), installer tracker, packages (libvirt included), NFS exports and `/export/*`, `/etc/nfs.conf` pins, the bridge-netfilter udev rule and sysctl file, drop-ins, repo, `cmk` |
-| 9 | `platform` | — | unregisters the runner, removes its service; as `lab-runner`, `podman system reset --force` (its rootless images, owned by sub-UIDs); `loginctl disable-linger lab-runner`; `lab-runner`'s work directory; stops the quadlet units (gateway, Prometheus, Loki and Grafana included), deletes their files in `/etc/containers/systemd/` and runs `daemon-reload`; removes the containers, the three networks and the volumes (theirs included; Loki's bucket goes with MinIO's); purges Podman and every package 2.1b and 2.10 added with it (`uidmap`, `slirp4netns`, `dbus-user-session`, and `iptables` if the baseline lacked it) and the dependencies apt pulled in with them (every package the list holds beyond the baseline's; V1), the `/etc/containers/containers.conf.d/` lab file and `/var/lib/containers`; any netavark chains left in the `ip filter` and `ip nat` tables (V2) **[verify what netavark 1.4 leaves after its last network is removed]**; `lab-nftables.service`, the `inet lab` table and `/etc/lab/`; if `decision.podman-fw` chose the fallback, its apt repository and key (2.1c; V1); the sshd drop-in `/etc/ssh/sshd_config.d/00-lab.conf`, then `sshd -t` and a reload, so the original sshd settings return (V3); the systemd-resolved drop-in and the original `/etc/resolv.conf` link; chrony removed and the `systemd-timesyncd` package **reinstalled** and enabled; the Vault and Squid logrotate rules; `/opt/lab/`; `/var/lib/lab/platform`, `/var/lib/lab/certs`, `/var/lib/lab/traefik` (dynamic routes, the users file) and `/var/lib/lab/grafana`; the lab CA from the host trust store |
+| 8 | `provision` | — | CloudStack: services, system VMs, `cloud` and `cloud_usage` DBs, then **purges** `/var/lib/mysql` (an old `cloud` DB left there would poison a reinstall, rule 2), packages (libvirt included), `/etc/cloudstack/` (the generated `key` file outlives a package purge), NFS exports and `/export/*`, `/etc/nfs.conf` pins, the management server's key line in root's `authorized_keys` (the file itself if the baseline had none), the bridge-netfilter udev rule and sysctl file, drop-ins, the CloudStack apt repository, key and version pin, `cmk` |
+| 9 | `platform` | — | unregisters the runner, removes its service; as `lab-runner`, `podman system reset --force` (its rootless images, owned by sub-UIDs); `loginctl disable-linger lab-runner`; `lab-runner`'s work directory; `docker-compose down --volumes` (gateway, Prometheus, Loki and Grafana included), then disables and removes `lab-platform.service` and runs `daemon-reload`, and disables `podman.socket`; removes any containers, the three networks and the volumes left (theirs included; Loki's bucket goes with MinIO's); purges Podman and every package 2.1b and 2.10 added with it (`uidmap`, `slirp4netns`, `dbus-user-session`, and `iptables` if the baseline lacked it) and the dependencies apt pulled in with them (every package the list holds beyond the baseline's; V1), the `/etc/containers/containers.conf.d/` lab file and `/var/lib/containers`; any netavark chains left in the `ip filter` and `ip nat` tables (V2) **[verify what netavark 1.4 leaves after its last network is removed]**; `lab-nftables.service`, the `inet lab` table and `/etc/lab/`; if `decision.podman-fw` chose the fallback, its apt repository and key (2.1c; V1); the systemd-resolved drop-in and the original `/etc/resolv.conf` link; chrony removed and the `systemd-timesyncd` package **reinstalled** and enabled; the Vault and Squid logrotate rules; `/opt/lab/`; `/var/lib/lab/platform`, `/var/lib/lab/certs`, `/var/lib/lab/traefik` (dynamic routes, the users file) and `/var/lib/lab/grafana`; the lab CA from the host trust store |
 | 9a | users | baseline | `userdel`/`groupdel` every user and group the baseline does not have (`lab-runner` with its `/etc/subuid` and `/etc/subgid` lines, `cloud`, `libvirt-qemu`, `libvirt`, and memberships added to `kvm`): package purges leave them behind |
 | 10 | host | `/var/backups/lab/netplan.orig/` | restores the original netplan files, then inside one `netplan try` window deletes `cloud0`, `cloudbr0` and `cloudbr1` (networkd does not release a NIC from a bridge on its own) and applies the restored config; the automation confirms (SIGUSR1) only after it reaches `LAN_GATEWAY` again, otherwise it auto-reverts |
 | 11 | `state/` | — | copies `bootstrap.log` to `/var/backups/lab/down-<timestamp>.log`, then deletes `state/` |
@@ -3116,7 +3201,7 @@ removes it after a confirmation prompt naming every file.
 | Console exposure | host only, each tool's own login, read-only identities everywhere | consoles on the LAN behind SSO (OIDC from a directory): the enterprise answer; needs the directory (above) |
 | Grafana access | a host console behind the gateway, on the one gateway certificate, Viewer login | on be-1 behind its own Istio gateway on the mgmt NIC (the earlier design): a second gateway, a DNAT rule and a `pki/sign/grafana` role; `kubectl port-forward`: plain HTTP on the host's loopback and a helper process to keep alive |
 | CI runner | one runner on the host as `lab-runner` (in `kvm` only; images built with rootless Podman), one label, every job; `main` protected by a required `pr.yml` check with 0 approvals | separate untrusted runners for pull requests (no host access, no deploy credentials), a deploy runner only `main` can reach, a remote BuildKit service, and a required second reviewer: the enterprise answer once more than one person pushes. With one operator, every PR is the operator's own code, so a PR running with host access and the pipeline identity is an accepted, stated risk |
-| Control-plane runtime | **decided 2026-11-09: Podman (systemd quadlets) over Docker Compose.** Rootful quadlets from the Ubuntu 24.04 archive for the host services, TLS at a gateway, Vault direct; rootless Podman for the runner's image builds | Docker Compose (the earlier design): a root daemon, a third-party apt repo and key, and the `docker` group, which made the runner root-equivalent; Docker also set FORWARD to drop and loaded `br_netfilter`, which the lab had to undo (§10 rule 13). Podman has no daemon, each service is a systemd unit (ordering, restarts, `journalctl`), the runner needs no privileged group, and fe-1 already runs quadlets, so the lab learns one runtime. Its costs: netavark adds no forward filtering, so the lab's table is the default deny (2.2), and aardvark-dns moves off port 53 (2.1c). If the 2.1c spike fails, the named fallback is Podman 5.x with netavark ≥ 1.10 (nftables driver) from a pinned third-party apt repository, today OBS `home:alvistack` **[verify]**, removed by `down`; returning to Docker is the last resort. A host k3s cluster with a mesh: the mesh's CA would be Vault running inside it, CloudStack and `/dev/kvm` builds cannot move in, and k3s needs bridge netfilter on, which breaks bridged VM traffic (§10 rule 13). Enterprises keep foundation services (DNS, PKI, SCM, artifact store) outside the platforms they bootstrap |
+| Control-plane runtime | **decided 2026-11-09: Podman over Docker; 2026-11-10: Compose over quadlets.** Rootful Podman from the Ubuntu 24.04 archive, the host services in one `compose.yaml` run by a pinned `docker-compose` v2 against Podman's socket, started by `lab-platform.service` after the firewall; TLS at a gateway, Vault direct; rootless Podman for the runner's image builds | Docker Compose (the earlier design): a root daemon, a third-party apt repo and key, and the `docker` group, which made the runner root-equivalent; Docker also set FORWARD to drop and loaded `br_netfilter`, which the lab had to undo (§10 rule 13). Podman has no daemon and the runner needs no privileged group. Quadlets (one systemd unit per container, the native way on a Podman production host) were the first choice; Compose replaced them because the operator already knows it, one file shows the whole control plane, and Podman 4.9's quadlets lack `AddHost=` and `Notify=healthy`. Compose's costs: rootful Podman's API socket is on (root-only), services are not separate systemd units (`podman logs`, `docker-compose restart`), and the firewall dependency is on the whole stack. Its costs: netavark adds no forward filtering, so the lab's table is the default deny (2.2), and aardvark-dns moves off port 53 (2.1c). If the 2.1c spike fails, the named fallback is Podman 5.x with netavark ≥ 1.10 (nftables driver) from a pinned third-party apt repository, today OBS `home:alvistack` **[verify]**, removed by `down`; returning to Docker is the last resort. A host k3s cluster with a mesh: the mesh's CA would be Vault running inside it, CloudStack and `/dev/kvm` builds cannot move in, and k3s needs bridge netfilter on, which breaks bridged VM traffic (§10 rule 13). Enterprises keep foundation services (DNS, PKI, SCM, artifact store) outside the platforms they bootstrap |
 | Supply-chain admission | images scanned and pinned by digest; Pod Security Admission `restricted` | cosign signing at push with a Kyverno/policy-controller verify rule at admission: the production answer for "only our images run"; here digest pinning in reviewed manifests gives the same guarantee for a single registry and operator |
 | Gateway certificates | one certificate for every gateway name, issued by `lab maintain`, Traefik restarted on re-issue | per-hostname certificates hot-reloaded on renewal, or ACME from Vault's PKI (Traefik as an ACME client): the common enterprise pattern; renewal machinery a 3-week build never exercises |
 | Golden-image transport | SSVM copy over plain HTTP from the gateway's `images/` route, checksum verified | direct-download templates over HTTPS with `lab.test CA` uploaded to the KVM host: TLS on that hop, but an extra trust upload and an admin-only registration path |
@@ -3124,8 +3209,9 @@ removes it after a confirmation prompt naming every file.
 | SSH host trust | per-job `known_hosts` with `accept-new` | Vault's SSH CA signing host and user certificates, so host keys are verified and no static key exists: the production answer, out of scope |
 | istiod CA name constraints | DNS constrained to `cluster.local`; IP/URI constraints only if the pinned Vault accepts them (2.5d) | an offline-root PKI where the intermediate is constrained by the signing ceremony itself: out of scope; the pipeline identity that could request it already runs with host access (2.10) |
 | Management network isolation | in-guest nftables on a shared host-only bridge | private VLANs or per-VM L2 isolation, so a VM's root cannot reach another VM's mgmt NIC: needs Open vSwitch PVLAN support in CloudStack |
-| Privileged access | the host as bastion: key-only SSH for `OPERATOR_LOGIN` alone, no root login, local forwarding only (`ssh -D`, `-L`, `-J`), new connections rate-limited (2.2) | AD logins (above), Teleport/Boundary with an SSH CA and session recording: the production answer, out of scope |
-| Bastion and egress tightening | **options, not in the core build** (added 2026-11-09; each folds into 2.2, minutes of work): (a) Gitea's public egress in rule 4 also excludes `100.64.0.0/10` (carrier-grade NAT) and `169.254.0.0/16` (link-local, where cloud metadata services listen), so a compromised Gitea cannot reach a provider's metadata endpoint or a CGNAT neighbour; the 2.2 Exit adds `169.254.169.254:443` timing out from Gitea's address. (b) Preflight and 2.2 refuse any `AllowUsers`, `AllowGroups` or `Match` line in `/etc/ssh/sshd_config` or another `sshd_config.d/` file, since sshd adds up `AllowUsers` lines from every file and a stray one would admit more users (the core Exit already catches it with a temporary user; this names the cause before it applies). (c) A timed undo for the SSH change: before reloading, a transient `systemd-run --on-active=5min` unit removes the drop-in and reloads sshd unless the operator confirms from a new key-based session, the way `netplan try` reverts network changes | (c) is the one with real cost: a second code path that must itself be tested, for a risk the core guards (key check as sshd reads it, `sshd -t`, reload not restart, the first session kept open, the local console) already cover |
+| Privileged access | SSH to the host as Ubuntu ships it, from `LAN_CIDR` only (2.2); CloudStack adds the KVM host as root with a key limited by `from=` to the host's own address (3.1c) | key-only SSH hardening (the option below); AD logins (above), Teleport/Boundary with an SSH CA and session recording: the production answer, out of scope |
+| Host SSH hardening | **option, not in the core build** (moved out of 2.2 on 2026-11-10; about one M session, folds into 2.2): config key `OPERATOR_LOGIN`, which preflight requires to be a local non-root user with a usable key in the file `sshd -T -C user=<login>` names (owned by the user, not group- or world-writable); a drop-in `/etc/ssh/sshd_config.d/00-lab.conf` (sorts before cloud-init's `50-cloud-init.conf`; sshd keeps the first value) with `PasswordAuthentication no`, `KbdInteractiveAuthentication no`, `PermitRootLogin prohibit-password`, `AllowUsers <OPERATOR_LOGIN> root@<HOST_IP>` (the second for 3.1c; `user@host` avoids a `Match` block), `X11Forwarding no`, `AllowAgentForwarding no`, `PermitTunnel no`, `AllowStreamLocalForwarding no`, `AllowTcpForwarding local` (`ssh -D`, `-L`, `-J` work; `-R` does not); a per-source nftables meter on new tcp 22 connections (`limit rate over 10/minute burst 10 packets`); lockout guards: the key check re-runs, `install -d -m 0755 /run/sshd` then `sshd -t` (a failure removes the file), then `systemctl try-reload-or-restart ssh`, the applying session kept open. Check H1: `ssh -o PreferredAuthentications=none` as `OPERATOR_LOGIN`, root and an unknown user lists only `publickey`; root and a temporary keyed user from the LAN are refused. 1.1 records `sshd -T`; teardown removes the drop-in and reloads; V3 compares `sshd -T` with the baseline. Further tightenings: refuse stray `AllowUsers`/`AllowGroups`/`Match` lines elsewhere in the sshd config (sshd adds up `AllowUsers` from every file); a timed undo (`systemd-run --on-active=5min` removes the drop-in unless confirmed from a new session) | the core build keeps Ubuntu's SSH defaults to stay on the core functions; the risk accepted is password logins from `LAN_CIDR` if the host allows them |
+| Egress tightening | **option, not in the core build** (added 2026-11-09; folds into 2.2, minutes of work): Gitea's public egress in rule 4 also excludes `100.64.0.0/10` (carrier-grade NAT) and `169.254.0.0/16` (link-local, where cloud metadata services listen), so a compromised Gitea cannot reach a provider's metadata endpoint or a CGNAT neighbour; the 2.2 Exit adds `169.254.169.254:443` timing out from Gitea's address | not needed for the core functions |
 | Defence in depth inside k3s | mesh identity (AuthorizationPolicy) only | Kubernetes NetworkPolicies as an L3 layer under the mesh: worth it with many teams; its interplay with ambient's HBONE port needs care, out of scope |
 | Git provenance | protected `main`, read-only Flux token | Flux verifying signed commits: needs every merge signed by a key Flux trusts, Gitea's merge commits included |
 
@@ -3154,7 +3240,7 @@ removes it after a confirmation prompt naming every file.
 | k8s-monitoring | Grafana's Helm chart that deploys Alloy, the Alloy Operator, kube-state-metrics and node-exporter and writes Alloy's configuration from feature switches |
 | kubernetes-mixin | the community's recording rules and dashboards for Kubernetes (with the node-mixin for node-exporter), rendered from jsonnet |
 | Loki | Grafana's log store: indexes labels only, keeps chunks in object storage (here MinIO) |
-| meter (nftables) | a rule that adds each source to a dynamic set with its own rate limit, so one noisy address is limited without affecting others; here on new SSH connections |
+| meter (nftables) | a rule that adds each source to a dynamic set with its own rate limit, so one noisy address is limited without affecting others; used by the SSH-hardening option (§15) |
 | `min_decryption_version` | Transit key setting: ciphertext older than this key version can no longer be decrypted |
 | netavark | Podman's network tool: creates bridges and veths and writes the NAT and published-port rules (with its iptables driver at 1.4, through iptables-nft) |
 | `netplan try` / SIGUSR1 | apply a network change that reverts itself unless confirmed; SIGUSR1 is the confirmation |
@@ -3162,7 +3248,8 @@ removes it after a confirmation prompt naming every file.
 | `node-agents` | the namespace holding the only host-access pods (node-exporter, alloy-audit), PSA `privileged`, kept apart from `monitoring` |
 | PSA | Pod Security Admission: per-namespace labels that reject pods breaking a security profile |
 | RBAC | Kubernetes role-based access control: `Role`/`ClusterRole` list verbs on resources (optionally by name), bindings give them to users or ServiceAccounts; it guards the API, as the mesh guards the network (rule 25) |
-| quadlet | Podman's systemd integration: a `.container`, `.network` or `.volume` file in `/etc/containers/systemd/` becomes a systemd service at `daemon-reload`; here the host's control plane and fe-1's frontend |
+| quadlet | Podman's systemd integration: a `.container`, `.network` or `.volume` file in `/etc/containers/systemd/` becomes a systemd service at `daemon-reload`; here fe-1's frontend (the host uses Compose) |
+| Compose | one YAML file declaring containers, networks and volumes, applied with `docker-compose up`; here run against rootful Podman's API socket for the host's control plane |
 | Raft | Vault's built-in replicated storage; a snapshot is a full, barrier-encrypted copy |
 | Rego / Conftest | OPA's policy language, and the CLI that runs it against files such as a plan JSON |
 | remote write | Prometheus's push protocol: a client (Alloy) POSTs samples to `/api/v1/write` on a Prometheus started with `--web.enable-remote-write-receiver` |
@@ -3218,7 +3305,7 @@ words. A contract may name a family: `vault.policy.*`, `vm.<name>`.
 **Entries:** one line each, `` `key` = value — source · step, date ``:
 
 ```
-- `vault.kv.app-db` = `kv/app/db`, field `password`, create-once — src/lab/app.py · 8.4b, 2027-01-12
+- `vault.kv.app-db` = `kv/app/db`, field `password`, create-once — lab/app.py · 8.4b, 2027-01-12
 - `decision.mesh-root` = `pki_mesh` (separate root for the istiod CA) — §15 "Mesh trust root", decided 2026-11-05
 - `decision.observability` = Option B: Alloy (k8s-monitoring) in k3s → Prometheus, Loki, Grafana on the host — §15 "Observability", decided 2026-11-09
 - `gotcha.sudo-kubeconfig` = sudo drops KUBECONFIG → localhost:8080; pass --kubeconfig (rule 21) · 8.1, 2027-01-05
@@ -3238,8 +3325,9 @@ words. A contract may name a family: `vault.policy.*`, `vm.<name>`.
   that recalls it stops and asks. The registry starts with `decision.mesh-root =
   pki_mesh` (decided 2026-11-05), `decision.observability = Option B` and
   `decision.telemetry-auth` = Traefik basic auth from be-1 only, credential in Vault KV
-  synced by VSO (§15 "Observability", 2.7b), and `decision.runtime` = Podman with
-  systemd quadlets (§15 "Control-plane runtime"), all three decided 2026-11-09; no
+  synced by VSO (§15 "Observability", 2.7b), and `decision.runtime` = Podman, host services
+  by Compose (§15 "Control-plane runtime"), all three decided 2026-11-09 (Compose
+  2026-11-10); no
   decision is open.
 - The registry describes one lab on one host; a rebuild elsewhere rewrites its `net.*`
   and `host.*` keys on the way through. Prune keys no open step recalls once it passes
@@ -3251,7 +3339,7 @@ words. A contract may name a family: `vault.policy.*`, `vm.<name>`.
   labels `phase-<n>` and `size-S` or `size-M`; one dependency per Needs entry (`bd dep add`).
   The body points at the step (`PLAN-enterprise.md §9, 2.4b`) instead of copying it.
 - **Blockers as beads:** an open decision or a failed spike becomes its own bead, blocking
-  the steps that need it: a failed 3.3b spike opens "Decide the mgmt design", which blocks
+  the steps that need it: a 3.3b spike whose fallback also failed opens "Decide the mgmt design", which blocks
   5.4a. None is open at the start.
 - **Work in progress:** while a step spans sessions, its notes hold one WIP block,
   replaced each session, ≤ 6 lines: where it stopped, the next action, what the learner
@@ -3300,9 +3388,9 @@ loop. Import one bead per row.
 | 1.2a | Preflight checks | 1.1 | 1 | M |
 | 1.3 | Toolchain | 1.2a, 0.2c | 1 | M |
 | 2.1a | Host-only bridge | 1.2a | 2 | S |
-| 2.1b | Podman and the quadlet units | 2.1a, 1.3 | 2 | M |
+| 2.1b | Podman and Compose | 2.1a, 1.3 | 2 | M |
 | 2.1c | Spike: netavark's firewall driver and rule order | 2.1b | 2 | S |
-| 2.2 | Host firewall and SSH hardening | 2.1c | 2 | M |
+| 2.2 | Host firewall | 2.1c | 2 | M |
 | 2.3a | CoreDNS | 2.2 | 2 | M |
 | 2.3b | NTP | 2.2 | 2 | S |
 | 2.4a | Vault server | 2.3a | 2 | M |

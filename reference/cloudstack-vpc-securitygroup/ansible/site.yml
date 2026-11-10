@@ -1,6 +1,0 @@
-- name: Configure VPC routing and security groups
-  hosts: lab
-  become: true
-  roles:
-    - tier_route
-    - securitygroup

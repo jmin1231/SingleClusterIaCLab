@@ -380,7 +380,12 @@ control plane's memory.
 **If measurements overrun:** drop the redundant VPC router (a single router saves
 ~0.25 GB but loses the HA story).
 
-**Host:** 8 cores · **32 GB RAM (ceiling)** · 250 GB disk · `/dev/kvm`. The host may
+**Host:** **Ubuntu Server 24.04** (netplan renders to systemd-networkd; Ubuntu Desktop's
+NetworkManager is not supported: `ignore-carrier`, the `cloudbr0` move and `netplan try`
+assume networkd, and GNOME costs ~1 GB; decided 2026-11-10, preflight refuses a host
+where `systemd-networkd` is not active) · 8 cores · **32 GB RAM (ceiling)** · 250 GB
+disk · `/dev/kvm`. Built from a **clean snapshot**: a static `HOST_IP` in netplan,
+`systemd-timesyncd` as shipped, `open-vm-tools` on a VMware host. The host may
 be bare metal **or a VM**. As a VM, every CloudStack guest (system VMs, lab VMs, the
 Packer build VM) runs **nested**, which needs two things from the outer hypervisor,
 checked by hand once before the build:
@@ -763,8 +768,9 @@ are in §17.
 
 ### Phase 1 — Host preflight and reversibility
 
-**Preflight grows with the lab** (decided 2026-11-10). It starts as one check, that
-`/dev/kvm` is usable, in `lab/phases/preflight.py`. Each later step adds to it the
+**Preflight grows with the lab** (decided 2026-11-10). It starts with two checks, that
+`/dev/kvm` is usable and that `systemd-networkd` is active (§5: Ubuntu Server), in
+`lab/phases/preflight.py`. Each later step adds to it the
 check or the dependency it needs, in the same change, and nothing goes in before a step
 needs it. **Dependencies are split by what installing them does** (decided 2026-11-10):
 - **inert ones, installed by preflight:** the pinned CLIs (1.3), `qemu-utils`,
@@ -877,8 +883,11 @@ runbook (14.4): a subshell with `VAULT_TOKEN` from a `lab-bootstrap` AppRole log
 - **2.1a Host-only bridge.** The host-only bridge `cloudbr1` with `10.250.0.1/24` (a lab
   netplan file, no physical port, `ignore-carrier: true`: a bridge with no ports has no
   carrier, and networkd would otherwise not configure the address until a VM attaches),
-  first, because every control-plane name resolves to that address.
-  Exit: `cloudbr1` is up with `10.250.0.1`, and stays so after `netplan apply` and a reboot.
+  first, because every control-plane name resolves to that address. The address is the
+  same on every host (the bridge is private to the host); before creating it, `up`
+  refuses if any route on the host already overlaps `10.250.0.0/24`, naming it.
+  Exit: `cloudbr1` is up with `10.250.0.1`, and stays so after `netplan apply` and a
+  reboot; a re-run changes nothing.
 
   ⤷ **Needs** 1.2a · **Recalls** `path.netplan-orig`, `net.host` · **Produces** the lab
   netplan file · **Records** `net.vmnet` (bridge, host address, file name) · **Check** Exit
@@ -1511,7 +1520,11 @@ switching**.
     `cloudstack-setup-management` while the `cloudstack-management` unit is not yet
     enabled
 
-  None of the upstream `get.cloudstack.cloud` script's insecure defaults are carried
+  **The lab installs CloudStack itself; it does not run the installer** (decided
+  2026-11-10): the same commands as `get.cloudstack.cloud/install.sh`, in its order
+  (read its install and zone functions as the reference), but pinned, without prompts,
+  re-runnable without a tracker file, and with a `destroy`. None of the upstream
+  script's insecure defaults are carried
   over. No libvirt `auth_tcp="none"`: libvirt's TCP listener stays off, since one host
   never migrates VMs (**[verify]** what the agent setup writes to `libvirtd.conf` at
   4.22.1.1). AppArmor stays enforcing for libvirt; a denial is fixed with a local

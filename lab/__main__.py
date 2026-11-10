@@ -6,7 +6,7 @@ import logging
 import sys
 from collections.abc import Callable
 
-from lab.phases import preflight
+from lab.phases import platform, preflight
 from lab.lib.log import BASE_DIR, setup_logging
 
 log = logging.getLogger(__name__)
@@ -16,6 +16,7 @@ LOCK_FILE = BASE_DIR / "state" / "run.lock"
 
 def cmd_up() -> None:
     preflight.up()
+    platform.up()
 
 
 def cmd_update() -> None:

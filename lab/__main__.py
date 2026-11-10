@@ -6,8 +6,8 @@ import logging
 import sys
 from collections.abc import Callable
 
-from lab.phases import platform, preflight
 from lab.lib.log import BASE_DIR, setup_logging
+from lab.phases import platform, preflight
 
 log = logging.getLogger(__name__)
 

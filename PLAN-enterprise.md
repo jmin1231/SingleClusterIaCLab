@@ -587,11 +587,11 @@ lab/
                              then the code lives where it is used
   __init__.py                `LabError`: a refusal main() logs, exit 1 (1.2a)
   policies/                  Vault policy bodies (HCL), written by bootstrap only (2.5d)
-  phases/                    one module per phase, each with up/down/check (1.1), so
-                             lab/ itself shows only the entry point:
-    preflight.py toolchain.py platform.py provision.py image.py setup.py base.py
-    tunnel.py cluster.py mesh.py app.py monitoring.py backup.py verify.py consoles.py
-    teardown.py revert.py maintain.py
+  phases/                    the phase modules, each with up/down/check (1.1), so
+                             lab/ itself shows only the entry point; `__main__.py`
+                             imports each and every command calls them explicitly:
+    preflight toolchain platform provision image setup base tunnel cluster mesh app
+    monitoring backup verify consoles teardown revert maintain
 platform/                    compose.yaml + config: traefik/ (static config, dynamic
                              routes), coredns/, vault/, minio/, gitea/, squid/
                              (allowlist.txt), prometheus/ (config, the rendered mixin

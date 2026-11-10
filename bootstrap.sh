@@ -2,24 +2,47 @@
 
 set -euo pipefail
 
-# Must run as root user
+PYTHON_PKG=python3.12
+PYTHON=python3
+
+log() { printf '[+] %s\n' "$*"; }
+die() { printf '[x] %s\n' "$*" >&2; exit 1; }
+
 ensure_root() {
     if [[ "${EUID}" -ne 0 ]]; then
-        echo "bootstrap.sh must be run as root; re-run with sudo" >&2
-        exit 1
+        die "bootstrap.sh must be run as root; re-run with sudo"
     fi
 }
 
-# Install python3 if missing
-ensure_python3() {
-    if command -v python3 >/dev/null 2>&1; then
-        echo "Check python3 version"
-    fi
+check_python_version() {
+    "${PYTHON}" -c 'import sys; sys.exit(sys.version_info < (3, 12))' 2>/dev/null
 }
 
+ensure_python() {
+    if check_python_version; then
+        log "Python >= 3.12 found"
+        return
+    fi
+
+    log "python >= 3.12 not found. Installing ${PYTHON_PKG}"
+
+    apt-get -qq -o APT::Update::Error-Mode=any update
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+        -o DPkg::Lock::Timeout=120 \
+        -o Dpkg::Options::=--force-confdef \
+        -o Dpkg::Options::=--force-confold \
+        "${PYTHON_PKG}"
+
+    if ! check_python_version; then
+        die "${PYTHON} is older than 3.12 (or missing); refusing to continue"
+    fi
+}
 
 main() {
+    cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
     ensure_root
+    ensure_python
+    exec "${PYTHON}" -B -m lab "$@"
 }
 
 main "$@"

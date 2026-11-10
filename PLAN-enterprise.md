@@ -55,11 +55,14 @@ out, and why, is in §15.
   one built: a separate root per trust domain, mutual TLS where the client can hold a
   certificate, read-only console logins, default deny everywhere (ACLs, firewalls,
   mesh). What was weighed and left out is in §15.
-- **Bash at the door, Python inside.** `bootstrap.sh` checks for Python ≥ 3.12 and
-  changes to its own directory, then runs `exec python3 -B -m lab "$@"` (`-m` puts
-  the repo root on the import path), nothing more. It has five commands and no
-  subcommands or options: `up`, `update`, `teardown` and `destroy` (each local, each
-  refused without root) and `--help`. Every command, phase, check and teardown
+- **Bash at the door, Python inside.** `bootstrap.sh` checks for Python ≥ 3.12 and,
+  only when it is missing or older, installs `python3.12` from the Ubuntu archive (so an
+  unchanged re-run makes no apt call), then changes to its own directory and runs
+  `exec python3 -B -m lab "$@"` (`-m` puts the repo root on the import path), nothing
+  more. It has five commands and no
+  subcommands or options: `up`, `update`, `teardown` and `destroy` (each local) and
+  `--help`; the shim refuses all five without root, so Python has no root check of its
+  own. Every command, phase, check and teardown
   is Python in the `lab/` package at the repo root (no `src/` level). External
   tools (`cmk`, `terraform`, `ansible-playbook`, `packer`, `kubectl`, `vault`,
   `istioctl`, `flux`, `helm`, `mc`, `podman`) are called through thin wrappers, never
@@ -102,8 +105,11 @@ out, and why, is in §15.
   merged change always reaches the lab and an unchanged lab produces no changes.
   Only costly builds are skipped, and only by content: the golden image by its input
   hash, the container images by git SHA. `check()` compares **desired with actual**
-  (versions, image tags, plan diff), not just health. The local tracker only helps
-  bootstrap resume; it is never proof that something is done.
+  (versions, image tags, plan diff), not just health. There is no local "done" tracker:
+  a re-run asks the real system every time. **One run at a time:**
+  `up`, `update`, `teardown` and `destroy` each take an exclusive lock on
+  `state/run.lock` (0.2a), so a second command started while one runs is refused at
+  once instead of racing it on apt, Vault init or Terraform state.
 - **Least privilege.** Terraform uses a scoped CloudStack account. Each workload and
   the pipeline gets its own Vault identity and policy. The Vault root token is
   revoked after bootstrap. The CloudStack global admin is used only where nothing
@@ -118,7 +124,7 @@ out, and why, is in §15.
   protected. None is ever in git: the `pr.yml` gate rejects a Secret with data under
   `clusters/` (10.1).
 - **Pinned and immutable.** Every version, image digest, provider and chart is
-  pinned in `lab/versions.py`. Images are built, scanned and published once, then
+  pinned in `config/versions.toml`. Images are built, scanned and published once, then
   never patched in place. Nothing installs software at container start.
 - **Gates before change.** Terraform cannot apply
   without passing the policy gate, on the local path and in CI alike.
@@ -553,17 +559,21 @@ node only); and every gateway backend port is unreachable from a VM.
 ## 7. Repository layout
 
 ```
-bootstrap.sh                 shim: ensure Python ≥ 3.12, exec python3 -B -m lab "$@"
+bootstrap.sh                 shim: check Python ≥ 3.12 (install python3.12 only if not), exec python3 -B -m lab "$@"
 config/lab.toml              environment values (§5), non-secret
-lab/
-  __main__.py                argparse map: up, update, teardown, destroy, --help (§8)
-  versions.py                every pin: CloudStack (version, repo key fingerprint), Terraform provider, k3s, Flux, Istio,
+config/versions.toml         every pin, as data (no code in config/): CloudStack (version, repo key
+                             fingerprint), Terraform provider, k3s, Flux, Istio,
                              Gateway API, Helm charts (version + SHA-256), images (by
                              digest: Prometheus, Loki and Grafana included), the
-                             kubernetes-mixin and node-mixin commits, Python deps
-  lib/                       log, tracker, system (run/capture/require_root), config,
-                             netplan, cloudstack (cmk), terraform, ansible, packer,
-                             kube, flux, helm, vault, minio, podman — thin wrappers only
+                             kubernetes-mixin and node-mixin commits, Python deps;
+                             loaded and type-checked like lab.toml (0.2b)
+lab/
+  __main__.py                argparse map: up, update, teardown, destroy, --help (§8);
+                             the run lock and the config loader (0.2a, 0.2b)
+  lib/                       log (Phase 0). A helper module is added only when a
+                             second step needs the same code (candidates later:
+                             netplan, cloudstack (cmk), terraform, vault, kube); until
+                             then the code lives where it is used
   policies/                  Vault policy bodies (HCL), written by bootstrap only (2.5d)
   preflight.py toolchain.py platform.py provision.py image.py setup.py base.py tunnel.py
   cluster.py mesh.py app.py monitoring.py backup.py verify.py consoles.py
@@ -610,7 +620,7 @@ app/                         api/ and frontend/ (Flask), each with Dockerfile an
 .gitea/workflows/            pr.yml (gates on every PR), deliver.yml (Phases 4–12 on
                              main), schedules.yml (nightly backup and verify)
 docs/                        capacity.md, runbook.md
-state/                       local run state (gitignored): bootstrap log, tracker. Pipeline
+state/                       local run state (gitignored): bootstrap log, run lock. Pipeline
                              jobs keep **no** local state between jobs (§9 intro)
 ```
 
@@ -658,7 +668,7 @@ No job applies a manifest to k3s: a merge that changes `clusters/backend/` is ap
 Flux within a minute, and each job only waits for its Kustomizations to report Ready at
 the merged revision (`cmd.flux-wait`).
 
-**Commands: `bootstrap.sh`** (all local; each of the four calls `require_root`, `--help` does not)
+**Commands: `bootstrap.sh`** (all local; the shim refuses all five without root; each of the four takes the run lock, `state/run.lock` (0.2a), `--help` does not)
 
 | Command | Runs |
 |---|---|
@@ -666,7 +676,7 @@ the merged revision (`cmd.flux-wait`).
 | `update` | For a lab already built; otherwise it refuses with "run `up` first". Applies what changed in `config/lab.toml` or the YAML, Compose and manifest files: unseals when sealed, runs the renewal, re-runs the platform phases so each converges to the current files (a changed host service is re-applied, e.g. `docker-compose up -d` recreates the changed containers), then dispatches `deliver.yml` on `main` and follows it. Changes under `clusters/` still reach k3s through git and Flux. No preflight dirty-host refusal, no DR drill |
 | `teardown` | The tenant side only: the VPC, tiers and VMs (fe-1, tun-1, be-1, so the k3s cluster goes with be-1) and the state and Vault entries that belong only to them (e.g. the break-glass kubeconfig). Keeps the host platform (control plane, Vault, Gitea, MinIO, telemetry, CloudStack, runner, golden-image template), so the next `up` is quick |
 | `destroy` | Teardown's rows, then the platform and host restore, in §14 order. Ends with a reboot (it removes the runner, so it cannot run in CI). Run again after the reboot, it finds nothing left, runs the revert checks V1–V5 and writes the pass/fail report. Every row tolerates "already gone" |
-| `--help` | Lists the four commands; needs no root |
+| `--help` | Lists the four commands (run with `sudo`, like the others: the shim checks root first) |
 
 **Pipeline-only jobs** (not `bootstrap.sh` commands; each runs `python3 -B -m lab.<module>`)
 
@@ -709,33 +719,46 @@ are in §17.
 
 ### Phase 0 — Scaffolding
 
-- **0.1 Shim and package.** `bootstrap.sh`; `lab/__init__.py`; `lab/lib/log.py`
-  (`[+]/[!]/[x]` to the console, timestamped `state/bootstrap.log`); `lib/tracker.py`
-  (atomic JSON writes via temp file + `os.replace`); `.gitignore` (`/state/`,
-  `__pycache__/`, `*.tfstate*`, `.terraform/`, `/builds/`).
+- **0.1 Shim and package.** `bootstrap.sh` (check Python ≥ 3.12; only if that fails,
+  install `python3.12` and check again; then `cd` to its own directory and `exec`);
+  `lab/__init__.py`; `lab/lib/__init__.py`; `lab/lib/log.py` (`[+]/[!]/[x]` to the
+  console, timestamped `state/bootstrap.log`, `state/` created on first use, its path
+  anchored to the file with `pathlib`, not the working directory); `.gitignore`
+  (`/state/`, `__pycache__/`, `*.tfstate*`, `.terraform/`, `/builds/`). No tracker
+  (2026-11-10: `check()` decides, §2).
   Exit: from the repo root, `python3 -c 'import lab.lib.log'`.
 
   ⤷ **Needs** — · **Recalls** — · **Produces** `bootstrap.sh`, `lib/log.py`,
-  `lib/tracker.py`, `.gitignore` · **Records** `path.repo` (checkout, remotes),
-  `path.state` · **Check** Exit
+  `.gitignore` · **Records** `path.repo` (checkout, remotes), `path.state` ·
+  **Check** Exit
 - **0.2a Command map and phase interface.** `__main__.py` with the four §8 commands
   (`up`, `update`, `teardown`, `destroy`) as logged stubs, plus `--help`; no subcommands
-  and no flags; each command calls `require_root`, `--help` does not. The phase
-  interface (`up/down/check`); `lib/system.py` (run, capture, require_root).
-  Exit: `./bootstrap.sh --help` lists exactly `up`, `update`, `teardown`, `destroy`;
-  `sudo ./bootstrap.sh up` logs each stub.
+  and no flags; no root check in Python (the shim does it). Each command takes the
+  **run lock**, written inline in `__main__.py`: an exclusive, non-blocking
+  `fcntl.flock` on `state/run.lock`, held for the whole run and released by the kernel
+  when the process exits (a crash leaves no stale lock); if another run holds it, the
+  command stops with "another bootstrap.sh run is in progress". The phase interface
+  (`up/down/check`). No `lib/system.py`: commands are run with `subprocess.run(...,
+  check=True)` where they are needed, until a second step repeats the pattern (§7).
+  Exit: `sudo ./bootstrap.sh --help` lists exactly `up`, `update`, `teardown`,
+  `destroy`; `sudo ./bootstrap.sh up` logs each stub; a second `sudo ./bootstrap.sh up`
+  started while the first is still running is refused at once and the first is
+  unaffected.
 
-  ⤷ **Needs** 0.1 · **Recalls** `path.state` · **Produces** `__main__.py`,
-  `lib/system.py` · **Records** `code.phase-interface`, `code.system` · **Check** Exit
-- **0.2b Config and pins.** `config/lab.toml` with the §5 defaults; `lib/config.py`
-  (load and validate types and required keys; the cross-checks, such as overlaps, are
-  preflight's, 1.2a); `versions.py`.
-  Exit: `sudo ./bootstrap.sh up` logs the loaded config before its stubs; a config with
-  a missing key or a wrong type is refused naming the key.
+  ⤷ **Needs** 0.1 · **Recalls** `path.state` · **Produces** `__main__.py` ·
+  **Records** `code.phase-interface`, `code.run-lock` · **Check** Exit
+- **0.2b Config and pins.** `config/lab.toml` with the §5 defaults; `config/versions.toml`
+  with the pins (data only: values live in TOML, code in `lab/`; decided 2026-11-10);
+  a `load_config()` function in `__main__.py` (load both with the stdlib `tomllib` and
+  validate types and required keys; the cross-checks, such as overlaps, are
+  preflight's, 1.2a). It moves to its own module when the first pipeline job needs it
+  (Phase 4: jobs run `python3 -m lab.<module>` and never pass through `__main__`).
+  Exit: `sudo ./bootstrap.sh up` logs the loaded config before its stubs; a config or
+  pin file with a missing key or a wrong type is refused naming the file and the key.
 
   ⤷ **Needs** 0.2a · **Recalls** `code.phase-interface` · **Produces** `config/lab.toml`,
-  `lib/config.py`, `versions.py` · **Records** `code.config`, `code.versions` ·
-  **Check** Exit
+  `config/versions.toml`, `load_config()` in `__main__.py` · **Records** `code.config`,
+  `code.versions` · **Check** Exit
 
 ### Phase 1 — Host preflight and reversibility
 
@@ -786,7 +809,7 @@ are in §17.
   `preflight.py` checks, the memory reader · **Records** `net.host` (`HOST_IP`,
   LAN NIC, `LAN_CIDR`, `LAN_GATEWAY` as configured), `host.memory` · **Check** Exit
 - **1.3 Toolchain.** Pinned CLIs into `/opt/lab/bin`, each verified against a
-  SHA-256 in `versions.py`: terraform, packer, ansible (venv in `/opt/lab/ansible`,
+  SHA-256 in `config/versions.toml`: terraform, packer, ansible (venv in `/opt/lab/ansible`,
   with the `cloud.terraform` collection), conftest, trivy, cmk (CloudMonkey, CloudStack's
   CLI), docker-compose (v2, run against Podman's socket, 2.1b), kubectl, istioctl, flux, helm, vault, mc, kubeconform. Host packages, from the Ubuntu
   archive at pinned versions: `qemu-system-x86` and `qemu-utils` (Packer), `dnsutils`
@@ -796,7 +819,7 @@ are in §17.
   and "already installed" means an exact word match on the version (`1.31.30` is not
   `1.31.3`).
   Exit: `up` logs every tool and its version, and each tool's own version command
-  (e.g. `/opt/lab/bin/terraform version`) matches `versions.py`; a corrupted download
+  (e.g. `/opt/lab/bin/terraform version`) matches `config/versions.toml`; a corrupted download
   is rejected.
 
   ⤷ **Needs** 1.2a · **Recalls** `code.versions` · **Produces**
@@ -827,7 +850,7 @@ runbook (14.4): a subshell with `VAULT_TOKEN` from a `lab-bootstrap` AppRole log
   network, and `default_subnet_pools` of `172.30.0.0/16`, size 24) and moves
   aardvark-dns to `dns_bind_port = 1053`, since CoreDNS holds port 53 on every host
   address. The services are defined in **one Compose file** and run by rootful Podman:
-  - Compose is the `docker-compose` v2 binary, pinned with its SHA-256 in `versions.py`
+  - Compose is the `docker-compose` v2 binary, pinned with its SHA-256 in `config/versions.toml`
     and installed by 1.3 into `/opt/lab/bin`, talking to rootful Podman's API socket
     (`podman.socket`, `/run/podman/podman.sock`, `root:root 0660`) through
     `DOCKER_HOST`. Ubuntu's `podman-compose` package is not used (older; health-gated
@@ -847,7 +870,7 @@ runbook (14.4): a subshell with `VAULT_TOKEN` from a `lab-bootstrap` AppRole log
     containers at boot, with no firewall ordering) is left disabled; the boot start is
     `lab-platform.service`'s
   - images are fully qualified and pinned by digest (they change only through
-    `versions.py`); the platform phase pulls every image first. Credentials stay in root
+    `config/versions.toml`); the platform phase pulls every image first. Credentials stay in root
     `0600` `*.env` files (`env_file:`), not Compose or Podman secrets, whose `file`
     driver would keep a second copy in container storage. Named volumes have fixed
     names (`name: prometheus-data`)
@@ -1430,7 +1453,7 @@ switching**.
   24.04, Java 17), all-in-one, installed by a short Ansible role
   (`ansible/roles/cloudstack/`, run against the host by `provision.py`):
   - the `download.cloudstack.org` noble `4.22` repository, its key fetched and checked
-    against the fingerprint in `versions.py` (a `signed-by` keyring), and an apt pin
+    against the fingerprint in `config/versions.toml` (a `signed-by` keyring), and an apt pin
     on the exact version, so an upgrade never moves the schema underneath. First,
     `apt-get update` must succeed and `apt-cache policy cloudstack-management` must
     offer the pinned version; otherwise stop, naming the repository (its noble 4.22
@@ -1728,7 +1751,7 @@ switching**.
   provisioners and netplan file in `packer/` · **Records** `img.eth1-fallback` (file
   name, so 5.4a's static file sorts after it), `img.contents` · **Check** Exit
 - **4.3 Publish and register.** Version = SHA-256 over the `packer/` directory and the
-  ISO pin in `versions.py`. Upload to `images/<version>/` with its SHA-256; skip build
+  ISO pin in `config/versions.toml`. Upload to `images/<version>/` with its SHA-256; skip build
   and upload when that version already exists. As `publisher`, register it with
   `registerTemplate` from `http://HOST_IP/images/<version>/…` (the `:80` route, 2.7)
   with the checksum (the job first runs the H2 platform-health gate, 3.1d): the SSVM
@@ -2035,7 +2058,7 @@ run by the learner with the break-glass kubeconfig (runbook), and the API audit 
   pulls each pinned chart with `helm pull` on the host (Istio `base`, `istiod`, `cni`,
   `ztunnel`; `cloudnative-pg`; `vault-secrets-operator`; `k8s-monitoring`, whose
   subcharts are inside its archive),
-  checks its SHA-256 against `versions.py`, and pushes it to
+  checks its SHA-256 against `config/versions.toml`, and pushes it to
   `oci://gitea.lab.test/lab/charts` with the `lab-ci` credential; a version already
   there is skipped. `platform/sources.yaml` declares HelmRepository `lab-charts`
   (`type: oci`, `certSecretRef: lab-ca`; org `lab` is public, so no pull credential).
@@ -2612,7 +2635,7 @@ run by the learner with the break-glass kubeconfig (runbook), and the API audit 
   - Dashboards as files in `observability/dashboards/`, which the `monitoring` job
     syncs into `/var/lib/lab/grafana/dashboards/` (2.7b): `kubernetes/`, the
     kubernetes-mixin and node-mixin dashboards rendered with 2.7b's rules (SHA-256 in
-    `versions.py`), without the scheduler, controller-manager and kube-proxy ones (k3s
+    `config/versions.toml`), without the scheduler, controller-manager and kube-proxy ones (k3s
     has no such jobs); `lab/`, three: **Mesh traffic and denials** (connections and
     bytes by source and destination SPIFFE principal; denied connections), **api**
     (request rate, errors, latency, the pod's memory) and **Logs** (Loki panels:
@@ -3056,7 +3079,7 @@ cluster first.*
 | The gateway is a single point of failure for every web service | 2.6 | Vault, CoreDNS, Squid and SSH never depend on it, so unseal, DNS and break-glass access survive a gateway outage; `up` and `update` name it first when it is down |
 | ServiceLB exposes the backend gateway on every node address | 8.7d | be-1's nftables admit 8000 only on `wg1` from `10.99.0.2`; P4 and Z1 test the tier and mgmt addresses too |
 | PR code runs on the host with the pipeline identity | 2.10 | accepted for one operator (§15); `main` is protected, so nothing reaches `deliver` without a merge; with no `docker` group and rootless builds, it runs with `lab-runner`'s rights, not root's |
-| Podman comes from Ubuntu's universe component, paired with an older netavark (4.9.3 with 1.4.0) | 2.1b, 2.1c, 2.2 | security fixes come from the community or Ubuntu Pro, not a vendor repo; versions are pinned (`versions.py`) and logged by `up`; no container port faces the LAN except through the firewall. Netavark features after 1.4 (the nftables driver, `isolate=strict`) are absent, so 2.1c proves the driver, the DNAT path and DNS before 2.2 depends on them. If it fails: Podman 5.x with netavark ≥ 1.10 (nftables driver) from a pinned third-party repository (2.1c names it); Docker is the last resort |
+| Podman comes from Ubuntu's universe component, paired with an older netavark (4.9.3 with 1.4.0) | 2.1b, 2.1c, 2.2 | security fixes come from the community or Ubuntu Pro, not a vendor repo; versions are pinned (`config/versions.toml`) and logged by `up`; no container port faces the LAN except through the firewall. Netavark features after 1.4 (the nftables driver, `isolate=strict`) are absent, so 2.1c proves the driver, the DNAT path and DNS before 2.2 depends on them. If it fails: Podman 5.x with netavark ≥ 1.10 (nftables driver) from a pinned third-party repository (2.1c names it); Docker is the last resort |
 | aardvark-dns and CoreDNS both want port 53 | 2.1b, 2.3a | aardvark-dns moves to `dns_bind_port` 1053; the lab's own nat rule redirects containers' TCP and UDP port 53 queries to it on every network, since netavark 1.4 does it for UDP only and never on internal networks (2.1c, 2.2) |
 | A mesh CA forging names other clients trust | 2.5f, 8.3a | decided 2026-11-05: the istiod CA is under its own root, `pki_mesh`, which no host or VM trusts (§6); P2 proves the chain ends there and not at `lab.test CA` |
 | One compromised ztunnel impersonates every workload on its node | 8.3b | ambient keeps keys out of pods but in ztunnel; with one node that is every identity (§6). Accepted for the lab; production spreads workloads over hardened nodes |
@@ -3224,7 +3247,7 @@ it by hand once the unseal key and snapshots are no longer needed.
 | Management network isolation | in-guest nftables on a shared host-only bridge | private VLANs or per-VM L2 isolation, so a VM's root cannot reach another VM's mgmt NIC: needs Open vSwitch PVLAN support in CloudStack |
 | Privileged access | SSH to the host as Ubuntu ships it, from `LAN_CIDR` only (2.2); CloudStack adds the KVM host as root with a key limited by `from=` to the host's own address (3.1c) | key-only SSH hardening (the option below); AD logins (above), Teleport/Boundary with an SSH CA and session recording: the production answer, out of scope |
 | Host SSH hardening | **option, not in the core build** (moved out of 2.2 on 2026-11-10; about one M session, folds into 2.2): config key `OPERATOR_LOGIN`, which preflight requires to be a local non-root user with a usable key in the file `sshd -T -C user=<login>` names (owned by the user, not group- or world-writable); a drop-in `/etc/ssh/sshd_config.d/00-lab.conf` (sorts before cloud-init's `50-cloud-init.conf`; sshd keeps the first value) with `PasswordAuthentication no`, `KbdInteractiveAuthentication no`, `PermitRootLogin prohibit-password`, `AllowUsers <OPERATOR_LOGIN> root@<HOST_IP>` (the second for 3.1c; `user@host` avoids a `Match` block), `X11Forwarding no`, `AllowAgentForwarding no`, `PermitTunnel no`, `AllowStreamLocalForwarding no`, `AllowTcpForwarding local` (`ssh -D`, `-L`, `-J` work; `-R` does not); a per-source nftables meter on new tcp 22 connections (`limit rate over 10/minute burst 10 packets`); lockout guards: the key check re-runs, `install -d -m 0755 /run/sshd` then `sshd -t` (a failure removes the file), then `systemctl try-reload-or-restart ssh`, the applying session kept open. Check H1: `ssh -o PreferredAuthentications=none` as `OPERATOR_LOGIN`, root and an unknown user lists only `publickey`; root and a temporary keyed user from the LAN are refused. 1.1 records `sshd -T`; `destroy` removes the drop-in and reloads; V3 compares `sshd -T` with the baseline. Further tightenings: refuse stray `AllowUsers`/`AllowGroups`/`Match` lines elsewhere in the sshd config (sshd adds up `AllowUsers` from every file); a timed undo (`systemd-run --on-active=5min` removes the drop-in unless confirmed from a new session) | the core build keeps Ubuntu's SSH defaults to stay on the core functions; the risk accepted is password logins from `LAN_CIDR` if the host allows them |
-| Linting | **option, not in the core build** (moved out of the scaffold step on 2026-11-10; about one M session): a `lint` job in `pr.yml` running ruff, mypy, shellcheck (`bootstrap.sh`), yamllint, ansible-lint and tflint, each only over the file types that exist so far, failing when files of a type exist but its linter is missing; ruff, mypy, yamllint and ansible-lint hash-pinned in a dev requirements file this option adds, shellcheck and tflint pinned in `versions.py` | not needed for the core functions; `terraform plan` + policy, `trivy config`, kubeconform and the no-Secrets rule still gate every PR (10.1) |
+| Linting | **option, not in the core build** (moved out of the scaffold step on 2026-11-10; about one M session): a `lint` job in `pr.yml` running ruff, mypy, shellcheck (`bootstrap.sh`), yamllint, ansible-lint and tflint, each only over the file types that exist so far, failing when files of a type exist but its linter is missing; ruff, mypy, yamllint and ansible-lint hash-pinned in a dev requirements file this option adds, shellcheck and tflint pinned in `config/versions.toml` | not needed for the core functions; `terraform plan` + policy, `trivy config`, kubeconform and the no-Secrets rule still gate every PR (10.1) |
 | Unit tests | **option, not in the core build** (removed 2026-11-10): pytest over `lab/` in a `tests/` tree, with a `pyproject.toml`, hash-pinned dev tools in `requirements-dev.txt` and a repo `.venv/`, run as a `pr.yml` job | testing happens as the lab is built: each step's Exit is run by hand on the CLI, and every change runs through the Gitea pipeline (`pr.yml`'s gates, then `verify`); most units would only mock CloudStack, Vault and k3s |
 | `status` command | **option, not in the core build** (removed 2026-11-10): a read-only `status` command printing each phase's `check()` result, the pinned versions, Vault's seal state, the gateway, the Vault audit disk usage and host memory against the §5 budget | the core build keeps four commands; `up` and `update` log each phase's state as they converge, and a version is one `/opt/lab/bin/<tool> version` away |
 | Examiner walkthrough (`demo`) | **option, not in the core build** (removed 2026-11-10; about two M sessions): a `demo` command running a 14-minute walkthrough (shape, tiers and tunnel, application, encryption, zero trust, trust chain, backup, operations) as re-runnable proofs with human-readable output, reusing the `verify` checks; E2/E3 on the real `customers` key with every row rewrapped first; the break-glass port-forward shown in S4 and A1; a hand edit Flux reverts; kept as `docs/walkthrough.md` with real output | the evidence already exists without it: a green `deliver.yml` run ending in `verify`, and `up`'s local stage for B2/B3 (§13); a walkthrough re-states it for a human audience |
@@ -3334,7 +3357,7 @@ words. A contract may name a family: `vault.policy.*`, `vm.<name>`.
 - A key exists only if a later step's Recalls names it, or it is a decision, spike,
   gotcha or deviation. Anything else goes in the bead's closing note.
 - Short values are written in; anything longer points at the repo file. Where the repo
-  is the source of truth (`config/lab.toml`, `versions.py`, a manifest), the entry names
+  is the source of truth (`config/lab.toml`, `config/versions.toml`, a manifest), the entry names
   file and key, and the source wins any disagreement.
 - Overwrite in place: never two values for one key, never "superseded" lines. A renamed
   object has its key updated in the same session.

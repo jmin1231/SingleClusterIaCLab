@@ -20,7 +20,7 @@ learning loop adopted in `senior_jqr/issue_197/LESSON_PLAN.md` ("How every step 
 
 The format decides what "write it from a blank page" means in §2 (level W4). Find out and fill it in.
 
-**Scope in three weeks.** Every step of PLAN §17.4 is scheduled: 91 steps, all required.
+**Scope in three weeks.** Every step of PLAN §17.4 is scheduled: 90 steps, all required.
 Exam-critical steps run the full loop; plumbing runs on the fast track (§3.8). The first six
 steps of §3.8's cut order are already on the fast track, which leaves about 4.6 h of slack
 (§6.1); read the rest of the cut order before week 1.
@@ -234,7 +234,7 @@ In the 3-week plan the fast track (§3.8) uses this hatch by default for plumbin
 | **"Fill it in" costs a prediction, annotation, W1 cap and a 48-h rebuild** | Keeps the escape hatch while making sure generation still happens later [36]. |
 | **Claude never writes the *Why*** | Earlier log entries were reconstructed by Claude. Generating it yourself is the learning [16]; rewrite those entries in your own words when you next review them. |
 | **Closing recall shortened from 15 to 8–10 min, plus next-day retrieval** | Recall straight after study is mostly short-term memory; the delayed retrieval in the next session's warm-up is the real test [1][8]. |
-| **Fast track for plumbing (§3.8)** | 91 full loops (144.25 h) do not fit three weeks. Generation is spent where the exam probes; prediction and annotation keep the rest from becoming passive reading [32][36]. |
+| **Fast track for plumbing (§3.8)** | 90 full loops (143.25 h) do not fit three weeks. Generation is spent where the exam probes; prediction and annotation keep the rest from becoming passive reading [32][36]. |
 
 ### 3.8 Fast track (the 3-week default for plumbing)
 
@@ -266,7 +266,7 @@ E1–E3, S3, G4, B1/B2).
 
 ### 4.1 One study unit per step
 
-For every step of the plan's step index (PLAN §17.4: 91 steps; one step is one session, sized S
+For every step of the plan's step index (PLAN §17.4: 90 steps; one step is one session, sized S
 or M; e.g. `2.4b`, `5.3a`, `8.5`) build a study unit. A guided step gets all
 five parts below (about 15 minutes, done by you at the start of the step, from the plan text); a
 fast-track step (§3.8) only the concept list, ≤ 2 cards and the examiner line (5 minutes).

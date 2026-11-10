@@ -39,7 +39,7 @@ This document is complete on its own: everything needed to build the lab is here
 | **R1** | Construct a VPC and implement a VPN to provide access | Phases 5, 6 | N1–N6 |
 | **R2** | Deploy a database and an encryption service for a cloud application | Phases 2, 8 | E1–E3, T1–T3, Z1–Z2, P1–P5, S1–S4, K1, A1 |
 | **R3** | Back up and restore the encrypted data; show key loss destroys it | Phase 9 | B1–B3 |
-| **R4** | Reversible infrastructure: `destroy` restores the host exactly | Phase 13 | V1–V5 |
+| **R4** | Reversible infrastructure: `destroy` removes the lab's packages, users and files and restores the network (each phase's list, rule 26) | Phase 13 | V1–V5 |
 | **R5** | Pipeline-driven: after bootstrap, every build and change is a CI run with gates; k3s converges to `main` through Flux | Phases 2.10, 3.5, 8.1b, 10 | G1–G4 |
 | **R6** | Observability: metrics, logs and dashboards for the cluster, the mesh and the api | 2.7b, 8.8a, 8.8b, 8.8d | O1–O5 |
 | **R7** | Operator consoles: CloudStack, Vault, Gitea, MinIO and Grafana, from the host only, over trusted TLS, each behind its own login | 3.5c, 2.7b | C1 |
@@ -250,16 +250,22 @@ out, and why, is in §15.
 
 ## 5. Address, VM, port and DNS plan (single source of truth)
 
-All environment-specific values live in `config/lab.toml` (committed, non-secret).
-Preflight validates them. The values below are the defaults and examples.
+The host's LAN (`HOST_IP`, its prefix, `LAN_GATEWAY`, the card) is **read from the
+host** on the first `up` and kept in the baseline (1.1, 1.2a), so the same repo runs
+on any host. Choices the operator makes live in `config/lab.toml` (committed,
+non-secret); the values below are the defaults and examples. The file is built **step
+by step** (decided 2026-11-10): the first step that reads an operator choice creates
+it, and each later step adds the keys it uses, with this section's default, to
+`lab.toml` and to the loader's key table in the same change. Pins grow the same way in
+`config/versions.toml`, which 1.3 creates. No key is added before a step reads it.
 
 **Host and management network**
 
 | Item | Value |
 |---|---|
-| `LAN_CIDR` | host LAN, e.g. `192.168.50.0/24` |
-| `HOST_IP` | host LAN address, **static** in netplan (preflight refuses DHCP: the address must not change when CloudStack moves it onto `cloudbr0`), e.g. `192.168.50.10` |
-| `LAN_GATEWAY` / upstream DNS | from the LAN |
+| `LAN_CIDR` | host LAN, read from the host (address + prefix), e.g. `192.168.50.0/24` |
+| `HOST_IP` | host LAN address, read from the host, **static** in netplan (preflight refuses DHCP: the address must not change when CloudStack moves it onto `cloudbr0`), e.g. `192.168.50.10` |
+| `LAN_GATEWAY` / upstream DNS | read from the host (the default route) / from the LAN |
 | CloudStack pod (system VM) range | on the LAN, e.g. `.180–.189` |
 | CloudStack public range (VPC source NAT and public IPs) | on the LAN, e.g. `.190–.209` |
 | `VMNET_CIDR` (mgmt shared network) | `10.250.0.0/24` on host-only bridge `cloudbr1`; router DHCP `.100–.199`; lab VMs get **fixed** addresses from that range through `cloudstack_nic`'s `ip_address` (fe-1 `.110`, tun-1 `.111`, be-1 `.112`), and each VM's userdata writes that address into a **static** netplan for eth1, so nothing depends on a lease or on the mgmt router being up; the router itself is pinned outside `.110–.112`, at `.100` (`routerip`, 3.3a) |
@@ -566,18 +572,21 @@ config/versions.toml         every pin, as data (no code in config/): CloudStack
                              Gateway API, Helm charts (version + SHA-256), images (by
                              digest: Prometheus, Loki and Grafana included), the
                              kubernetes-mixin and node-mixin commits, Python deps;
-                             loaded and type-checked like lab.toml (0.2b)
+                             loaded and type-checked (1.3)
 lab/
   __main__.py                argparse map: up, update, teardown, destroy, --help (§8);
-                             the run lock and the config loader (0.2a, 0.2b)
+                             the run lock (0.2a) and the config loader (1.3)
   lib/                       log (Phase 0). A helper module is added only when a
                              second step needs the same code (candidates later:
                              netplan, cloudstack (cmk), terraform, vault, kube); until
                              then the code lives where it is used
+  __init__.py                `LabError`: a refusal main() logs, exit 1 (1.2a)
   policies/                  Vault policy bodies (HCL), written by bootstrap only (2.5d)
-  preflight.py toolchain.py platform.py provision.py image.py setup.py base.py tunnel.py
-  cluster.py mesh.py app.py monitoring.py backup.py verify.py consoles.py
-  teardown.py revert.py maintain.py
+  phases/                    one module per phase, each with up/down/check (1.1), so
+                             lab/ itself shows only the entry point:
+    preflight.py toolchain.py platform.py provision.py image.py setup.py base.py
+    tunnel.py cluster.py mesh.py app.py monitoring.py backup.py verify.py consoles.py
+    teardown.py revert.py maintain.py
 platform/                    compose.yaml + config: traefik/ (static config, dynamic
                              routes), coredns/, vault/, minio/, gitea/, squid/
                              (allowlist.txt), prometheus/ (config, the rendered mixin
@@ -642,7 +651,8 @@ tables are in **build order**.
 | 1 | `preflight` | 1 | — |
 | 2 | `platform` | 2, 3 | preflight. Runs Phase 2 (control plane, gateway, telemetry stores and Grafana, runner), then Phase 3 (CloudStack), then the 3.5 hand-off (3.5a–3.5b) |
 
-`preflight` runs Phase 1 (1.1 baseline, 1.2a checks, 1.3 toolchain). Phase → module:
+`preflight` runs Phase 1 (1.2a checks, 1.1 baseline, 1.3 toolchain). Phase → module
+(all in `lab/phases/`):
 1 `preflight.py` + `toolchain.py`; 2 `platform.py` (2.7b's telemetry stores and Grafana
 included); 3 `provision.py`; 4 `image.py`;
 5 `setup.py`; 6 `base.py` + `tunnel.py`; 8 `cluster.py`, `mesh.py`, `app.py`,
@@ -675,7 +685,7 @@ the merged revision (`cmd.flux-wait`).
 | `up` | First build and resume. `preflight` → `platform` (Phases 2–3 and the 3.5 hand-off) → dispatches `deliver.yml` and follows it. Each step resumes at the first phase whose `check()` fails. Unseals Vault when it is sealed (after a host reboot, before the pipeline can read secrets) and runs the renewal: issues Vault's and the gateway's certificates when missing or under 10 days (the gateway's also when its SAN set in `gw.hosts` changed), and re-issues the runner's `lab-pipeline` secret_id when under 7 days (the `platform` phase runs the same renewal). After the pipeline is green, its **local stage** runs as root: the Vault DR drill (9.3a–9.4, proves B2/B3; it needs the unseal key, which the runner can never read), then it prints the `verify` job's pass/fail summary |
 | `update` | For a lab already built; otherwise it refuses with "run `up` first". Applies what changed in `config/lab.toml` or the YAML, Compose and manifest files: unseals when sealed, runs the renewal, re-runs the platform phases so each converges to the current files (a changed host service is re-applied, e.g. `docker-compose up -d` recreates the changed containers), then dispatches `deliver.yml` on `main` and follows it. Changes under `clusters/` still reach k3s through git and Flux. No preflight dirty-host refusal, no DR drill |
 | `teardown` | The tenant side only: the VPC, tiers and VMs (fe-1, tun-1, be-1, so the k3s cluster goes with be-1) and the state and Vault entries that belong only to them (e.g. the break-glass kubeconfig). Keeps the host platform (control plane, Vault, Gitea, MinIO, telemetry, CloudStack, runner, golden-image template), so the next `up` is quick |
-| `destroy` | Teardown's rows, then the platform and host restore, in §14 order. Ends with a reboot (it removes the runner, so it cannot run in CI). Run again after the reboot, it finds nothing left, runs the revert checks V1–V5 and writes the pass/fail report. Every row tolerates "already gone" |
+| `destroy` | First asks: it prints what it is about to delete (the VPC and VMs, CloudStack with its `cloud` databases and all of MySQL's data, the platform, every package and user the lab added) and continues only if the operator types `destroy`; anything else, or no terminal on stdin, stops it with nothing changed (no flag skips the question). Then teardown's rows (always run: each is a no-op if `teardown` already ran), then the platform and host restore, in §14 order. Ends with a reboot (it removes the runner, so it cannot run in CI). Run again after the reboot, it asks again, finds nothing left, runs the revert checks V1–V5 and writes the pass/fail report. Every row tolerates "already gone" |
 | `--help` | Lists the four commands (run with `sudo`, like the others: the shim checks root first) |
 
 **Pipeline-only jobs** (not `bootstrap.sh` commands; each runs `python3 -B -m lab.<module>`)
@@ -747,68 +757,97 @@ are in §17.
 
   ⤷ **Needs** 0.1 · **Recalls** `path.state` · **Produces** `__main__.py` ·
   **Records** `code.phase-interface`, `code.run-lock` · **Check** Exit
-- **0.2b Config and pins.** `config/lab.toml` with the §5 defaults; `config/versions.toml`
-  with the pins (data only: values live in TOML, code in `lab/`; decided 2026-11-10);
-  a `load_config()` function in `__main__.py` (load both with the stdlib `tomllib` and
-  validate types and required keys; the cross-checks, such as overlaps, are
-  preflight's, 1.2a). It moves to its own module when the first pipeline job needs it
-  (Phase 4: jobs run `python3 -m lab.<module>` and never pass through `__main__`).
-  Exit: `sudo ./bootstrap.sh up` logs the loaded config before its stubs; a config or
-  pin file with a missing key or a wrong type is refused naming the file and the key.
-
-  ⤷ **Needs** 0.2a · **Recalls** `code.phase-interface` · **Produces** `config/lab.toml`,
-  `config/versions.toml`, `load_config()` in `__main__.py` · **Records** `code.config`,
-  `code.versions` · **Check** Exit
+- **0.2b** removed (2026-11-10): the config files are built **step by step** (§5) —
+  1.3 creates `config/versions.toml` and `load_config()`; `config/lab.toml` comes with
+  the first step that reads an operator choice.
 
 ### Phase 1 — Host preflight and reversibility
 
-- **1.1 Baseline and netplan backup.** Record the revert baseline in
+**Preflight grows with the lab** (decided 2026-11-10). It starts as one check, that
+`/dev/kvm` is usable, in `lab/phases/preflight.py`. Each later step adds to it the
+check or the dependency it needs, in the same change, and nothing goes in before a step
+needs it. **Dependencies are split by what installing them does** (decided 2026-11-10):
+- **inert ones, installed by preflight:** the pinned CLIs (1.3), `qemu-utils`,
+  `qemu-system-x86`, `dnsutils`, Python libraries. Nothing in this group runs on
+  install, so a broken mirror or pin fails in the first minute
+- **packages that start a service, installed by the step that configures them**,
+  right before its configuration and after 2.2's firewall exists: on Ubuntu a
+  package's install script enables and starts its service at once (`nfs-kernel-server`
+  would listen on 111 before the firewall, `mysql-server` would run unconfigured,
+  `libvirt-daemon-system` creates `virbr0`, `chrony` removes `systemd-timesyncd`,
+  `cloudstack-management` needs its repository first)
+
+Both groups are listed in **one table**, `PACKAGES` in `preflight.py`, keyed by the
+step that installs them; a step installs its own entry. That one table is what
+`destroy` purges (row 9b). The steps below describe where
+preflight ends up; each part is built when the step that first needs it is built (the
+LAN detection and the baseline, for example, with the first step that changes the
+network).
+
+- **1.1 Baseline and netplan backup.** `destroy` purges the packages each phase
+  installed (row 9b), deletes what rule 26 names, removes users by difference and
+  restores a few backed-up files. So the baseline records only what that needs, in
   `/var/backups/lab/baseline.json`:
-  - package list, apt sources, enabled systemd units, listening ports
-  - `/etc/netplan` hashes, bridges, the `/etc/resolv.conf` link, nftables ruleset
-  - trust-store contents; local users and groups; loaded kernel modules; the sysctl
-    values the lab touches (`net.ipv4.ip_forward`, `net.bridge.*`)
-  - `/etc/hosts`, the hostname, every crontab
-  - a SHA-256 manifest of `/etc`, so V5 catches drift nobody listed (logrotate rules,
-    AppArmor profile changes, installer edits). It is compared against an explicit
-    ignore list in `lab/revert.py` (`ld.so.cache`, `ssl/certs/` hash links, `*-`
-    backup files, `machine-id`, conffiles a package reinstall rewrites), and the V5
-    report prints what it ignored as well as what failed
+  - the LAN as 1.2a detected it: card, `HOST_IP`, prefix, `LAN_GATEWAY` (later steps
+    and V2 read it here, never from the host again)
+  - local users and groups, with group memberships
+  - where `/etc/resolv.conf` links to
 
-  One-time copy of `/etc/netplan` to `/var/backups/lab/netplan.orig/`, outside the
-  repo and outside `state/`. The baseline is written together with an **install
-  marker**, `/var/lib/lab/install-id` (a random id, also stored in the baseline). A
-  baseline without a matching marker is stale (a previous lab that was never reverted)
-  and preflight refuses it rather than trusting it.
-  Exit: both exist; a re-run changes neither.
+  One-time copies, never refreshed: `/etc/netplan` to `/var/backups/lab/netplan.orig/`,
+  and the shared files the lab cannot avoid editing (root's
+  `~/.ssh/authorized_keys`, `/etc/hosts`) to `/var/backups/lab/files.orig/`, outside
+  the repo and outside `state/`. The baseline is written last (temp file, then
+  `os.replace`), so it exists only once the copies do, and **its existence is the
+  marker**: a baseline means the lab owns this host (an `up` in progress or a lab not
+  yet destroyed); `destroy` deletes `/var/backups/lab/` only after a green V1–V5
+  report (13.2). No install-id file, no hashes, no package list (kept simple,
+  2026-11-10).
+  Exit: the baseline and both copies exist; a re-run changes none of them.
 
-  ⤷ **Needs** 0.2b · **Recalls** `code.config` · **Produces** baseline writer
-  (`preflight.py`), ignore list (`revert.py`) · **Records** `path.baseline`,
-  `path.netplan-orig`, `path.install-id` · **Check** Exit
-- **1.2a Preflight checks.** Checks, each failing with a message that names what it found:
-  - Ubuntu 24.04; `/dev/kvm` usable; CPU and disk against §5; `MemTotal` ≥ 30 GiB
-    (a 32 GB host reports about 31 GiB) with the §5 peak + 4 GB reserve fitting (warn
-    above 32 GB: the budget is the ceiling, not the hardware). `up` checks the §5
-    reserve before each phase with the same memory reader
-  - `HOST_IP` is static in netplan (no `dhcp4: true` on the LAN interface)
+  ⤷ **Needs** 0.2a · **Recalls** — · **Produces** baseline writer
+  (`lab/phases/preflight.py`, the first phase module with `up/down/check`) · **Records** `path.baseline`,
+  `path.netplan-orig` · **Check** Exit
+- **1.2a Preflight checks.** In `lab/phases/preflight.py`; no config file (the host's
+  network is read from the host, the minimums are constants: they are the lab's needs,
+  the same on every host). `up` runs the checks **before** 1.1's baseline writer, and
+  reports every problem in one run (each check returns messages, then one refusal):
+  - Ubuntu 24.04; `/dev/kvm` usable; at least 8 cores; at least 200 GB on `/` (a
+    250 GB disk gives about 210); `MemTotal` ≥ 30 GiB (a 32 GB host reports about
+    31 GiB). The `/proc/meminfo` reader is reused later: `up` checks the §5 reserve
+    before each phase with it
   - strict `apt-get update` (fail naming any broken source)
-  - config values valid and non-overlapping (the runner's sub-ID range, 2.10, also
-    against every range already in `/etc/subuid` and `/etc/subgid`)
-  - **leftovers vs resume:** if `/var/lib/lab/install-id` exists and matches the
-    baseline, this is the lab's own partial install, and `up` resumes; otherwise
-    **refuse** leftovers (existing `cloud` DB or `/var/lib/mysql`, `cloudbr0`,
-    `virbr0`, `cloudstack-*` packages, Docker (its FORWARD-drop policy would undercut
-    2.2), an active `ufw` or `firewalld` (each sets FORWARD to drop or rewrites the
-    ruleset), lab containers, networks, `lab-platform.service`, third-party apt sources)
-    naming each one
-  Exit: passes on a fresh host; deliberately fails on a host with a planted
-  `cloudbr0` and no marker. (Once
-  Phase 2 exists: passes, and resumes, after an `up` interrupted in Phase 2.)
+  - first run only (no baseline yet):
+    - **the LAN, detected:** exactly one default route via a gateway, and exactly one
+      IPv4 address on its card, not from DHCP (`ip -j route`, `ip -j addr`: the
+      `dynamic` flag). The card, address, prefix and gateway go into the baseline
+      (1.1) and are never detected again: once CloudStack moves the address onto
+      `cloudbr0`, the same commands would name the bridge, not the card
+    - **leftovers** refused, each named: `/var/lib/mysql`, the bridges `cloudbr0`,
+      `cloudbr1`, `cloud0`, `virbr0`, `cloudstack-*` packages, Docker (its
+      FORWARD-drop policy would undercut 2.2), an active `ufw` or `firewalld` (each
+      sets FORWARD to drop or rewrites the ruleset), `lab-*` units, the user
+      `lab-runner` (its rootless containers and networks go with it), any apt source
+      but `ubuntu.sources`
+  - a resumed run (baseline exists: the lab's own partial install) skips both and logs
+    the recorded network
+  Config cross-checks arrive with the step that adds the key (the runner's sub-ID
+  range, 2.10, against every range already in `/etc/subuid` and `/etc/subgid`).
+  Exit: passes on a fresh host with a static address and logs its network; fails
+  naming each problem on a host with a DHCP address, a planted `cloudbr0` and no
+  baseline. (Once Phase 2 exists: passes, and resumes, after an `up` interrupted in
+  Phase 2.)
 
-  ⤷ **Needs** 1.1 · **Recalls** `path.baseline`, `path.install-id` · **Produces**
-  `preflight.py` checks, the memory reader · **Records** `net.host` (`HOST_IP`,
-  LAN NIC, `LAN_CIDR`, `LAN_GATEWAY` as configured), `host.memory` · **Check** Exit
-- **1.3 Toolchain.** Pinned CLIs into `/opt/lab/bin`, each verified against a
+  ⤷ **Needs** 1.1 · **Recalls** `path.baseline` · **Produces** `preflight.py` checks,
+  the memory reader, `LabError` (in `lab/__init__.py`, logged by `main()`, exit 1) ·
+  **Records** `net.host` (card, `HOST_IP`, prefix, `LAN_GATEWAY`, as recorded in the
+  baseline), `host.memory` · **Check** Exit
+- **1.3 Toolchain.** Creates `config/versions.toml` with this step's pins (data only:
+  values in TOML, code in `lab/`; later steps add theirs, §5) and `load_config()` in
+  `__main__.py`: it loads the TOML files with the stdlib `tomllib` and checks each key
+  in its key table is present with the right type (`type(v) is int`: TOML `true` is
+  not an int), refusing with the file and the key. It moves to its own module when the
+  first pipeline job needs it (Phase 4: jobs run `python3 -m lab.<module>` and never
+  pass through `__main__`). Pinned CLIs into `/opt/lab/bin`, each verified against a
   SHA-256 in `config/versions.toml`: terraform, packer, ansible (venv in `/opt/lab/ansible`,
   with the `cloud.terraform` collection), conftest, trivy, cmk (CloudMonkey, CloudStack's
   CLI), docker-compose (v2, run against Podman's socket, 2.1b), kubectl, istioctl, flux, helm, vault, mc, kubeconform. Host packages, from the Ubuntu
@@ -820,10 +859,13 @@ are in §17.
   `1.31.3`).
   Exit: `up` logs every tool and its version, and each tool's own version command
   (e.g. `/opt/lab/bin/terraform version`) matches `config/versions.toml`; a corrupted download
-  is rejected.
+  is rejected; a pin with a missing key or a wrong type is refused naming the file and
+  the key.
 
-  ⤷ **Needs** 1.2a · **Recalls** `code.versions` · **Produces**
-  `toolchain.py`, `/opt/lab/bin/*` · **Records** `path.toolchain` · **Check** Exit
+  ⤷ **Needs** 1.2a · **Recalls** — · **Produces** `config/versions.toml`,
+  `load_config()`, `toolchain.py`, `/opt/lab/bin/*` · **Records** `code.config`,
+  `code.versions`, `path.toolchain` ·
+  **Check** Exit
 
 ### Phase 2 — Control plane
 
@@ -2893,7 +2935,9 @@ G4's hand edit by 12.1f.
     teardown's rows, then the platform rows to 9, each phase's `down()` with the state
     it reads, then the host restore (13.1b). It needs the whole lab built and the
     evidence captured first (14.4).
-    Exit: on the built lab, `teardown` completes and a second `teardown` reports every
+    `destroy` asks first (§8); its prompt code lives in `teardown.py`.
+    Exit: answering anything but `destroy`, or piping stdin, changes nothing; on the
+    built lab, `teardown` completes and a second `teardown` reports every
     row already gone; the next `up` rebuilds only the tenant side (its log shows each
     platform phase's `check()` passing); then `destroy` completes rows −1 to 9 and a
     second run reports every row already gone.
@@ -2901,7 +2945,8 @@ G4's hand edit by 12.1f.
     ⤷ **Needs** 12.1f, 14.4, 10.1, 10.2, 10.3a, 9.2 · **Recalls** `runner.user`,
     `tf.backend`, `vault.kv.cs-admin`, `vault.kv.k3s-admin` · **Produces** `teardown.py` · **Records** — ·
     **Check** Exit
-  - **13.1b Host restore:** `destroy`'s rows 9a–12: users and groups, the netplan
+  - **13.1b Host restore:** `destroy`'s rows 9a–12: users and groups, packages by
+    difference, lab files and the backed-up shared files, the netplan
     restore inside one `netplan try` window, `state/`, the reboot.
     Exit: after the reboot the host reaches `LAN_GATEWAY` on `HOST_IP` and no lab bridge
     exists.
@@ -2910,10 +2955,11 @@ G4's hand edit by 12.1f.
     **Produces** host restore in `teardown.py` · **Records** — · **Check** Exit; V2
 - **13.2 Revert check in `destroy`.** Run again after the reboot, `destroy` finds nothing
   left, compares the host against `/var/backups/lab/baseline.json` (V1–V5) and writes a
-  pass/fail report.
-  Exit: green; every row reports already gone.
+  pass/fail report. Green, it deletes `/var/backups/lab/`, so the next `up` takes a
+  fresh baseline; red, it keeps it for the next look.
+  Exit: green; every row reports already gone; `/var/backups/lab/` is gone.
 
-  ⤷ **Needs** 13.1b · **Recalls** `path.baseline`, `path.install-id` · **Produces**
+  ⤷ **Needs** 13.1b · **Recalls** `path.baseline` · **Produces**
   `revert.py`, the V1–V5 report · **Records** — · **Check** Exit; V1–V5
 
 ### Phase 14 — Documentation
@@ -3043,6 +3089,18 @@ cluster first.*
     reaches the pod from its own loopback, past ztunnel. Give humans and CI least
     privilege (namespaced Roles, `resourceNames`, short-lived tokens, nothing that can
     patch a Flux object), keep cluster-admin break-glass, and audit both (8.2c, 8.2d).
+26. **Name everything the lab writes, so `destroy` can find it without a list.** A file
+    the lab creates outside a package lives in a lab-owned directory (`/etc/lab/`,
+    `/opt/lab/`, `/var/lib/lab/`) or carries `lab` in its name inside a system
+    directory: `/etc/systemd/system/lab-*`, `/etc/sysctl.d/*-lab.conf`,
+    `/etc/udev/rules.d/*-lab.rules`, `/etc/apt/sources.list.d/lab-*`,
+    `/etc/apt/keyrings/lab-*`, `/etc/systemd/resolved.conf.d/lab.conf`,
+    `/etc/logrotate.d/lab-*`, `/etc/containers/containers.conf.d/lab.conf`,
+    `/etc/ssh/sshd_config.d/*-lab.conf`,
+    `/usr/local/share/ca-certificates/lab-*.crt`. Prefer a drop-in to editing a shared
+    file; a shared file that must be edited (root's `authorized_keys`, `/etc/hosts`) is
+    backed up by 1.1 and restored by `destroy` (row 9c). A step that adds a new kind of
+    file adds its pattern here.
 
 ---
 
@@ -3140,11 +3198,11 @@ V1–V5 run in `destroy` after its reboot.
 | **O4** | logs collected | Loki holds recent lines from every namespace that runs pods, and within 2 minutes this run's ztunnel deny line for the Z1 probe, a Kubernetes event and the A1 audit events (`{job="k3s-audit"}`); the *Logs* dashboard shows them to the Viewer login |
 | **O5** | the write paths admit only be-1's Alloy | from the host, and from fe-1, a POST to `prometheus.lab.test/api/v1/write` or `loki.lab.test/loki/api/v1/push` gets 403; from be-1 without credentials, 401; a GET of either name's query API gets 404; from a `LAN_CIDR` source nothing answers |
 | **C1** | consoles | on the host, each of the five §5 console URLs (Grafana's `https://grafana.lab.test/`, Viewer) returns its login page over TLS verified against `lab.test CA` (no `-k`) and its login, read from Vault (runbook), works (3.5c's Exit; `verify` checks the pages, since the runner never reads `kv/lab/bootstrap/*`); from a `LAN_CIDR` source none answers |
-| **V1** | packages and sources | the package list equals the baseline's (no CloudStack, Podman (with netavark, aardvark-dns, conmon, crun, `uidmap`, `slirp4netns`, `dbus-user-session`, and `iptables` if the baseline lacked it), libvirt, MySQL, NFS, chrony, qemu or `dnsutils` additions; `systemd-timesyncd` back); apt sources and keys match |
-| **V2** | network | `/etc/netplan` byte-identical; no lab bridges (`cloudbr0`, `cloudbr1`, `cloud0`, `virbr0`, `podman*`); `/etc/resolv.conf` links where it did; no `inet lab` table and no nftables rules beyond the baseline's; the host reaches `LAN_GATEWAY` on `HOST_IP` |
-| **V3** | services and listeners | enabled units, timers and listening ports match the baseline; no containers, no `lab-*` units, `podman.socket` as in the baseline, no resolved drop-ins |
-| **V4** | identity and trust | users, groups and group memberships match; trust-store contents match (no `lab.test CA`) |
-| **V5** | system state and drift | loaded kernel modules, the recorded sysctl values, `/etc/hosts`, the hostname and crontabs match; the `/etc` SHA-256 manifest matches apart from the listed ignores (1.1), which the report prints. `/var/lib/lab/` and `/var/backups/lab/` are expected and excluded |
+| **V1** | packages and sources | no package in the `PACKAGES` table is installed; `systemd-timesyncd` is back; no apt source or key named by rule 26 |
+| **V2** | network | `/etc/netplan` byte-identical to `netplan.orig/`; no lab bridges (`cloudbr0`, `cloudbr1`, `cloud0`, `virbr0`, `podman*`); `/etc/resolv.conf` links where the baseline says; no `inet lab` table; the host reaches `LAN_GATEWAY` on `HOST_IP` |
+| **V3** | services | no `lab-*` units, no containers, no resolved drop-in named by rule 26 |
+| **V4** | identity and trust | users, groups and group memberships equal the baseline's; no `lab-*` certificate in the trust store |
+| **V5** | lab files | nothing rule 26 names is left; root's `authorized_keys` and `/etc/hosts` equal their copies in `files.orig/`. `/var/lib/lab/` and `/var/backups/lab/` are expected and excluded (the latter is deleted after a green report, 13.2). Not checked (accepted 2026-11-10): an edit to a file outside rule 26's names that stays installed; take a fresh snapshot if in doubt |
 
 ---
 
@@ -3174,8 +3232,12 @@ step depends on something already deleted. Every row tolerates "already gone".
 - `teardown` runs rows −1 to 6: the tenant side (the VPC, tiers and VMs, so the k3s
   cluster goes with be-1) and the Vault and `state/` entries that belong only to it. The
   host platform and the golden image template stay, so the next `up` is quick.
-- `destroy` runs every row: teardown's, then the rows marked *destroy only*, ending with
-  a reboot.
+- `destroy` first asks for confirmation (§8: the operator types `destroy`), then runs
+  every row: teardown's (no-ops if `teardown` already ran), then the rows marked
+  *destroy only*, ending with a reboot. Data is not spared: CloudStack's databases and
+  MySQL's data directory go even if they hold data.
+- Packages are undone by the one `PACKAGES` table (row 9b); files by rule 26's names;
+  users by difference (row 9a).
 
 | # | Step | Reads | Removes |
 |---|---|---|---|
@@ -3187,9 +3249,11 @@ step depends on something already deleted. Every row tolerates "already gone".
 | 5 | `tunnel`, `base` | inventory | nothing to undo on VMs that are about to be destroyed; WireGuard public keys in Vault (`kv/lab/pipeline/wg/*`) |
 | 6 | `setup` | Vault (`iac`, the `tfstate` MinIO user) | `terraform destroy` (run directly, not through the policy gate, which forbids destroying the public IP); then the state object; the `app.lab.test` and `k3s.lab.test` records |
 | 7 | `image` (*destroy only*) | Vault (admin) | the CloudStack template; MinIO `images/*` |
-| 8 | `provision` (*destroy only*) | — | CloudStack: services, system VMs, `cloud` and `cloud_usage` DBs, then **purges** `/var/lib/mysql` (an old `cloud` DB left there would poison a reinstall, rule 2), packages (libvirt included), `/etc/cloudstack/` (the generated `key` file outlives a package purge), NFS exports and `/export/*`, `/etc/nfs.conf` pins, the management server's key line in root's `authorized_keys` (the file itself if the baseline had none), the bridge-netfilter udev rule and sysctl file, drop-ins, the CloudStack apt repository, key and version pin, `cmk` |
-| 9 | `platform` (*destroy only*) | — | unregisters the runner, removes its service; as `lab-runner`, `podman system reset --force` (its rootless images, owned by sub-UIDs); `loginctl disable-linger lab-runner`; `lab-runner`'s work directory; `docker-compose down --volumes` (gateway, Prometheus, Loki and Grafana included), then disables and removes `lab-platform.service` and runs `daemon-reload`, and disables `podman.socket`; removes any containers, the three networks and the volumes left (theirs included; Loki's bucket goes with MinIO's); purges Podman and every package 2.1b and 2.10 added with it (`uidmap`, `slirp4netns`, `dbus-user-session`, and `iptables` if the baseline lacked it) and the dependencies apt pulled in with them (every package the list holds beyond the baseline's; V1), the `/etc/containers/containers.conf.d/` lab file and `/var/lib/containers`; any netavark chains left in the `ip filter` and `ip nat` tables (V2) **[verify what netavark 1.4 leaves after its last network is removed]**; `lab-nftables.service`, the `inet lab` table and `/etc/lab/`; if `decision.podman-fw` chose the fallback, its apt repository and key (2.1c; V1); the systemd-resolved drop-in and the original `/etc/resolv.conf` link; chrony removed and the `systemd-timesyncd` package **reinstalled** and enabled; the Vault and Squid logrotate rules; `/opt/lab/`; `/var/lib/lab/platform`, `/var/lib/lab/certs`, `/var/lib/lab/traefik` (dynamic routes, the users file) and `/var/lib/lab/grafana`; the lab CA from the host trust store |
-| 9a | users (*destroy only*) | baseline | `userdel`/`groupdel` every user and group the baseline does not have (`lab-runner` with its `/etc/subuid` and `/etc/subgid` lines, `cloud`, `libvirt-qemu`, `libvirt`, and memberships added to `kvm`): package purges leave them behind |
+| 8 | `provision` (*destroy only*) | — | CloudStack: services, system VMs, `cloud` and `cloud_usage` DBs, then **purges** `/var/lib/mysql` (an old `cloud` DB left there would poison a reinstall, rule 2), `/etc/cloudstack/` (the generated `key` file outlives a package purge), NFS exports and `/export/*`, `/etc/nfs.conf` pins, the management server's key line in root's `authorized_keys` (the file itself if the baseline had none), the bridge-netfilter udev rule and sysctl file, drop-ins, the CloudStack apt repository, key and version pin, `cmk` |
+| 9 | `platform` (*destroy only*) | — | unregisters the runner, removes its service; as `lab-runner`, `podman system reset --force` (its rootless images, owned by sub-UIDs); `loginctl disable-linger lab-runner`; `lab-runner`'s work directory; `docker-compose down --volumes` (gateway, Prometheus, Loki and Grafana included), then disables and removes `lab-platform.service` and runs `daemon-reload`, and disables `podman.socket`; removes any containers, the three networks and the volumes left (theirs included; Loki's bucket goes with MinIO's); the `/etc/containers/containers.conf.d/` lab file and `/var/lib/containers`; any netavark chains left in the `ip filter` and `ip nat` tables (V2) **[verify what netavark 1.4 leaves after its last network is removed]**; `lab-nftables.service`, the `inet lab` table and `/etc/lab/`; if `decision.podman-fw` chose the fallback, its apt repository and key (2.1c; V1); the systemd-resolved drop-in and the original `/etc/resolv.conf` link; the Vault and Squid logrotate rules; `/opt/lab/`; `/var/lib/lab/platform`, `/var/lib/lab/certs`, `/var/lib/lab/traefik` (dynamic routes, the users file) and `/var/lib/lab/grafana`; the lab CA from the host trust store |
+| 9a | users (*destroy only*) | baseline | `userdel`/`groupdel` every user and group the baseline does not have (`lab-runner` with its `/etc/subuid` and `/etc/subgid` lines, `cloud`, `mysql`, `libvirt-qemu`, `libvirt`, and memberships added to `kvm`), with their home directories: package purges leave them behind |
+| 9b | packages (*destroy only*) | preflight's `PACKAGES` | **only what the lab installed** (decided 2026-11-10: a package someone else installs while the lab runs is not the lab's to remove): preflight's `down()` purges exactly the `PACKAGES` table (every step's entry) (CloudStack, MySQL, libvirt, NFS, Podman and its helpers, chrony, `qemu-*`, `dnsutils`, …); then one `apt-get autoremove --purge` takes the dependencies apt pulled in (apt marked them automatic); a package the lab removed is reinstalled (`systemd-timesyncd`, which chrony replaced, rule 16); then the lab's apt sources and keys by rule 26's names |
+| 9c | lab files and shared files (*destroy only*) | `/var/backups/lab/files.orig/` | everything rule 26 names that is still there; then the backed-up shared files (root's `authorized_keys`, `/etc/hosts`) are copied back |
 | 10 | host (*destroy only*) | `/var/backups/lab/netplan.orig/` | restores the original netplan files, then inside one `netplan try` window deletes `cloud0`, `cloudbr0` and `cloudbr1` (networkd does not release a NIC from a bridge on its own) and applies the restored config; the automation confirms (SIGUSR1) only after it reaches `LAN_GATEWAY` again, otherwise it auto-reverts |
 | 11 | `state/` (*destroy only*) | — | copies `bootstrap.log` to `/var/backups/lab/destroy-<timestamp>.log`, then deletes `state/` |
 | 12 | reboot (*destroy only*) | — | — then run `destroy` again: it finds nothing left and runs the revert checks V1–V5, writing the pass/fail report (13.2) |
@@ -3246,7 +3310,7 @@ it by hand once the unseal key and snapshots are no longer needed.
 | istiod CA name constraints | DNS constrained to `cluster.local`; IP/URI constraints only if the pinned Vault accepts them (2.5d) | an offline-root PKI where the intermediate is constrained by the signing ceremony itself: out of scope; the pipeline identity that could request it already runs with host access (2.10) |
 | Management network isolation | in-guest nftables on a shared host-only bridge | private VLANs or per-VM L2 isolation, so a VM's root cannot reach another VM's mgmt NIC: needs Open vSwitch PVLAN support in CloudStack |
 | Privileged access | SSH to the host as Ubuntu ships it, from `LAN_CIDR` only (2.2); CloudStack adds the KVM host as root with a key limited by `from=` to the host's own address (3.1c) | key-only SSH hardening (the option below); AD logins (above), Teleport/Boundary with an SSH CA and session recording: the production answer, out of scope |
-| Host SSH hardening | **option, not in the core build** (moved out of 2.2 on 2026-11-10; about one M session, folds into 2.2): config key `OPERATOR_LOGIN`, which preflight requires to be a local non-root user with a usable key in the file `sshd -T -C user=<login>` names (owned by the user, not group- or world-writable); a drop-in `/etc/ssh/sshd_config.d/00-lab.conf` (sorts before cloud-init's `50-cloud-init.conf`; sshd keeps the first value) with `PasswordAuthentication no`, `KbdInteractiveAuthentication no`, `PermitRootLogin prohibit-password`, `AllowUsers <OPERATOR_LOGIN> root@<HOST_IP>` (the second for 3.1c; `user@host` avoids a `Match` block), `X11Forwarding no`, `AllowAgentForwarding no`, `PermitTunnel no`, `AllowStreamLocalForwarding no`, `AllowTcpForwarding local` (`ssh -D`, `-L`, `-J` work; `-R` does not); a per-source nftables meter on new tcp 22 connections (`limit rate over 10/minute burst 10 packets`); lockout guards: the key check re-runs, `install -d -m 0755 /run/sshd` then `sshd -t` (a failure removes the file), then `systemctl try-reload-or-restart ssh`, the applying session kept open. Check H1: `ssh -o PreferredAuthentications=none` as `OPERATOR_LOGIN`, root and an unknown user lists only `publickey`; root and a temporary keyed user from the LAN are refused. 1.1 records `sshd -T`; `destroy` removes the drop-in and reloads; V3 compares `sshd -T` with the baseline. Further tightenings: refuse stray `AllowUsers`/`AllowGroups`/`Match` lines elsewhere in the sshd config (sshd adds up `AllowUsers` from every file); a timed undo (`systemd-run --on-active=5min` removes the drop-in unless confirmed from a new session) | the core build keeps Ubuntu's SSH defaults to stay on the core functions; the risk accepted is password logins from `LAN_CIDR` if the host allows them |
+| Host SSH hardening | **option, not in the core build** (moved out of 2.2 on 2026-11-10; about one M session, folds into 2.2): config key `OPERATOR_LOGIN`, which preflight requires to be a local non-root user with a usable key in the file `sshd -T -C user=<login>` names (owned by the user, not group- or world-writable); a drop-in `/etc/ssh/sshd_config.d/00-lab.conf` (sorts before cloud-init's `50-cloud-init.conf`; sshd keeps the first value) with `PasswordAuthentication no`, `KbdInteractiveAuthentication no`, `PermitRootLogin prohibit-password`, `AllowUsers <OPERATOR_LOGIN> root@<HOST_IP>` (the second for 3.1c; `user@host` avoids a `Match` block), `X11Forwarding no`, `AllowAgentForwarding no`, `PermitTunnel no`, `AllowStreamLocalForwarding no`, `AllowTcpForwarding local` (`ssh -D`, `-L`, `-J` work; `-R` does not); a per-source nftables meter on new tcp 22 connections (`limit rate over 10/minute burst 10 packets`); lockout guards: the key check re-runs, `install -d -m 0755 /run/sshd` then `sshd -t` (a failure removes the file), then `systemctl try-reload-or-restart ssh`, the applying session kept open. Check H1: `ssh -o PreferredAuthentications=none` as `OPERATOR_LOGIN`, root and an unknown user lists only `publickey`; root and a temporary keyed user from the LAN are refused. `destroy` removes the drop-in (rule 26 names it) and reloads. Further tightenings: refuse stray `AllowUsers`/`AllowGroups`/`Match` lines elsewhere in the sshd config (sshd adds up `AllowUsers` from every file); a timed undo (`systemd-run --on-active=5min` removes the drop-in unless confirmed from a new session) | the core build keeps Ubuntu's SSH defaults to stay on the core functions; the risk accepted is password logins from `LAN_CIDR` if the host allows them |
 | Linting | **option, not in the core build** (moved out of the scaffold step on 2026-11-10; about one M session): a `lint` job in `pr.yml` running ruff, mypy, shellcheck (`bootstrap.sh`), yamllint, ansible-lint and tflint, each only over the file types that exist so far, failing when files of a type exist but its linter is missing; ruff, mypy, yamllint and ansible-lint hash-pinned in a dev requirements file this option adds, shellcheck and tflint pinned in `config/versions.toml` | not needed for the core functions; `terraform plan` + policy, `trivy config`, kubeconform and the no-Secrets rule still gate every PR (10.1) |
 | Unit tests | **option, not in the core build** (removed 2026-11-10): pytest over `lab/` in a `tests/` tree, with a `pyproject.toml`, hash-pinned dev tools in `requirements-dev.txt` and a repo `.venv/`, run as a `pr.yml` job | testing happens as the lab is built: each step's Exit is run by hand on the CLI, and every change runs through the Gitea pipeline (`pr.yml`'s gates, then `verify`); most units would only mock CloudStack, Vault and k3s |
 | `status` command | **option, not in the core build** (removed 2026-11-10): a read-only `status` command printing each phase's `check()` result, the pinned versions, Vault's seal state, the gateway, the Vault audit disk usage and host memory against the §5 budget | the core build keeps four commands; `up` and `update` log each phase's state as they converge, and a version is one `/opt/lab/bin/<tool> version` away |
@@ -3416,15 +3480,14 @@ words. A contract may name a family: `vault.policy.*`, `vm.<name>`.
 
 ### 17.4 Step index
 
-91 steps, all required: 20 S (60 min), 71 M (105 min), 144.25 h in the full study
+90 steps, all required: 19 S (60 min), 71 M (105 min), 143.25 h in the full study
 loop. Import one bead per row.
 
 | ID | Title | Needs | Phase | Size |
 |---|---|---|---|---|
 | 0.1 | Shim and package | — | 0 | M |
 | 0.2a | Command map and phase interface | 0.1 | 0 | M |
-| 0.2b | Config and pins | 0.2a | 0 | S |
-| 1.1 | Baseline and netplan backup | 0.2b | 1 | M |
+| 1.1 | Baseline and netplan backup | 0.2a | 1 | M |
 | 1.2a | Preflight checks | 1.1 | 1 | M |
 | 1.3 | Toolchain | 1.2a | 1 | M |
 | 2.1a | Host-only bridge | 1.2a | 2 | S |
@@ -3523,7 +3586,7 @@ green `deliver.yml` run plus `up`'s local stage (§13).
 
 | Old | New |
 |---|---|
-| 0.2 | 0.2a, 0.2b; 0.2c removed (2026-11-10) |
+| 0.2 | 0.2a; 0.2b folded into 1.3, 0.2c removed (2026-11-10) |
 | 1.2 | 1.2a; 1.2b removed (nested-host checks: by hand, §5) |
 | 2.1, 2.3, 2.4 | 2.1a–2.1b, 2.3a–2.3b, 2.4a–2.4b; new 2.1c (spike: netavark's firewall driver) |
 | 2.5 | 2.5a–2.5e; new 2.5f (separate roots `pki_mesh`, `pki_app`) |

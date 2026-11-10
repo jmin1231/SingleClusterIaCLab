@@ -55,7 +55,7 @@ out, and why, is in §15.
 - **Bash at the door, Python inside.** `bootstrap.sh` checks for Python ≥ 3.12 and
   changes to its own directory, then runs `exec python3 -B -m lab "$@"` (`-m` puts
   the repo root on the import path), nothing more. Every phase, check, demo and teardown
-  is Python in the `lab/` package at the repo root (no `src/` level), type-checked with mypy. External
+  is Python in the `lab/` package at the repo root (no `src/` level). External
   tools (`cmk`, `terraform`, `ansible-playbook`, `packer`, `kubectl`, `vault`,
   `istioctl`, `flux`, `helm`, `mc`, `podman`) are called through thin wrappers, never
   re-implemented. `lab` itself uses the Python standard library only (`tomllib`,
@@ -111,7 +111,7 @@ out, and why, is in §15.
 - **Pinned and immutable.** Every version, image digest, provider and chart is
   pinned in `lab/versions.py`. Images are built, scanned and published once, then
   never patched in place. Nothing installs software at container start.
-- **Gates before change.** Lint runs from the first commit. Terraform cannot apply
+- **Gates before change.** Terraform cannot apply
   without passing the policy gate, on the local path and in CI alike.
 - **Fresh host assumed, dirty host refused.** Preflight refuses a host showing
   leftovers from an earlier install rather than trying to work around them.
@@ -546,9 +546,8 @@ node only); and every gateway backend port is unreachable from a VM.
 
 ```
 bootstrap.sh                 shim: ensure Python ≥ 3.12, exec python3 -B -m lab "$@"
-pyproject.toml               ruff + mypy + pytest config (no packaging)
-requirements-dev.txt         hash-pinned dev tools for .venv/: ruff, mypy, pytest,
-                             yamllint, ansible-lint
+pyproject.toml               pytest config (no packaging)
+requirements-dev.txt         hash-pinned dev tools for .venv/: pytest
 config/lab.toml              environment values (§5), non-secret
 lab/
   __main__.py                argparse command map (§8)
@@ -661,7 +660,6 @@ the merged revision (`cmd.flux-wait`).
 | `vault-shell` | local, root | a subshell with a `lab-bootstrap` Vault token, for hand work after the root token is revoked |
 | `k3s-admin` | local, root | break-glass: a subshell whose `KUBECONFIG` is a `0600` temp file holding the cluster-admin kubeconfig from `kv/lab/breakglass/k3s-admin`, deleted on exit; logs who and when, and the API audit log (8.2d) shows every call as `system:admin`. For hand checks that need more than `lab-operator` |
 | `consoles` | local, root | prints the §5 console table; `--show <name>` prints that one login to the terminal (refused when stdout is not a TTY; never through the logger) |
-| `lint` | pipeline (`pr.yml`) and local | ruff, mypy, pytest, shellcheck (`bootstrap.sh`), yamllint, ansible-lint, tflint, `trivy config`, kubeconform over `kustomize build` of each `clusters/backend/` path, the no-Secrets-in-git rule |
 | `demo` | local | the examiner walkthrough (§13): proofs with human-readable output, re-runnable |
 | `status` | local and pipeline | read-only inventory: what exists, what `check()` says; k3s as `lab-operator` (local) or `lab-ci` (pipeline) |
 | `maintain` | local, root (run by every `lab platform`) | issues Vault's and the gateway's certificates when missing or under 10 days (the gateway's also when its SAN set in `gw.hosts` changed), and re-issues the runner's `lab-pipeline` secret_id when under 7 days |
@@ -701,13 +699,13 @@ are in §17.
 - **0.1 Shim and package.** `bootstrap.sh`; `lab/__init__.py`; `lab/lib/log.py`
   (`[+]/[!]/[x]` to the console, timestamped `state/bootstrap.log`); `lib/tracker.py`
   (atomic JSON writes via temp file + `os.replace`); `.gitignore` (`/state/`,
-  `/.venv/`, `__pycache__/`, `.mypy_cache/`, `.ruff_cache/`, `*.tfstate*`,
+  `/.venv/`, `__pycache__/`, `.pytest_cache/`, `*.tfstate*`,
   `.terraform/`, `/builds/`).
   Exit: from the repo root, `python3 -c 'import lab.lib.log'`.
 
   ⤷ **Needs** — · **Recalls** — · **Produces** `bootstrap.sh`, `lib/log.py`,
   `lib/tracker.py`, `.gitignore` · **Records** `path.repo` (checkout, remotes),
-  `path.state` · **Check** Exit; `shellcheck bootstrap.sh`
+  `path.state` · **Check** Exit
 - **0.2a Command map and phase interface.** `__main__.py` with every §8 command as a
   logged stub; the phase interface (`up/down/check`); `lib/system.py` (run, capture,
   require_root).
@@ -725,17 +723,14 @@ are in §17.
   ⤷ **Needs** 0.2a · **Recalls** `code.phase-interface` · **Produces** `config/lab.toml`,
   `lib/config.py`, `versions.py` · **Records** `code.config`, `code.versions` ·
   **Check** Exit
-- **0.2c Dev tools and lint.** `pyproject.toml`. Dev tools:
+- **0.2c Dev tools and tests.** `pyproject.toml` (pytest settings). Dev tools:
   `python3 -m venv .venv && .venv/bin/pip install --require-hashes -r
-  requirements-dev.txt` (ruff, mypy, pytest, yamllint, ansible-lint) and a pinned
-  `shellcheck` binary in `.venv/bin`, so nothing lands in the host's package list.
-  `lab lint` runs each linter only over the file types that exist so far (tflint once
-  there is a `terraform/`, kubeconform once there is a `clusters/`), and fails if files of
-  a type exist but its linter is missing; the non-Python linters arrive with 1.3.
-  Exit: `./bootstrap.sh lint` clean. **Lint stays green from here on.**
+  requirements-dev.txt` (pytest), so nothing lands in the host's package list. A first
+  test under `tests/` covers `lib/tracker.py`'s atomic write.
+  Exit: `.venv/bin/pytest` passes. **Tests stay green from here on.**
 
   ⤷ **Needs** 0.2a · **Recalls** — · **Produces** `pyproject.toml`,
-  `requirements-dev.txt`, `lab lint` · **Records** `cmd.lint`, `path.venv` · **Check** Exit
+  `requirements-dev.txt`, `tests/` · **Records** `cmd.test`, `path.venv` · **Check** Exit
 
 ### Phase 1 — Host preflight and reversibility
 
@@ -788,7 +783,7 @@ are in §17.
 - **1.3 Toolchain.** Pinned CLIs into `/opt/lab/bin`, each verified against a
   SHA-256 in `versions.py`: terraform, packer, ansible (venv in `/opt/lab/ansible`,
   with the `cloud.terraform` collection), conftest, trivy, cmk (CloudMonkey, CloudStack's
-  CLI), docker-compose (v2, run against Podman's socket, 2.1b), kubectl, istioctl, flux, helm, vault, mc, tflint, kubeconform. Host packages, from the Ubuntu
+  CLI), docker-compose (v2, run against Podman's socket, 2.1b), kubectl, istioctl, flux, helm, vault, mc, kubeconform. Host packages, from the Ubuntu
   archive at pinned versions: `qemu-system-x86` and `qemu-utils` (Packer), `dnsutils`
   (`dig`). Every package the lab adds is removed by
   `down`, so V1 holds. An archive is never extracted whole: the one named member is read
@@ -798,7 +793,7 @@ are in §17.
   Exit: `lab status` prints every tool and its version; a corrupted download is
   rejected.
 
-  ⤷ **Needs** 1.2a, 0.2c · **Recalls** `code.versions`, `cmd.lint` · **Produces**
+  ⤷ **Needs** 1.2a · **Recalls** `code.versions` · **Produces**
   `toolchain.py`, `/opt/lab/bin/*` · **Records** `path.toolchain` · **Check** Exit
 
 ### Phase 2 — Control plane
@@ -1618,11 +1613,10 @@ switching**.
 - **3.5a Seed, workflows and branch protection.** `lab platform` seeds `lab/lab`
   **once**, by pushing the current repository to the still-empty Gitea repo. The seed
   already contains `.gitea/workflows/`:
-  - `pr.yml`, whose jobs grow with the repo: `lint` and unit tests always; `terraform
-    plan` + policy once `terraform/` exists; `trivy config` once there are Dockerfiles
-    and manifests. The `lint` job builds `.venv/` in its work directory from
-    `requirements-dev.txt` (hash-pinned, 0.2c) and takes the other linters from
-    `/opt/lab/bin` (1.3)
+  - `pr.yml`, whose jobs grow with the repo: unit tests always; `terraform plan` +
+    policy once `terraform/` exists; `trivy config` once there are Dockerfiles and
+    manifests. The test job builds `.venv/` in its work directory from
+    `requirements-dev.txt` (hash-pinned, 0.2c)
   - `deliver.yml` (triggers: push to `main`, `workflow_dispatch`), with every phase
     job; a phase not written yet runs its 0.2a stub and passes
   - `schedules.yml`
@@ -1637,7 +1631,7 @@ switching**.
   `git push gitea main` is rejected.
 
   ⤷ **Needs** 2.10, 0.2c · **Recalls** `gitea.repo`, `git.remote.gitea`, `runner.label`,
-  `cmd.lint` · **Produces** `.gitea/workflows/{pr,deliver,schedules}.yml`, seed +
+  `cmd.test` · **Produces** `.gitea/workflows/{pr,deliver,schedules}.yml`, seed +
   protection in `platform.py` · **Records** `ci.workflows`, `gitea.protection`,
   `cmd.pr-flow` (branch → push → PR → merge) · **Check** Exit
 - **3.5b Hand-off: dispatch and follow.** Bootstrap dispatches `deliver.yml`
@@ -2746,7 +2740,7 @@ hardens how changes get in and adds what runs on a timer. 10.2 and 10.3a run `ve
 so they come after 12.1c.
 
 - **10.1 `pr.yml`, on every pull request** (on the one host runner, with the
-  pipeline identity: step 2.10's accepted risk): `lint` → unit tests →
+  pipeline identity: step 2.10's accepted risk): unit tests →
   `terraform plan -lock=false` → policy gate → `trivy config` on the Dockerfiles and
   manifests → kubeconform over `kustomize build` of every Kustomization path in
   `clusters/backend/` (with the Flux, Gateway API, Istio, CNPG and VSO CRD schemas
@@ -3211,6 +3205,7 @@ removes it after a confirmation prompt naming every file.
 | Management network isolation | in-guest nftables on a shared host-only bridge | private VLANs or per-VM L2 isolation, so a VM's root cannot reach another VM's mgmt NIC: needs Open vSwitch PVLAN support in CloudStack |
 | Privileged access | SSH to the host as Ubuntu ships it, from `LAN_CIDR` only (2.2); CloudStack adds the KVM host as root with a key limited by `from=` to the host's own address (3.1c) | key-only SSH hardening (the option below); AD logins (above), Teleport/Boundary with an SSH CA and session recording: the production answer, out of scope |
 | Host SSH hardening | **option, not in the core build** (moved out of 2.2 on 2026-11-10; about one M session, folds into 2.2): config key `OPERATOR_LOGIN`, which preflight requires to be a local non-root user with a usable key in the file `sshd -T -C user=<login>` names (owned by the user, not group- or world-writable); a drop-in `/etc/ssh/sshd_config.d/00-lab.conf` (sorts before cloud-init's `50-cloud-init.conf`; sshd keeps the first value) with `PasswordAuthentication no`, `KbdInteractiveAuthentication no`, `PermitRootLogin prohibit-password`, `AllowUsers <OPERATOR_LOGIN> root@<HOST_IP>` (the second for 3.1c; `user@host` avoids a `Match` block), `X11Forwarding no`, `AllowAgentForwarding no`, `PermitTunnel no`, `AllowStreamLocalForwarding no`, `AllowTcpForwarding local` (`ssh -D`, `-L`, `-J` work; `-R` does not); a per-source nftables meter on new tcp 22 connections (`limit rate over 10/minute burst 10 packets`); lockout guards: the key check re-runs, `install -d -m 0755 /run/sshd` then `sshd -t` (a failure removes the file), then `systemctl try-reload-or-restart ssh`, the applying session kept open. Check H1: `ssh -o PreferredAuthentications=none` as `OPERATOR_LOGIN`, root and an unknown user lists only `publickey`; root and a temporary keyed user from the LAN are refused. 1.1 records `sshd -T`; teardown removes the drop-in and reloads; V3 compares `sshd -T` with the baseline. Further tightenings: refuse stray `AllowUsers`/`AllowGroups`/`Match` lines elsewhere in the sshd config (sshd adds up `AllowUsers` from every file); a timed undo (`systemd-run --on-active=5min` removes the drop-in unless confirmed from a new session) | the core build keeps Ubuntu's SSH defaults to stay on the core functions; the risk accepted is password logins from `LAN_CIDR` if the host allows them |
+| Linting | **option, not in the core build** (moved out of 0.2c on 2026-11-10; about one M session): a `lint` command and `pr.yml` job running ruff, mypy, shellcheck (`bootstrap.sh`), yamllint, ansible-lint and tflint, each only over the file types that exist so far, failing when files of a type exist but its linter is missing; ruff, mypy, yamllint and ansible-lint hash-pinned in `requirements-dev.txt`, shellcheck and tflint pinned in `versions.py` | not needed for the core functions; unit tests, `terraform plan` + policy, `trivy config`, kubeconform and the no-Secrets rule still gate every PR (10.1) |
 | Egress tightening | **option, not in the core build** (added 2026-11-09; folds into 2.2, minutes of work): Gitea's public egress in rule 4 also excludes `100.64.0.0/10` (carrier-grade NAT) and `169.254.0.0/16` (link-local, where cloud metadata services listen), so a compromised Gitea cannot reach a provider's metadata endpoint or a CGNAT neighbour; the 2.2 Exit adds `169.254.169.254:443` timing out from Gitea's address | not needed for the core functions |
 | Defence in depth inside k3s | mesh identity (AuthorizationPolicy) only | Kubernetes NetworkPolicies as an L3 layer under the mesh: worth it with many teams; its interplay with ambient's HBONE port needs care, out of scope |
 | Git provenance | protected `main`, read-only Flux token | Flux verifying signed commits: needs every merge signed by a key Flux trusts, Gitea's merge commits included |
@@ -3375,7 +3370,7 @@ words. A contract may name a family: `vault.policy.*`, `vm.<name>`.
 
 ### 17.4 Step index
 
-94 steps, all required: 20 S (60 min), 74 M (105 min), 149.5 h in the full study
+94 steps, all required: 21 S (60 min), 73 M (105 min), 148.75 h in the full study
 loop. Import one bead per row.
 
 | ID | Title | Needs | Phase | Size |
@@ -3383,10 +3378,10 @@ loop. Import one bead per row.
 | 0.1 | Shim and package | — | 0 | M |
 | 0.2a | Command map and phase interface | 0.1 | 0 | M |
 | 0.2b | Config and pins | 0.2a | 0 | S |
-| 0.2c | Dev tools and lint | 0.2a | 0 | M |
+| 0.2c | Dev tools and tests | 0.2a | 0 | S |
 | 1.1 | Baseline and netplan backup | 0.2b | 1 | M |
 | 1.2a | Preflight checks | 1.1 | 1 | M |
-| 1.3 | Toolchain | 1.2a, 0.2c | 1 | M |
+| 1.3 | Toolchain | 1.2a | 1 | M |
 | 2.1a | Host-only bridge | 1.2a | 2 | S |
 | 2.1b | Podman and Compose | 2.1a, 1.3 | 2 | M |
 | 2.1c | Spike: netavark's firewall driver and rule order | 2.1b | 2 | S |

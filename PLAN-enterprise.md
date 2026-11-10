@@ -1,7 +1,7 @@
 # SingleClusterIaCLab — Build Plan
 
-One Ubuntu 24.04 host becomes a small, enterprise-shaped private cloud, built and
-torn down by one command:
+One Ubuntu 24.04 host becomes a small, enterprise-shaped private cloud, built,
+updated and torn down by one script, `bootstrap.sh`:
 
 - **IaaS:** Apache CloudStack on KVM, provisioned by Terraform from a hardened golden image.
 - **Network:** a VPC with three tiers (frontend, tunnel, backend), one VM each,
@@ -20,10 +20,13 @@ torn down by one command:
 
 `sudo ./bootstrap.sh up` bootstraps the host, the control plane, CloudStack and a
 CI runner, then hands over to the **delivery pipeline**, which builds everything
-else; `up` follows the pipeline until it finishes. `sudo ./bootstrap.sh demo` proves
-every requirement. `sudo ./bootstrap.sh down` removes it and restores the host, and
-`sudo ./bootstrap.sh revert-check` (after the reboot) proves the host matches its
-original baseline.
+else; `up` follows the pipeline until it finishes, then runs the Vault DR drill
+locally. The evidence is a green pipeline run ending in the `verify` job, plus that
+drill's output (§13). `sudo ./bootstrap.sh update` applies changed configuration to a
+built lab. `sudo ./bootstrap.sh teardown` removes the VPC and its VMs and keeps the
+host platform, so the next `up` is quick. `sudo ./bootstrap.sh destroy` removes
+everything and restores the host; run again after the reboot, it proves the host
+matches its original baseline.
 
 This document is complete on its own: everything needed to build the lab is here.
 
@@ -36,7 +39,7 @@ This document is complete on its own: everything needed to build the lab is here
 | **R1** | Construct a VPC and implement a VPN to provide access | Phases 5, 6 | N1–N6 |
 | **R2** | Deploy a database and an encryption service for a cloud application | Phases 2, 8 | E1–E3, T1–T3, Z1–Z2, P1–P5, S1–S4, K1, A1 |
 | **R3** | Back up and restore the encrypted data; show key loss destroys it | Phase 9 | B1–B3 |
-| **R4** | Reversible infrastructure: teardown restores the host exactly | Phase 13 | V1–V5 |
+| **R4** | Reversible infrastructure: `destroy` restores the host exactly | Phase 13 | V1–V5 |
 | **R5** | Pipeline-driven: after bootstrap, every build and change is a CI run with gates; k3s converges to `main` through Flux | Phases 2.10, 3.5, 8.1b, 10 | G1–G4 |
 | **R6** | Observability: metrics, logs and dashboards for the cluster, the mesh and the api | 2.7b, 8.8a, 8.8b, 8.8d | O1–O5 |
 | **R7** | Operator consoles: CloudStack, Vault, Gitea, MinIO and Grafana, from the host only, over trusted TLS, each behind its own login | 3.5c, 2.7b | C1 |
@@ -54,27 +57,32 @@ out, and why, is in §15.
   mesh). What was weighed and left out is in §15.
 - **Bash at the door, Python inside.** `bootstrap.sh` checks for Python ≥ 3.12 and
   changes to its own directory, then runs `exec python3 -B -m lab "$@"` (`-m` puts
-  the repo root on the import path), nothing more. Every phase, check, demo and teardown
+  the repo root on the import path), nothing more. It has five commands and no
+  subcommands or options: `up`, `update`, `teardown` and `destroy` (each local, each
+  refused without root) and `--help`. Every command, phase, check and teardown
   is Python in the `lab/` package at the repo root (no `src/` level). External
   tools (`cmk`, `terraform`, `ansible-playbook`, `packer`, `kubectl`, `vault`,
   `istioctl`, `flux`, `helm`, `mc`, `podman`) are called through thin wrappers, never
   re-implemented. `lab` itself uses the Python standard library only (`tomllib`,
-  `subprocess`, `json`, `urllib`), so running it installs nothing; dev tools live in a
-  gitignored `.venv/` (0.2c). The only shell in the repo is the shim; CloudStack is
-  installed by an Ansible role (3.1a), not a vendored script.
+  `subprocess`, `json`, `urllib`), so running it installs nothing. The only shell in
+  the repo is the shim; CloudStack is installed by an Ansible role (3.1a), not a
+  vendored script.
 - **Bootstrap by hand, everything else by pipeline.** `bootstrap.sh` builds only what
   must exist before CI can run: the host, the control plane, CloudStack and the
   runner (Phases 1–3). From Phase 4 on, every phase is a job in the delivery
-  pipeline, and each job runs the same `python3 -m lab <command>` a person would.
+  pipeline, and each job runs its phase module directly (`python3 -B -m lab.<module>`,
+  e.g. `python3 -B -m lab.setup`).
   Inside k3s, **Flux** applies what `main` holds (GitOps); jobs never `kubectl apply`
   manifests, they only write the run-time Secrets Flux waits for (§6).
-  Running a pipeline phase by hand needs `--break-glass`, which is logged and runs
-  the phase as `lab-runner` (never as root, so it leaves no root-owned files behind
-  for later jobs) from a fresh clone of Gitea's `main` (or `--ref <branch>`) in a
-  temporary directory, never from the operator's checkout. Only
-  bootstrap, `demo`, `down`, `revert-check`, `dr-drill`, `vault-shell`, `k3s-admin`, `consoles` and unsealing
-  Vault after a reboot run locally, as root with the `lab-bootstrap` identity, because CI cannot exist before
-  them or would not survive them.
+  A pipeline phase has no `bootstrap.sh` command: it runs as a `deliver.yml` job, as
+  `lab-runner` (never as root, so it leaves no root-owned files behind for later jobs),
+  from a clone of Gitea's `main`; a merge, `up` or `update` dispatches the run. While
+  developing it, the operator runs the same module by hand, also as `lab-runner`, from
+  a clone of their branch (§9). Only the four `bootstrap.sh` commands run
+  locally, as root with the `lab-bootstrap` identity: bootstrap, unsealing Vault after a
+  reboot, the Vault DR drill and teardown, because CI cannot exist before them, would
+  not survive them, or must never hold the unseal key or break-glass credentials they
+  use.
 - **The development loop.** The working checkout (cloned from GitHub) has a second
   remote, `gitea` = `https://gitea.lab.test/lab/lab.git`, which is the origin the
   pipeline builds from. The operator works as the Gitea user `operator` (write access
@@ -86,8 +94,9 @@ out, and why, is in §15.
   short-lived token (`GITEA_TOKEN`, which act_runner provides) into its work directory;
   the runner never runs code from the operator's checkout.
 - **Every phase owns its teardown.** Each phase module exports `up()`, `down()` and
-  `check()`. `down` composes the `down()`s in reverse build order, so a phase can't
-  be built without the code to remove it.
+  `check()`. `teardown` and `destroy` compose the `down()`s in reverse build order
+  (`teardown` stops before the host platform), so a phase can't be built without the
+  code to remove it.
 - **Always converge; skip only expensive builds.** Every job runs its idempotent
   converge on every run (`terraform plan/apply`, Ansible, Flux reconciling `main`), so a
   merged change always reaches the lab and an unchanged lab produces no changes.
@@ -98,7 +107,7 @@ out, and why, is in §15.
 - **Least privilege.** Terraform uses a scoped CloudStack account. Each workload and
   the pipeline gets its own Vault identity and policy. The Vault root token is
   revoked after bootstrap. The CloudStack global admin is used only where nothing
-  less works: installing CloudStack (bootstrap) and `down`. Terraform runs as `iac`;
+  less works: installing CloudStack (bootstrap) and removing it (`destroy`). Terraform runs as `iac`;
   the golden image is registered by a separate account, `publisher` (3.2a). Flux reads
   git with a read-only token; console logins are read-only identities (3.5c). The k3s
   API follows the same rule (8.2c): Flux's own controllers do every apply; jobs and people
@@ -295,7 +304,7 @@ Everything else that listens on the host (CloudStack's cluster port 9090, libvir
 MySQL on `127.0.0.1`) is dropped from any non-local source.
 
 Other names: `app.lab.test` → the VPC public IP; `k3s.lab.test` → be-1's mgmt
-address `10.250.0.112`. Both are written by `lab setup` (5.4b). The one gateway certificate carries every gateway name and no IP
+address `10.250.0.112`. Both are written by the `setup` job (5.4b). The one gateway certificate carries every gateway name and no IP
 SAN; Vault's carries `vault.lab.test` and `10.250.0.1`.
 
 Every name resolves the same for every asker. The gateway names point at `10.250.0.1`,
@@ -310,9 +319,8 @@ the node's resolver.
 **Consoles** (R7). Each is reached from a browser **on the host** (from a workstation:
 `ssh -D` to the host and browse through that SOCKS proxy with remote DNS, so the traffic
 still originates on the host). Every URL serves a `lab.test CA` certificate; nothing
-answers from the LAN. Credentials are generated at run time into Vault and shown only by
-`sudo ./bootstrap.sh consoles --show <name>`, which prints to a terminal and never to a
-log (3.5c).
+answers from the LAN. Credentials are generated at run time into Vault (3.5c) and read
+by hand as `lab-bootstrap`, on a terminal and never into a log (runbook, 14.4).
 
 | Console | URL | Login (read-only unless noted) | Credential in Vault |
 |---|---|---|---|
@@ -325,7 +333,7 @@ log (3.5c).
 **Host capacity: 32 GB RAM is the ceiling, not a target.** The lab must fit
 under it with a reserve, at its peak, with no memory overcommit (CloudStack
 `mem.overprovisioning.factor = 1.0`, no swap counted). Figures are estimates until
-measured; after each phase, `lab status --capacity` prints the measured steady-state
+measured; after each phase, `up` logs the host's measured steady-state
 RSS, and the operator records it in `docs/capacity.md` through a normal pull request, and `up` refuses to start a phase if the host's available memory
 would drop below the **4 GB reserve**.
 
@@ -386,17 +394,17 @@ exist outside Vault, and each one is listed with its location and protection.
 | Secret | Lives in | Protection / rotation |
 |---|---|---|
 | Vault unseal key + initial root token | `/var/lib/lab/vault-init.json` (outside the repo) | root `0600`. The root token is used for steps 2.4b–2.5e only, then **revoked**; regenerate it with `vault operator generate-root` when needed. The unseal key is the one thing to back up offline. A later `up` never overwrites it: 2.4 archives it first (with the backups it opens) |
-| Runner registration and pipeline AppRole (`lab-pipeline`) role_id + secret_id | `/var/lib/lab/runner/` | owned by `lab-runner`, `0600`; secret_id TTL 30 days, re-issued by `lab maintain` (as `lab-bootstrap`, run by every `lab platform`) when under 7 days remain; never stored in Gitea or the repo. Every job, PR jobs included, runs on the host as `lab-runner` and can use this identity: an accepted risk for a single-operator lab (§15) |
+| Runner registration and pipeline AppRole (`lab-pipeline`) role_id + secret_id | `/var/lib/lab/runner/` | owned by `lab-runner`, `0600`; secret_id TTL 30 days, re-issued by the renewal that every `up` and `update` runs (as `lab-bootstrap`, inside the platform phase) when under 7 days remain; never stored in Gitea or the repo. Every job, PR jobs included, runs on the host as `lab-runner` and can use this identity: an accepted risk for a single-operator lab (§15) |
 | Gitea `operator` password and its personal access token | the password in `kv/lab/bootstrap/gitea-operator`; the token in the operator's own git credential store | created in 2.8; the token is the operator's, scoped to repository write |
 | Pipeline registry credential (Gitea user `lab-ci`, token with `write:package` on org `lab` only) | `kv/lab/pipeline/gitea-ci` | created in 2.8; read by the `app` job into a temp `REGISTRY_AUTH_FILE` |
 | Flux's Gitea credential (user `lab-flux`, Read on `lab/lab` only, token scoped `read:repository`) | `kv/lab/pipeline/gitea-flux`; Secret `flux-system/gitea-auth` | created in 2.8; written to k3s on stdin by the `cluster` job (8.1b); it cannot push |
 | GitHub mirror token (optional) | `kv/lab/bootstrap/github-mirror`, and Gitea's mirror settings | fine-grained token with push to the one GitHub repository, entered by the operator at the 2.8 prompt; no token → no mirror |
-| Bootstrap AppRole (`lab-bootstrap`) role_id + secret_id | `/var/lib/lab/approle.json` | root `0600`; secret_id TTL 30 days. Every `lab` run re-issues it when under 7 days remain (it authenticates with the current one). If it ever expires, recovery is `vault operator generate-root` with the unseal key |
+| Bootstrap AppRole (`lab-bootstrap`) role_id + secret_id | `/var/lib/lab/approle.json` | root `0600`; secret_id TTL 30 days. Every `bootstrap.sh` command re-issues it when under 7 days remain (it authenticates with the current one). If it ever expires, recovery is `vault operator generate-root` with the unseal key |
 | Lab SSH private key (Ansible → VMs) | Vault KV; written to a per-job `0600` temp directory with its own `known_hosts` (`StrictHostKeyChecking=accept-new`, so replaced VMs do not break SSH) | deleted when the job ends |
 | Tool credentials (`cmk` API keys, `mc` aliases, registry login) | per-job temp configs only: `cmk` with a temp config file, `mc` through `MC_HOST_*` variables, Podman through a temp `REGISTRY_AUTH_FILE` | nothing credential-bearing persists in `lab-runner`'s home between jobs |
-| k3s break-glass kubeconfig (cluster-admin: k3s's `system:admin` client certificate, group `system:masters`) | Vault `kv/lab/breakglass/k3s-admin`; the node's own copy `/etc/rancher/k3s/k3s.yaml` on be-1, root `0600` | deposited by the `cluster` job whenever the `k3s` role (re)installs k3s; its `lab-pipeline` policy may only **write** that path (create and update, never read or list it); read only by `lab-bootstrap`, for `lab k3s-admin`, `down` (§14 rows 0–3) and the two `demo` proofs that need it (S4, G4), each read in Vault's audit log and each API call in k3s's (8.2d). A client certificate cannot be revoked (only `k3s certificate rotate-ca` ends it), which is why it is never on disk beyond one command's `0600` temp file. Until 8.2c it sits at `kv/lab/pipeline/k3s` as the build's scaffold; 8.2c moves it. Deleted by `down` |
+| k3s break-glass kubeconfig (cluster-admin: k3s's `system:admin` client certificate, group `system:masters`) | Vault `kv/lab/breakglass/k3s-admin`; the node's own copy `/etc/rancher/k3s/k3s.yaml` on be-1, root `0600` | deposited by the `cluster` job whenever the `k3s` role (re)installs k3s; its `lab-pipeline` policy may only **write** that path (create and update, never read or list it); read only by `lab-bootstrap`, by `teardown` (§14 rows 0–3) and by hand through the runbook (14.4; e.g. 8.4a's port-forward and 12.1f's drift test), each read in Vault's audit log and each API call in k3s's (8.2d). A client certificate cannot be revoked (only `k3s certificate rotate-ca` ends it), which is why it is never on disk beyond one command's `0600` temp file. Until 8.2c it sits at `kv/lab/pipeline/k3s` as the build's scaffold; 8.2c moves it. Deleted by `teardown` |
 | k3s API tokens for jobs and people (ServiceAccounts `lab-ci`, `lab-dbops`, `lab-operator` in ns `lab-access`) | nowhere at rest: Vault's Kubernetes secrets engine `k3s-creds/` requests each one from the API (TokenRequest) when a command starts | `lab-ci` 1 h, `lab-dbops` 15 min, `lab-operator` 1 h; written into a per-command `0600` temp kubeconfig with the k3s CA (rule 21) and deleted after; they expire, so none needs revoking. `lab-pipeline` may request all three, `lab-bootstrap` all three (8.2c) |
-| Token-issuer JWT (SA `lab-access/vault-token-issuer`) | its long-lived token Secret in k3s, and Vault's `k3s-creds/config` | read on be-1 by the `k3s` Ansible role, never by a job's k3s identity; it may only create tokens for the three ServiceAccounts above (`serviceaccounts/token` with `resourceNames`), so a rewritten Vault role cannot mint anything stronger; rotated by re-running `lab cluster` |
+| Token-issuer JWT (SA `lab-access/vault-token-issuer`) | its long-lived token Secret in k3s, and Vault's `k3s-creds/config` | read on be-1 by the `k3s` Ansible role, never by a job's k3s identity; it may only create tokens for the three ServiceAccounts above (`serviceaccounts/token` with `resourceNames`), so a rewritten Vault role cannot mint anything stronger; rotated by re-running the `cluster` job |
 | WireGuard private keys | generated **on** each VM; never leave it | public keys published to Vault KV |
 | Postgres superuser | none: the CNPG `Cluster` sets `enableSuperuserAccess: false`, so no superuser password exists, and `pg_hba` rejects `postgres` from every network address, a `kubectl port-forward` included (8.4a, S4) | maintenance (`pg_dump`, `pg_restore`) runs as `postgres` over the instance pod's local socket through `kubectl exec` as `lab-dbops`, the only identity allowed to exec, and only into `postgres-1` (8.2c, 9.1a) |
 | Postgres `app` password | `kv/app/db` (create-once, 8.4b); synced by the Vault Secrets Operator into Secret `db/app-db`, which only CNPG reads to set the role's password | the api reads it from Vault directly, never from the Secret. A new KV version re-syncs the Secret and CNPG re-sets the role (rule 23) |
@@ -406,18 +414,18 @@ exist outside Vault, and each one is listed with its location and protection.
 | istiod signing CA key | k8s Secret `istio-system/cacerts` | generated in the `mesh` job's memory, signed by `pki_mesh` (8.3a), written on stdin; encrypted at rest; 1-year TTL, so no rotation in the lab |
 | Backend gateway TLS key (`api.backend.lab.test`) | Secret `ingress/backend-tls` | generated in the `app` job's memory, signed by `pki_app/sign/backend-gw`, written on stdin, never on disk; re-issued under 10 days (8.7d) |
 | fe-1's client key (`frontend.app.lab.test`) | `/etc/frontend/tls/` on fe-1, `0600`, owned by the frontend container's UID | generated **on** fe-1; only its CSR leaves, signed by `pki_app/sign/frontend-client` (8.7g); re-signed under 10 days |
-| Grafana admin password | `kv/lab/bootstrap/grafana-admin`; rendered to `/var/lib/lab/platform/grafana.env` | generated once by `lab platform` (rule 18); used only to create Grafana's `operator` login and verify service account (2.7b, 3.5c) |
-| Alloy write credential (username `alloy-v<N>`, password) | `kv/app/alloy-write`; its bcrypt hash in `/var/lib/lab/traefik/alloy.htpasswd`; Secret `monitoring/alloy-write` | created once by `lab platform` (rule 18); synced by VSO (SA `monitoring/vso-monitoring`, role `vso-monitoring`); it can only append metrics and logs, and only from `10.250.0.112` (2.7b). Rotation: a new KV version with the next username; the users file keeps the current and the previous entry until VSO has re-synced, so no batch is refused |
-| Grafana verify token (a Viewer service account) | `kv/lab/pipeline/grafana-verify` | created by `lab platform` through Grafana's API (2.7b); `verify` and the `monitoring` job query Prometheus and Loki with it through Grafana |
-| Console logins (Vault, MinIO, CloudStack, Grafana `operator`) | `kv/lab/bootstrap/{vault,minio,cs,grafana}-operator` | read-only identities created in 3.5c (Grafana's: role Viewer); shown only by `lab consoles --show` on a terminal |
+| Grafana admin password | `kv/lab/bootstrap/grafana-admin`; rendered to `/var/lib/lab/platform/grafana.env` | generated once by the platform phase (rule 18); used only to create Grafana's `operator` login and verify service account (2.7b, 3.5c) |
+| Alloy write credential (username `alloy-v<N>`, password) | `kv/app/alloy-write`; its bcrypt hash in `/var/lib/lab/traefik/alloy.htpasswd`; Secret `monitoring/alloy-write` | created once by the platform phase (rule 18); synced by VSO (SA `monitoring/vso-monitoring`, role `vso-monitoring`); it can only append metrics and logs, and only from `10.250.0.112` (2.7b). Rotation: a new KV version with the next username; the users file keeps the current and the previous entry until VSO has re-synced, so no batch is refused |
+| Grafana verify token (a Viewer service account) | `kv/lab/pipeline/grafana-verify` | created by the platform phase through Grafana's API (2.7b); `verify` and the `monitoring` job query Prometheus and Loki with it through Grafana |
+| Console logins (Vault, MinIO, CloudStack, Grafana `operator`) | `kv/lab/bootstrap/{vault,minio,cs,grafana}-operator` | read-only identities created in 3.5c (Grafana's: role Viewer); read by hand on a terminal, never into a log (runbook, 14.4) |
 | Vault Secrets Operator's Vault token | the operator's memory | Kubernetes login as SA `db/vso-db` to role `vso-db`, which may read `kv/data/app/db` only, and as SA `monitoring/vso-monitoring` to role `vso-monitoring`, `kv/data/app/alloy-write` only; 1-hour TTL |
-| Vault token-reviewer JWT | k8s Secret for SA `vault-auth`, and Vault's `auth/k3s/config` | encrypted at rest; read on be-1 by the `k3s` role (from 8.2c); rotated by re-running `lab cluster` |
-| CloudStack DB password and database encryption keys | `/etc/cloudstack/management/db.properties` and `key`, MySQL, Vault `kv/lab/bootstrap/cloudstack` | root-only; generated per install by 3.1a (never `cloud:cloud` or the `password` key defaults); removed in teardown |
-| Control-plane start-up credentials (MinIO root, Gitea admin, Grafana admin, Loki's MinIO user), the gateway's users file (Alloy's bcrypt hash) and the two host TLS keys (Vault's listener, the gateway) | `/var/lib/lab/platform/*.env`, `/var/lib/lab/traefik/alloy.htpasswd`, `/var/lib/lab/certs/` | root `0600`, rendered from Vault by `lab platform` and `lab maintain`; never in the repo |
+| Vault token-reviewer JWT | k8s Secret for SA `vault-auth`, and Vault's `auth/k3s/config` | encrypted at rest; read on be-1 by the `k3s` role (from 8.2c); rotated by re-running the `cluster` job |
+| CloudStack DB password and database encryption keys | `/etc/cloudstack/management/db.properties` and `key`, MySQL, Vault `kv/lab/bootstrap/cloudstack` | root-only; generated per install by 3.1a (never `cloud:cloud` or the `password` key defaults); removed by `destroy` |
+| Control-plane start-up credentials (MinIO root, Gitea admin, Grafana admin, Loki's MinIO user), the gateway's users file (Alloy's bcrypt hash) and the two host TLS keys (Vault's listener, the gateway) | `/var/lib/lab/platform/*.env`, `/var/lib/lab/traefik/alloy.htpasswd`, `/var/lib/lab/certs/` | root `0600`, rendered from Vault by the platform phase and the renewal, on every `up` and `update`; never in the repo |
 | fe-1's TLS key (`app.lab.test`) | `/etc/caddy/tls/` on fe-1 | generated **on** fe-1; only its CSR leaves the VM, signed by the `app` job through `pki/sign/app-edge`; an `app` run re-signs it when under 10 days remain |
 
 **Everything else lives only in Vault** (the start-up credentials above are rendered
-copies of Vault entries, refreshed by `lab platform`), split by who may read it:
+copies of Vault entries, refreshed by the platform phase), split by who may read it:
 
 - `kv/lab/bootstrap/*` (only `lab-bootstrap`): CloudStack admin API keys, MinIO
   root, Gitea admin, Grafana admin, the runner registration token, the console logins
@@ -452,9 +460,9 @@ listing and deleting, which is the usual cause of an unexpected 403.
    `SIGHUP`. The bootstrap certificate is gone.
 4. The CA is installed into the host trust store. It is baked into the golden image,
    so every VM trusts it from first boot.
-5. Every other certificate comes from Vault: the gateway's via `lab maintain` (30-day
-   TTL, longer than the build window: `lab platform` re-issues one under 10 days, no
-   timer); fe-1's edge certificate via `pki/sign/app-edge` (8.7f); the backend
+5. Every other certificate comes from Vault: the gateway's via the renewal that every
+   `up` and `update` runs (30-day TTL, longer than the build window: re-issued under 10
+   days, no timer); fe-1's edge certificate via `pki/sign/app-edge` (8.7f); the backend
    gateway's server certificate and fe-1's client certificate via `pki_app` (8.7d,
    8.7g); the istiod CA via
    `pki_mesh/root/sign-intermediate` (8.3a). Mesh workload certificates come from
@@ -546,11 +554,9 @@ node only); and every gateway backend port is unreachable from a VM.
 
 ```
 bootstrap.sh                 shim: ensure Python ≥ 3.12, exec python3 -B -m lab "$@"
-pyproject.toml               pytest config (no packaging)
-requirements-dev.txt         hash-pinned dev tools for .venv/: pytest
 config/lab.toml              environment values (§5), non-secret
 lab/
-  __main__.py                argparse command map (§8)
+  __main__.py                argparse map: up, update, teardown, destroy, --help (§8)
   versions.py                every pin: CloudStack (version, repo key fingerprint), Terraform provider, k3s, Flux, Istio,
                              Gateway API, Helm charts (version + SHA-256), images (by
                              digest: Prometheus, Loki and Grafana included), the
@@ -560,8 +566,8 @@ lab/
                              kube, flux, helm, vault, minio, podman — thin wrappers only
   policies/                  Vault policy bodies (HCL), written by bootstrap only (2.5d)
   preflight.py toolchain.py platform.py provision.py image.py setup.py base.py tunnel.py
-  cluster.py mesh.py app.py monitoring.py backup.py verify.py demo.py consoles.py
-  status.py teardown.py revert.py maintain.py
+  cluster.py mesh.py app.py monitoring.py backup.py verify.py consoles.py
+  teardown.py revert.py maintain.py
 platform/                    compose.yaml + config: traefik/ (static config, dynamic
                              routes), coredns/, vault/, minio/, gitea/, squid/
                              (allowlist.txt), prometheus/ (config, the rendered mixin
@@ -601,10 +607,9 @@ clusters/backend/            everything Flux applies to k3s (no Secret values, e
 app/                         api/ and frontend/ (Flask), each with Dockerfile and
                              requirements.txt (hash-pinned); frontend/ also holds the
                              Caddyfile and the Podman quadlet units for fe-1
-tests/                       pytest for lab/; verify/demo helpers
 .gitea/workflows/            pr.yml (gates on every PR), deliver.yml (Phases 4–12 on
                              main), schedules.yml (nightly backup and verify)
-docs/                        capacity.md, walkthrough.md
+docs/                        capacity.md, runbook.md
 state/                       local run state (gitignored): bootstrap log, tracker. Pipeline
                              jobs keep **no** local state between jobs (§9 intro)
 ```
@@ -613,13 +618,16 @@ state/                       local run state (gitignored): bootstrap log, tracke
 
 ## 8. Commands and build order
 
-Every command is `python3 -m lab <command>`, whether a person runs it through
-`bootstrap.sh` or the runner runs it as a pipeline job. The tables are in **build
-order**.
+`bootstrap.sh` execs `python3 -B -m lab "$@"` and has exactly five commands: `up`,
+`update`, `teardown`, `destroy` and `--help` (last table below). There are no
+subcommands and no flags. The phases are Python modules with `up/down/check`, not
+commands: `up` and `update` run them, and a pipeline job runs its phase module
+directly, `python3 -B -m lab.<module>` (e.g. `python3 -B -m lab.setup`). The first two
+tables are in **build order**.
 
-**Bootstrap: local, through `bootstrap.sh`** (CI cannot exist before these)
+**Bootstrap: local, run by `up`** (CI cannot exist before these)
 
-| # | Command | Phase | Needs |
+| # | Stage | Phase | Needs |
 |---|---|---|---|
 | 1 | `preflight` | 1 | — |
 | 2 | `platform` | 2, 3 | preflight. Runs Phase 2 (control plane, gateway, telemetry stores and Grafana, runner), then Phase 3 (CloudStack), then the 3.5 hand-off (3.5a–3.5b) |
@@ -650,22 +658,26 @@ No job applies a manifest to k3s: a merge that changes `clusters/backend/` is ap
 Flux within a minute, and each job only waits for its Kustomizations to report Ready at
 the merged revision (`cmd.flux-wait`).
 
-**Other commands**
+**Commands: `bootstrap.sh`** (all local; each of the four calls `require_root`, `--help` does not)
 
-| Command | Where | Runs |
+| Command | Runs |
+|---|---|
+| `up` | First build and resume. `preflight` → `platform` (Phases 2–3 and the 3.5 hand-off) → dispatches `deliver.yml` and follows it. Each step resumes at the first phase whose `check()` fails. Unseals Vault when it is sealed (after a host reboot, before the pipeline can read secrets) and runs the renewal: issues Vault's and the gateway's certificates when missing or under 10 days (the gateway's also when its SAN set in `gw.hosts` changed), and re-issues the runner's `lab-pipeline` secret_id when under 7 days (the `platform` phase runs the same renewal). After the pipeline is green, its **local stage** runs as root: the Vault DR drill (9.3a–9.4, proves B2/B3; it needs the unseal key, which the runner can never read), then it prints the `verify` job's pass/fail summary |
+| `update` | For a lab already built; otherwise it refuses with "run `up` first". Applies what changed in `config/lab.toml` or the YAML, Compose and manifest files: unseals when sealed, runs the renewal, re-runs the platform phases so each converges to the current files (a changed host service is re-applied, e.g. `docker-compose up -d` recreates the changed containers), then dispatches `deliver.yml` on `main` and follows it. Changes under `clusters/` still reach k3s through git and Flux. No preflight dirty-host refusal, no DR drill |
+| `teardown` | The tenant side only: the VPC, tiers and VMs (fe-1, tun-1, be-1, so the k3s cluster goes with be-1) and the state and Vault entries that belong only to them (e.g. the break-glass kubeconfig). Keeps the host platform (control plane, Vault, Gitea, MinIO, telemetry, CloudStack, runner, golden-image template), so the next `up` is quick |
+| `destroy` | Teardown's rows, then the platform and host restore, in §14 order. Ends with a reboot (it removes the runner, so it cannot run in CI). Run again after the reboot, it finds nothing left, runs the revert checks V1–V5 and writes the pass/fail report. Every row tolerates "already gone" |
+| `--help` | Lists the four commands; needs no root |
+
+**Pipeline-only jobs** (not `bootstrap.sh` commands; each runs `python3 -B -m lab.<module>`)
+
+| Job | Where | Runs |
 |---|---|---|
-| `up` | local | `preflight` → `platform` → dispatches `deliver.yml` and follows it. Each step resumes at the first phase whose `check()` fails. |
-| `backup` / `restore-drill` | pipeline (`schedules.yml` nightly / dispatch) | Phase 9.1a–9.2 (`restore-drill` takes a fresh backup first) |
-| `dr-drill` | local, root | Phase 9.3a–9.4: it needs the unseal key, which the runner can never read |
-| `vault-shell` | local, root | a subshell with a `lab-bootstrap` Vault token, for hand work after the root token is revoked |
-| `k3s-admin` | local, root | break-glass: a subshell whose `KUBECONFIG` is a `0600` temp file holding the cluster-admin kubeconfig from `kv/lab/breakglass/k3s-admin`, deleted on exit; logs who and when, and the API audit log (8.2d) shows every call as `system:admin`. For hand checks that need more than `lab-operator` |
-| `consoles` | local, root | prints the §5 console table; `--show <name>` prints that one login to the terminal (refused when stdout is not a TTY; never through the logger) |
-| `demo` | local | the examiner walkthrough (§13): proofs with human-readable output, re-runnable |
-| `status` | local and pipeline | read-only inventory: what exists, what `check()` says; k3s as `lab-operator` (local) or `lab-ci` (pipeline) |
-| `maintain` | local, root (run by every `lab platform`) | issues Vault's and the gateway's certificates when missing or under 10 days (the gateway's also when its SAN set in `gw.hosts` changed), and re-issues the runner's `lab-pipeline` secret_id when under 7 days |
-| `unseal` | local | after a host reboot, before the pipeline can read secrets |
-| `down` | local | §14 order. Ends with a reboot (it removes the runner, so it cannot run in CI) |
-| `revert-check` | local | after the reboot: asserts the host baseline (V1–V5) |
+| `verify` | last job of `deliver.yml`; nightly in `schedules.yml` | Phase 12; non-zero on any failure. A green run ending in `verify`, plus `up`'s local-stage output, is the lab's evidence (§13) |
+| `backup` / `restore-drill` | `schedules.yml` nightly / dispatch | Phase 9.1a–9.2 (`restore-drill` takes a fresh backup first) |
+
+Hand work that is not a command (reading a console login from Vault, a Vault shell
+with the `lab-bootstrap` AppRole, the break-glass k3s kubeconfig) is a short procedure
+in `docs/runbook.md` (14.4). A read-only `status` inventory is a §15 option.
 
 ---
 
@@ -676,7 +688,8 @@ Each step fits one focused session and ends with an **Exit** you can run. Phases
 `deliver.yml`, and its Exit is checked on the pipeline run.** Jobs share nothing on
 disk: Terraform state is in MinIO, the inventory comes from it, the kubeconfig and
 every secret come from Vault, and "is this phase done?" is answered by `check()`. While developing a
-phase, run it by hand with `--break-glass`, then prove it from the pipeline.
+phase, run its module by hand as `lab-runner` from a clone of your branch
+(`sudo -u lab-runner python3 -B -m lab.<module>`), then prove it from the pipeline.
 
 **Steps and handoffs.** Every step is sized for one session (one context window): one
 outcome, a few files, **S** (60 min) or **M** (105 min) in the study loop. A split step
@@ -699,38 +712,30 @@ are in §17.
 - **0.1 Shim and package.** `bootstrap.sh`; `lab/__init__.py`; `lab/lib/log.py`
   (`[+]/[!]/[x]` to the console, timestamped `state/bootstrap.log`); `lib/tracker.py`
   (atomic JSON writes via temp file + `os.replace`); `.gitignore` (`/state/`,
-  `/.venv/`, `__pycache__/`, `.pytest_cache/`, `*.tfstate*`,
-  `.terraform/`, `/builds/`).
+  `__pycache__/`, `*.tfstate*`, `.terraform/`, `/builds/`).
   Exit: from the repo root, `python3 -c 'import lab.lib.log'`.
 
   ⤷ **Needs** — · **Recalls** — · **Produces** `bootstrap.sh`, `lib/log.py`,
   `lib/tracker.py`, `.gitignore` · **Records** `path.repo` (checkout, remotes),
   `path.state` · **Check** Exit
-- **0.2a Command map and phase interface.** `__main__.py` with every §8 command as a
-  logged stub; the phase interface (`up/down/check`); `lib/system.py` (run, capture,
-  require_root).
-  Exit: `./bootstrap.sh --help` lists every command; `sudo ./bootstrap.sh up` logs each
-  stub.
+- **0.2a Command map and phase interface.** `__main__.py` with the four §8 commands
+  (`up`, `update`, `teardown`, `destroy`) as logged stubs, plus `--help`; no subcommands
+  and no flags; each command calls `require_root`, `--help` does not. The phase
+  interface (`up/down/check`); `lib/system.py` (run, capture, require_root).
+  Exit: `./bootstrap.sh --help` lists exactly `up`, `update`, `teardown`, `destroy`;
+  `sudo ./bootstrap.sh up` logs each stub.
 
   ⤷ **Needs** 0.1 · **Recalls** `path.state` · **Produces** `__main__.py`,
   `lib/system.py` · **Records** `code.phase-interface`, `code.system` · **Check** Exit
 - **0.2b Config and pins.** `config/lab.toml` with the §5 defaults; `lib/config.py`
   (load and validate types and required keys; the cross-checks, such as overlaps, are
   preflight's, 1.2a); `versions.py`.
-  Exit: `lab status` prints the loaded config; a config with a missing key or a wrong
-  type is refused naming the key.
+  Exit: `sudo ./bootstrap.sh up` logs the loaded config before its stubs; a config with
+  a missing key or a wrong type is refused naming the key.
 
   ⤷ **Needs** 0.2a · **Recalls** `code.phase-interface` · **Produces** `config/lab.toml`,
   `lib/config.py`, `versions.py` · **Records** `code.config`, `code.versions` ·
   **Check** Exit
-- **0.2c Dev tools and tests.** `pyproject.toml` (pytest settings). Dev tools:
-  `python3 -m venv .venv && .venv/bin/pip install --require-hashes -r
-  requirements-dev.txt` (pytest), so nothing lands in the host's package list. A first
-  test under `tests/` covers `lib/tracker.py`'s atomic write.
-  Exit: `.venv/bin/pytest` passes. **Tests stay green from here on.**
-
-  ⤷ **Needs** 0.2a · **Recalls** — · **Produces** `pyproject.toml`,
-  `requirements-dev.txt`, `tests/` · **Records** `cmd.test`, `path.venv` · **Check** Exit
 
 ### Phase 1 — Host preflight and reversibility
 
@@ -760,8 +765,8 @@ are in §17.
 - **1.2a Preflight checks.** Checks, each failing with a message that names what it found:
   - Ubuntu 24.04; `/dev/kvm` usable; CPU and disk against §5; `MemTotal` ≥ 30 GiB
     (a 32 GB host reports about 31 GiB) with the §5 peak + 4 GB reserve fitting (warn
-    above 32 GB: the budget is the ceiling, not the hardware). `lab status --capacity`
-    (§5) reports from the same memory reader
+    above 32 GB: the budget is the ceiling, not the hardware). `up` checks the §5
+    reserve before each phase with the same memory reader
   - `HOST_IP` is static in netplan (no `dhcp4: true` on the LAN interface)
   - strict `apt-get update` (fail naming any broken source)
   - config values valid and non-overlapping (the runner's sub-ID range, 2.10, also
@@ -778,7 +783,7 @@ are in §17.
   Phase 2 exists: passes, and resumes, after an `up` interrupted in Phase 2.)
 
   ⤷ **Needs** 1.1 · **Recalls** `path.baseline`, `path.install-id` · **Produces**
-  `preflight.py` checks, `lab status --capacity` · **Records** `net.host` (`HOST_IP`,
+  `preflight.py` checks, the memory reader · **Records** `net.host` (`HOST_IP`,
   LAN NIC, `LAN_CIDR`, `LAN_GATEWAY` as configured), `host.memory` · **Check** Exit
 - **1.3 Toolchain.** Pinned CLIs into `/opt/lab/bin`, each verified against a
   SHA-256 in `versions.py`: terraform, packer, ansible (venv in `/opt/lab/ansible`,
@@ -786,12 +791,13 @@ are in §17.
   CLI), docker-compose (v2, run against Podman's socket, 2.1b), kubectl, istioctl, flux, helm, vault, mc, kubeconform. Host packages, from the Ubuntu
   archive at pinned versions: `qemu-system-x86` and `qemu-utils` (Packer), `dnsutils`
   (`dig`). Every package the lab adds is removed by
-  `down`, so V1 holds. An archive is never extracted whole: the one named member is read
+  `destroy`, so V1 holds. An archive is never extracted whole: the one named member is read
   and written to a fixed path (no `extractall`, so no path traversal from the archive),
   and "already installed" means an exact word match on the version (`1.31.30` is not
   `1.31.3`).
-  Exit: `lab status` prints every tool and its version; a corrupted download is
-  rejected.
+  Exit: `up` logs every tool and its version, and each tool's own version command
+  (e.g. `/opt/lab/bin/terraform version`) matches `versions.py`; a corrupted download
+  is rejected.
 
   ⤷ **Needs** 1.2a · **Recalls** `code.versions` · **Produces**
   `toolchain.py`, `/opt/lab/bin/*` · **Records** `path.toolchain` · **Check** Exit
@@ -800,8 +806,8 @@ are in §17.
 
 Until 2.5e creates the `lab-bootstrap` AppRole, steps 2.4b–2.5f authenticate with the
 initial root token from `vault-init.json`; 2.5e ends by revoking it. Nothing after 2.5e
-uses it. After that, the operator gets a Vault shell with `sudo ./bootstrap.sh
-vault-shell` (a subshell with `VAULT_TOKEN` from the `lab-bootstrap` AppRole).
+uses it. After that, a Vault shell for the operator is a manual procedure in the
+runbook (14.4): a subshell with `VAULT_TOKEN` from a `lab-bootstrap` AppRole login.
 
 - **2.1a Host-only bridge.** The host-only bridge `cloudbr1` with `10.250.0.1/24` (a lab
   netplan file, no physical port, `ignore-carrier: true`: a bridge with no ports has no
@@ -826,7 +832,8 @@ vault-shell` (a subshell with `VAULT_TOKEN` from the `lab-bootstrap` AppRole).
     (`podman.socket`, `/run/podman/podman.sock`, `root:root 0660`) through
     `DOCKER_HOST`. Ubuntu's `podman-compose` package is not used (older; health-gated
     `depends_on` and `ip_range` **[verify]**)
-  - `lab platform` renders the repo's `platform/` into `/var/lib/lab/platform/` (config
+  - the platform phase (`platform.py`, run by `up` and `update`) renders the repo's
+    `platform/` into `/var/lib/lab/platform/` (config
     and `compose.yaml`, root-owned), so the running control plane never depends on the
     operator's checkout. The file names its project (`name: lab`), and each service
     sets `container_name: <service>`, the name the other services and the health
@@ -840,12 +847,12 @@ vault-shell` (a subshell with `VAULT_TOKEN` from the `lab-bootstrap` AppRole).
     containers at boot, with no firewall ordering) is left disabled; the boot start is
     `lab-platform.service`'s
   - images are fully qualified and pinned by digest (they change only through
-    `versions.py`); `lab platform` pulls every image first. Credentials stay in root
+    `versions.py`); the platform phase pulls every image first. Credentials stay in root
     `0600` `*.env` files (`env_file:`), not Compose or Podman secrets, whose `file`
     driver would keep a second copy in container storage. Named volumes have fixed
     names (`name: prometheus-data`)
   - Podman never updates an existing network, so when a network's definition changes
-    `lab platform` stops the services on it, runs `podman network rm` and brings them up
+    the platform phase stops the services on it, runs `podman network rm` and brings them up
     again (rule 19)
 
   Networks, each with a fixed `name:` and a fixed `subnet` and no DNS override:
@@ -866,11 +873,11 @@ vault-shell` (a subshell with `VAULT_TOKEN` from the `lab-bootstrap` AppRole).
     `view` plugin and Squid's ACL depend on it) and are filtered by the input chain
 
   Each service has a `healthcheck:` and is added to the file, and started with
-  `docker-compose up -d --wait <service>`, by its own step below; `lab platform` also
+  `docker-compose up -d --wait <service>`, by its own step below; the platform phase also
   checks health itself (`podman healthcheck run`).
   Exit: `podman run --rm` of a pinned `docker.io/library/hello-world` works (pulled
   from Docker Hub directly: the host itself is not behind Squid); `docker-compose
-  config` accepts the rendered file; `lab platform` creates the three networks with
+  config` accepts the rendered file; `sudo ./bootstrap.sh up` creates the three networks with
   the names, subnets and range above (`podman network inspect`); `lab-platform.service`
   is enabled and active; a re-run changes nothing.
 
@@ -921,7 +928,7 @@ vault-shell` (a subshell with `VAULT_TOKEN` from the `lab-bootstrap` AppRole).
   `home:alvistack` repository for `xUbuntu_24.04` **[verify that it is still maintained
   and ships netavark ≥ 1.10 for 24.04, and the `firewall_driver` key at that
   version]**. That adds a repository and its key (the key pinned by fingerprint,
-  packages by version, both removed by `down` and checked by V1), and this spike is
+  packages by version, both removed by `destroy` and checked by V1), and this spike is
   re-run against it. Returning to Docker is the last resort.
 
   ⤷ **Needs** 2.1b · **Recalls** `podman.pool`, `net.vmnet` · **Produces** nothing kept
@@ -1014,7 +1021,7 @@ vault-shell` (a subshell with `VAULT_TOKEN` from the `lab-bootstrap` AppRole).
   `dns.zones` (file path), `dns.add-record` (record + SOA bump) · **Check** Exit
 - **2.3b NTP.** chrony serves time to `VMNET_CIDR` (`allow 10.250.0.0/24`). Installing
   `chrony` on Ubuntu 24.04 **removes** the `systemd-timesyncd` package (they conflict), so
-  the baseline records it and `down` reinstalls it (rule 16).
+  the baseline records it and `destroy` reinstalls it (rule 16).
   Exit: `chronyc tracking` is synchronised; `chronyc clients` is allowed from the
   namespace test address in `VMNET_CIDR` (`cmd.netns-test`).
 
@@ -1026,13 +1033,15 @@ vault-shell` (a subshell with `VAULT_TOKEN` from the `lab-bootstrap` AppRole).
   audit device to a file, rotated daily by a logrotate rule
   that sends Vault `SIGHUP` (Vault stops answering requests if its only audit
   device cannot be written, so a full disk or a broken rotation is an outage; the
-  rotation keeps 14 days and `lab status` warns when the volume is over 80%).
+  rotation keeps 14 days and the platform phase's check logs a warning on every `up`
+  and `update` when the volume is over 80%).
   - Every restart comes back **sealed**, and a sealed Vault is running but unhealthy
     (`sys/health` 503). So the service's `healthcheck:` accepts sealed
     (`/v1/sys/health?sealedcode=200&uninitcode=200`) and nothing waits for "unsealed"
     before the unseal step: in the precursor a rollout that waited on readiness before
-    unsealing deadlocked. Seal state is reported by `lab status`, not the health check.
-  - Vault's config is a bind-mounted file, which Compose does not watch; `lab platform`
+    unsealing deadlocked. Seal state is read by `up` and `update`, which unseal a sealed
+    Vault themselves; the health check does not report it.
+  - Vault's config is a bind-mounted file, which Compose does not watch; the platform phase
     compares each file it renders with the one in place and restarts the services whose
     config files changed (`docker-compose restart <service>`, rule 19), then unseals
     straight after.
@@ -1047,22 +1056,23 @@ vault-shell` (a subshell with `VAULT_TOKEN` from the `lab-bootstrap` AppRole).
   `vault.audit`, `vault.image` · **Check** Exit
 - **2.4b Init and unseal.**
   **Before** `operator init`: if `/var/lib/lab/vault-init.json` exists (kept by a
-  previous `down`), move it and the backups it can open to
+  previous `destroy`), move it and the backups it can open to
   `/var/lib/lab/archive/<timestamp>/`, so a rebuild never orphans an old snapshot.
   `operator init` (1 share for the lab; production uses 5/3 or KMS auto-unseal) to
-  `/var/lib/lab/vault-init.json`; unseal. After a host reboot, `bootstrap.sh unseal`
-  (local, root) does it again; pipeline jobs only detect a sealed Vault and stop.
+  `/var/lib/lab/vault-init.json`; unseal. After a host reboot, `up` or `update` (local, root) finds Vault sealed
+  and unseals it; pipeline jobs only detect a sealed Vault and stop.
   - `init` acts on the pair (Vault initialized?, key file present?): (no, no) → init;
     (yes, yes) → skip; (yes, no) → stop, the keys are lost; (no, yes) → the archive move
     above, never an overwrite. The file is created with `O_CREAT|O_EXCL`, mode `0600` from
     creation, and `fsync`ed before anything relies on it. The unseal key goes to
     `sys/unseal` on stdin (`key=-`), never in argv.
-  Exit: `vault status` unsealed; restart the container, run `lab platform`, and it is
-  unsealed with data intact.
+  Exit: `vault status` unsealed; restart the container, run `sudo ./bootstrap.sh up`,
+  and it is unsealed with data intact.
 
   ⤷ **Needs** 2.4a · **Recalls** `vault.addr` · **Produces** init/unseal in
-  `platform.py`, `lab unseal`, `vault-init.json` · **Records** `path.vault-init`,
-  `path.archive`; the unseal command · **Check** Exit
+  `platform.py` (the automatic unseal in `up` and `update`), `vault-init.json` ·
+  **Records** `path.vault-init`, `path.archive`; how `up` and `update` unseal ·
+  **Check** Exit
 - **2.5a PKI: the CA and its roles.**
   - Enable `pki/` and tune its `max_lease_ttl` to 10 years **before**
     generating the CA (the default 32 days would cap the CA and everything under it);
@@ -1085,11 +1095,12 @@ vault-shell` (a subshell with `VAULT_TOKEN` from the `lab-bootstrap` AppRole).
   ⤷ **Needs** 2.4b · **Recalls** `vault.addr`, `path.vault-init` · **Produces** PKI
   setup in `platform.py` · **Records** `vault.mount.pki`, `vault.pki.roles` · **Check**
   Exit
-- **2.5b Vault's own certificate, host trust and `lab maintain`.** `lab maintain`
-  issues Vault's certificate from `host-svc` and sends Vault `SIGHUP` (a reload keeps it
+- **2.5b Vault's own certificate, host trust and the renewal.** The renewal
+  (`maintain.py`) issues Vault's certificate from `host-svc` and sends Vault `SIGHUP` (a reload keeps it
   unsealed; a restart would not), then puts the CA in the host trust store. It issues a
   host certificate only when it is missing or under 10 days remain: 30-day certificates
-  outlive the build window, so there is no timer, and `lab platform` runs it every time.
+  outlive the build window, so there is no timer: the platform phase runs it every time,
+  so every `up` and `update` does.
   Until 2.5e it authenticates with the root token; afterwards with `lab-bootstrap`.
   Exit: `curl https://vault.lab.test:8200/v1/sys/health` succeeds **without** `-k`;
   `openssl s_client` shows the issuer `lab.test CA`; `http://vault.lab.test:8200` fails
@@ -1135,12 +1146,13 @@ vault-shell` (a subshell with `VAULT_TOKEN` from the `lab-bootstrap` AppRole).
   (3.5c); `auth/approle/role/*`; the named policies under `sys/policies/acl/*`;
   `sys/storage/raft/snapshot`; `sys/mounts/k3s-creds` and `k3s-creds/creds/*` (8.2c;
   `kv/lab/*` already covers the break-glass kubeconfig, and `kv/app/*` the Alloy write
-  credential that `lab platform` creates and renders, 2.7b).
+  credential that the platform phase creates and renders, 2.7b).
   The **bodies** of the workload policies `api`, `vso-db` and `vso-monitoring` (read
   `kv/data/app/alloy-write` only) and of the console policy
   `operator-ui` are written here,
   by bootstrap (the root token now, `lab-bootstrap` from 2.5e on), from `lab/policies/` (a change to them is a bootstrap-side
-  change, applied by `lab platform` or `lab maintain`, never by a pipeline job).
+  change, applied by `up` or `update` (the platform phase or the renewal), never by a
+  pipeline job).
   `lab-pipeline` is narrower, so the pipeline can configure what it deploys but
   cannot widen any policy, and cannot mint a certificate for a control-plane name:
     - no write to `sys/policies/*` at all
@@ -1154,7 +1166,7 @@ vault-shell` (a subshell with `VAULT_TOKEN` from the `lab-bootstrap` AppRole).
       `allow_ip_sans=false`); `pki_app/sign/backend-gw` and
       `pki_app/sign/frontend-client` (sign only: keys are generated where they are
       used); never `pki/root/sign-intermediate`; `pki_mesh/root/sign-intermediate` with
-      `allowed_parameters` listing every parameter `lab mesh` sends, each with its only
+      `allowed_parameters` listing every parameter the `mesh` job sends, each with its only
       allowed value: `csr` (any), `common_name=["istiod CA"]`,
       `permitted_dns_domains=["cluster.local"]`, `max_path_length=["0"]`,
       `ttl=["8760h"]` (ACL parameters match exact values, not ranges), plus
@@ -1185,14 +1197,15 @@ vault-shell` (a subshell with `VAULT_TOKEN` from the `lab-bootstrap` AppRole).
   `vault.policy.*` (files), `vault.sign-intermediate` (path and pinned parameters, read
   by 8.3a); whether the IP/URI constraints were accepted · **Check** Exit
 - **2.5e Bootstrap AppRole and root revocation.** AppRole `lab-bootstrap` (policy
-  `lab-bootstrap`) written to `/var/lib/lab/approle.json`; every `lab` run re-issues its
-  secret_id when under 7 days remain (§6); `lab vault-shell`. Then **revoke the root
+  `lab-bootstrap`) written to `/var/lib/lab/approle.json`; every `up` and `update`
+  re-issues its secret_id when under 7 days remain (§6). Then **revoke the root
   token.**
-  Exit: `lab` reads `kv/lab/pipeline/ssh` via AppRole; `bootstrap.sh vault-shell` gives
-  a working token; the root token is rejected.
+  Exit: the platform phase reads `kv/lab/pipeline/ssh` via AppRole; a manual AppRole
+  login with `approle.json` (the runbook's Vault shell, 14.4) gives a working token;
+  the root token is rejected.
 
   ⤷ **Needs** 2.5b, 2.5d · **Recalls** `path.vault-init`, `vault.kv.ssh` · **Produces**
-  AppRole login in `lib/vault.py`, `lab vault-shell` · **Records**
+  AppRole login in `lib/vault.py` · **Records**
   `vault.approle.lab-bootstrap` (file), `vault.root-token` (revoked, date) · **Check**
   Exit
 - **2.6 Gateway (Traefik).** Pinned by digest, in the `lab_edge` and `lab_backend` networks,
@@ -1201,12 +1214,12 @@ vault-shell` (a subshell with `VAULT_TOKEN` from the `lab-bootstrap` AppRole).
   to a file. `dynamic.yml` holds one router per hostname (`gitea`, `minio`,
   `minio-console`, `cloudstack`; 2.7b adds `grafana` and the `prometheus` and `loki`
   write paths with their middlewares) and **one** `host-svc` certificate carrying every
-  gateway name in `gw.hosts` (no IP SAN); `lab maintain` re-issues it when that set
+  gateway name in `gw.hosts` (no IP SAN); the renewal re-issues it when that set
   changes. Backends are plain HTTP: the platform containers by name on `lab_backend`
   (aardvark-dns), CloudStack at `10.250.0.1:8080` (the host's fixed `cloudbr1` address,
   reached through `lab_edge`'s gateway, so no extra host entry). Body size
   unlimited and read timeouts of 10 minutes on the `gitea` and `minio` routers (registry
-  layers and golden images are large). The certificate is written by `lab maintain`,
+  layers and golden images are large). The certificate is written by the renewal,
   which restarts Traefik when it issues a new one (Vault, DNS, Squid and SSH do not
   depend on the gateway).
   Exit: `curl https://gitea.lab.test/` reaches a placeholder backend (a pinned
@@ -1226,7 +1239,7 @@ vault-shell` (a subshell with `VAULT_TOKEN` from the `lab-bootstrap` AppRole).
   not trust `lab.test CA`, the gateway gets a second entrypoint, `:80`, whose only
   router passes `GET /images/*` to MinIO (§5, §6). The MinIO image is pinned by digest
   and, the first time it is pulled, saved with `podman save` to `/var/lib/lab/images/`
-  (kept by `down`), and every later 2.7 `podman load`s it from there: the community
+  (kept by `destroy`), and every later 2.7 `podman load`s it from there: the community
   edition's upstream image distribution has changed (§11), so a rebuild must not depend
   on pulling it again **[verify that `podman load` of the archive satisfies the
   digest-pinned `Image=` with `Pull=never`, so the unit starts with no pull]**.
@@ -1266,13 +1279,13 @@ vault-shell` (a subshell with `VAULT_TOKEN` from the `lab-bootstrap` AppRole).
     a directory created here root-owned and handed to `lab-runner` (`0755`) by 2.10,
     which creates that user; the `monitoring` job fills it (8.8b),
     so dashboards stay CI-delivered (R5) while services, datasources and credentials
-    stay with bootstrap. Through Grafana's API with the admin, `lab platform` creates a
+    stay with bootstrap. Through Grafana's API with the admin, the platform phase creates a
     Viewer service account `lab-verify` and stores its token at
     `kv/lab/pipeline/grafana-verify`: `verify` and the `monitoring` job read Prometheus
     and Loki only through `https://grafana.lab.test/api/datasources/proxy/uid/<uid>/…`
     **[verify that Viewer may use it at the pin]**, since neither has another read path.
   - **Gateway** (`dynamic.yml`; the gateway certificate's SANs gain `grafana`,
-    `prometheus` and `loki`, so `lab maintain` re-issues it): router `grafana` →
+    `prometheus` and `loki`, so the renewal re-issues it): router `grafana` →
     `grafana:3000`; `prometheus-write`: `Host(prometheus.lab.test) &&
     Path(/api/v1/write) && Method(POST)` → `prometheus:9090`; `loki-push`:
     `Host(loki.lab.test) && Path(/loki/api/v1/push) && Method(POST)` → `loki:3100`.
@@ -1283,8 +1296,8 @@ vault-shell` (a subshell with `VAULT_TOKEN` from the `lab-bootstrap` AppRole).
     `/var/lib/lab/traefik/alloy.htpasswd`, bcrypt, `0600`, `removeHeader: true`), so
     only be-1 may try a password.
   - **Write credential** (`decision.telemetry-auth`): `kv/app/alloy-write`
-    `{username: alloy-v<N>, password: 32 random bytes}`, created once (rule 18); `lab
-    platform` renders its bcrypt hash into the users file, and VSO syncs it to be-1
+    `{username: alloy-v<N>, password: 32 random bytes}`, created once (rule 18); the
+    platform phase renders its bcrypt hash into the users file, and VSO syncs it to be-1
     (8.8a). Rotation: a new KV version with the next username; the users file keeps the
     current and the previous entry until VSO has re-synced (remote write and Loki push
     drop a batch refused with a 4xx), then drops the old one. Chosen over a client
@@ -1346,14 +1359,14 @@ vault-shell` (a subshell with `VAULT_TOKEN` from the `lab-bootstrap` AppRole).
   systemd service (`lab-runner.service`; job logs in Gitea, the runner's own log in
   `journalctl -u lab-runner`) under a dedicated non-root user `lab-runner` with a
   **fixed UID/GID** (`runner.uid` in `config/lab.toml`, default 1990, so files kept in
-  `/var/lib/lab/` across `down`/`up` keep their owner) in the `kvm` group only.
+  `/var/lib/lab/` across `destroy`/`up` keep their owner) in the `kvm` group only.
   This step also creates AppRole `lab-pipeline` (policy `lab-pipeline`) and writes its
   role_id and secret_id to `/var/lib/lab/runner/`. The runner has **one label,
   `host`** (in act_runner's config, `labels: ["host:host"]`, which runs jobs directly
   on the host instead of in a container): every job (`pr.yml`, `deliver.yml`,
   `schedules.yml`) runs directly on the host as `lab-runner`. Capacity **one job at a
   time**, so build memory never stacks and two jobs never share Terraform state.
-  Workflows use only `run:` steps that call `git` and `python3 -m lab` (no
+  Workflows use only `run:` steps that call `git` and `python3 -B -m lab.<module>` (no
   JavaScript actions), so the host needs no Node.js.
   `lab-runner` owns `/var/lib/lab/backups/`, the CoreDNS zone file that `setup`
   updates and Grafana's dashboards directory that the `monitoring` job fills (2.7b). It builds container images with
@@ -1382,7 +1395,8 @@ vault-shell` (a subshell with `VAULT_TOKEN` from the `lab-bootstrap` AppRole).
   acceptable for a single-operator lab where every PR is the operator's own; §15 names
   what an enterprise does instead.
   Exit: the runner shows Online in Gitea (the workflow tests are in 3.5a, once `main`
-  exists); `lab-platform.service` is active and every Phase 2 container healthy (`lab status`);
+  exists); `lab-platform.service` is active and every Phase 2 container healthy (`podman ps`
+  shows each `healthy`);
   `id lab-runner` lists no `docker` group, `lab-runner` gets permission denied on
   `/run/podman/podman.sock`, and `podman info` as `lab-runner` reports
   rootless with its own ID range.
@@ -1456,8 +1470,8 @@ switching**.
     starts, naming both versions (an older schema loops on 503, rule 2). A `cloud`
     database with no version row, or without `cloud_usage` beside it, is a
     half-finished deploy and is refused the same way. Every refusal says the way out
-    is `down` then `up`
-  - a deliberate rebuild is `down` (which drops `cloud` and `cloud_usage`, §14) and
+    is `destroy` then `up`
+  - a deliberate rebuild is `destroy` (which drops `cloud` and `cloud_usage`, §14) and
     then `up`; there is no flag for it
 
   Readiness means `/client/api` on 8080 returns 200, not an open port; agent
@@ -1543,7 +1557,7 @@ switching**.
   **Records** `cs.storage`, `cs.systemvm-template` (registered by itself or seeded),
   `cs.ssvm-allowed-sites`, `cs.health` · **Check** Exit; H2
 - **3.2a `cmk` and the scoped accounts.** Account `iac` in domain `lab` with a role
-  allowing only the APIs Terraform and `lab` call, by their real names:
+  allowing only the APIs Terraform and the pipeline jobs call, by their real names:
   - VPC and networks: `createVPC`, `updateVPC`, `deleteVPC`, `createNetwork`,
     `updateNetwork`, `deleteNetwork`, `createNetworkACLList`, `deleteNetworkACLList`,
     `createNetworkACL`, `updateNetworkACLItem`, `deleteNetworkACL`,
@@ -1610,15 +1624,16 @@ switching**.
   `cs.network.mgmt` · **Produces** nothing kept · **Records**
   `spike.mgmt-nic` (hot-add, fallback or fail; what was learned); only if both fail,
   `decision.mgmt-design` is opened and Phase 5 waits · **Check** Exit
-- **3.5a Seed, workflows and branch protection.** `lab platform` seeds `lab/lab`
+- **3.5a Seed, workflows and branch protection.** The platform phase seeds `lab/lab`
   **once**, by pushing the current repository to the still-empty Gitea repo. The seed
   already contains `.gitea/workflows/`:
-  - `pr.yml`, whose jobs grow with the repo: unit tests always; `terraform plan` +
-    policy once `terraform/` exists; `trivy config` once there are Dockerfiles and
-    manifests. The test job builds `.venv/` in its work directory from
-    `requirements-dev.txt` (hash-pinned, 0.2c)
+  - `pr.yml`, whose jobs grow with the repo: the no-Secrets-in-git rule always;
+    `terraform plan -lock=false` + policy once `terraform/` exists; `trivy config` once
+    there are Dockerfiles and manifests; kubeconform once there are manifests. There
+    are no unit tests: each step's Exit, run by hand, and the pipeline are the tests
   - `deliver.yml` (triggers: push to `main`, `workflow_dispatch`), with every phase
-    job; a phase not written yet runs its 0.2a stub and passes
+    job, each running `python3 -B -m lab.<module>`; a phase not written yet runs its
+    0.2a stub and passes
   - `schedules.yml`
 
   The seed commit carries `[skip ci]`, so the push itself starts no run. Then it
@@ -1630,13 +1645,13 @@ switching**.
   `id`: `lab-runner`), and the PR can be merged only after it passes; a direct
   `git push gitea main` is rejected.
 
-  ⤷ **Needs** 2.10, 0.2c · **Recalls** `gitea.repo`, `git.remote.gitea`, `runner.label`,
-  `cmd.test` · **Produces** `.gitea/workflows/{pr,deliver,schedules}.yml`, seed +
+  ⤷ **Needs** 2.10 · **Recalls** `gitea.repo`, `git.remote.gitea`, `runner.label` ·
+  **Produces** `.gitea/workflows/{pr,deliver,schedules}.yml`, seed +
   protection in `platform.py` · **Records** `ci.workflows`, `gitea.protection`,
   `cmd.pr-flow` (branch → push → PR → merge) · **Check** Exit
 - **3.5b Hand-off: dispatch and follow.** Bootstrap dispatches `deliver.yml`
-  through the Gitea API; `bootstrap.sh up` then follows the run and exits with its
-  result.
+  through the Gitea API; `bootstrap.sh up` (and `update`) then follows the run and
+  exits with its result; after a green run, `up` goes on to its local stage (9.3a–9.4).
   From here, `deliver.yml` runs one job per phase, in order:
   `golden-image` → `setup` → `base` → `tunnel` → `cluster` → `mesh` → `app` →
   `monitoring` → `verify`. Every job converges on every run (§2), so re-running
@@ -1648,7 +1663,7 @@ switching**.
   ⤷ **Needs** 3.5a, 3.3b · **Recalls** `ci.workflows`, `gitea.url`,
   `vault.approle.lab-pipeline`, `host.memory` · **Produces** dispatch + follow in
   `__main__.py`/`platform.py` · **Records** `ci.dispatch`; how `up` follows the run · **Check** Exit
-- **3.5c Platform consoles** (R7; run by `lab platform`). Read-only logins, each
+- **3.5c Platform consoles** (R7; run by the platform phase). Read-only logins, each
   generated once into Vault (rule 18), for the five host consoles in §5:
   - Vault: `auth/userpass`, user `operator`, policy `operator-ui` (read and list on
     `sys/mounts`, `sys/auth`, `sys/policies/acl/*`, `kv/metadata/*`, `transit/keys/*`,
@@ -1659,18 +1674,18 @@ switching**.
   - Gitea: the existing `operator` (2.8)
   - Grafana: user `operator`, role *Viewer*, created through Grafana's API with the
     admin (2.7b), password at `kv/lab/bootstrap/grafana-operator`
-  - `lab consoles` (§8): the table, and `--show <name>` for one login, printed to a TTY
-    only and never through the logger, so it lands in no log
+  - no command prints them: reading a login from Vault is a manual procedure in the
+    runbook (14.4)
   Exit: from the host, each of the five URLs returns its login page with `curl --fail`
-  and no `-k`, and each `--show` login works (the Vault one is denied `kv/data/app/db`,
-  the CloudStack one is denied `createVPC`, the Grafana one gets 403 saving a
-  dashboard); `lab consoles --show vault | cat` is
-  refused; from a `LAN_CIDR` source (`cmd.netns-test`) 443 and 8200 time out.
+  and no `-k`, and each login, read from Vault with the `lab-bootstrap` AppRole, works
+  (the Vault one is denied `kv/data/app/db`, the CloudStack one is denied `createVPC`,
+  the Grafana one gets 403 saving a dashboard); from a `LAN_CIDR` source
+  (`cmd.netns-test`) 443 and 8200 time out.
 
   ⤷ **Needs** 3.2a, 2.7, 2.7b, 2.8, 2.5e · **Recalls** `vault.addr`, `gw.hosts`, `minio.url`,
   `mon.backends`, `gitea.users`, `cs.api`, `vault.kv.cs-admin`, `vault.approle.lab-bootstrap`,
-  `cmd.netns-test` · **Produces** `consoles.py`, `lab consoles`, the four logins ·
-  **Records** `console.urls`, `cmd.consoles`, `vault.kv.grafana-operator` · **Check**
+  `cmd.netns-test` · **Produces** `consoles.py` (run by the platform phase), the four
+  logins · **Records** `console.urls`, `vault.kv.grafana-operator` · **Check**
   Exit; C1 (five consoles)
 
 ### Phase 4 — Golden image
@@ -1783,22 +1798,23 @@ switching**.
   - written with the resources they cover (5.4a, 5.4b): every VM's default NIC is on a
     VPC tier, and it has exactly one mgmt NIC; the only public port-forward is
     tier-frontend 443 → fe-1; the ingress public IP is never replaced or destroyed
-    (`down` destroys it without the gate: §14 runs `terraform destroy` directly)
+    (`teardown` destroys it without the gate: §14 runs `terraform destroy` directly)
   Exit: `conftest test` passes the real plan; fixture plans opening `0.0.0.0/0:22`, and
   allowing tier-frontend → tier-backend on any port, are rejected.
 
   ⤷ **Needs** 5.2 · **Recalls** `net.vpc`, `tf.acls` · **Produces** `policy/*.rego`,
   `policy/fixtures/` · **Records** `policy.dir`, `policy.fixtures` · **Check** Exit
-- **5.3b The gated apply.** The plan JSON carries no credentials, so `lab setup`
-  separately checks, before planning, that the API key in use resolves to account `iac`
-  (`listAccounts`), after the H2 platform-health gate (3.1d). `lab setup` runs **plan → policy → apply**, and apply is unreachable
+- **5.3b The gated apply.** The plan JSON carries no credentials, so the `setup` job
+  (`python3 -B -m lab.setup`) separately checks, before planning, that the API key in use
+  resolves to account `iac` (`listAccounts`), after the H2 platform-health gate (3.1d).
+  It runs **plan → policy → apply**, and apply is unreachable
   if the policy fails. This is the first apply: the network goes in here.
   Exit: the real plan passes and is applied by the `setup` job; with a fixture rule
   added, the policy fails and nothing is applied; with admin keys, `setup` refuses
   before planning.
 
   ⤷ **Needs** 5.3a · **Recalls** `policy.dir`, `cs.account.iac`, `tf.env`, `cs.health`, `vault.kv.health` · **Produces**
-  `setup.py` (plan → policy → apply), the `setup` job · **Records** —; the `setup` command ·
+  `setup.py` (plan → policy → apply), the `setup` job · **Records** — ·
   **Check** Exit; N5
 - **5.4a Compute.** Lab SSH public key from Vault. Each VM's **default NIC
   (eth0) is its tier**: default route, ConfigDrive userdata. The **mgmt NIC (eth1)** is
@@ -1807,12 +1823,12 @@ switching**.
   overrides the image's DHCP fallback (4.1b). Policy rules for the NICs (5.3a) go in
   with them.
   **If 3.3b took the fallback** (**[verify]**): `cloudstack_instance` takes one
-  `network_id`, so `lab setup` deploys the three VMs itself, between applying the
+  `network_id`, so the `setup` job deploys the three VMs itself, between applying the
   network and the ingress, with `deployVirtualMachine` carrying both networks and both
   fixed addresses (adopted by name on a re-run; expunged and re-deployed when the
   template or offering changes). Terraform keeps the VPC, tiers, ACLs, public IP,
   port-forward (the VM found through a data source) and the `ansible_host` resources;
-  `cloudstack_nic` goes, and 5.3a's NIC rules become checks `lab setup` runs on its
+  `cloudstack_nic` goes, and 5.3a's NIC rules become checks the `setup` job runs on its
   deploy parameters.
   Exit: apply; all VMs Running and reachable over SSH from the host on their mgmt NIC
   at the fixed address; `networkctl status eth1` shows the static address (so the
@@ -1830,7 +1846,7 @@ switching**.
   address, groups `frontend`, `hub`, `backend`), and Ansible reads
   them through the `cloud.terraform.terraform_provider` inventory plugin with absolute
   paths (rule 8), so every job sees the same hosts without passing files between
-  jobs. `lab setup` writes `app.lab.test` (public IP) and `k3s.lab.test`
+  jobs. The `setup` job writes `app.lab.test` (public IP) and `k3s.lab.test`
   (`10.250.0.112`) into CoreDNS.
   Exit: `ansible-inventory --graph` lists the groups from state; `dig app.lab.test`
   answers the public IP; a fixture plan replacing the public IP is rejected.
@@ -1862,7 +1878,7 @@ switching**.
   priority `filter - 1` (so k3s's and flannel's iptables rules on be-1 are untouched),
   default drop both ways on every interface the role names:
     - **eth1 (mgmt):** in from `10.250.0.1`: SSH; on be-1 also the k3s API (6443, for
-      Vault's token reviews and `lab`).
+      Vault's token reviews, the jobs and the break-glass kubeconfig).
       Out to `10.250.0.1` only (eth1 is static,
       §5, so no DHCP is needed). No default route via eth1
     - **eth0 (tier):** only the step 5.2 flows for this VM (fe-1: TCP 443 in, UDP 51820
@@ -1948,7 +1964,8 @@ run-time objects (§6) and waits (`cmd.flux-wait`).
 From 8.2c on, every job talks to k3s as `lab-ci` (or `lab-dbops` for the database
 pod), never as cluster-admin. An Exit that needs more (a throwaway pod as `sa/api`,
 `istioctl` port-forwards, `kubectl auth can-i --as`, a hand edit Flux should revert) is
-run by the learner under `lab k3s-admin`, and the API audit log (8.2d) records it.
+run by the learner with the break-glass kubeconfig (runbook), and the API audit log
+(8.2d) records it.
 
 - **8.1 k3s on be-1** (`k3s` role).
   - Pinned version, fetched through the proxy.
@@ -1965,7 +1982,8 @@ run by the learner under `lab k3s-admin`, and the API audit log (8.2d) records i
     `kv/lab/pipeline/k3s`: the build's scaffold, cluster-admin, used by the jobs only
     until 8.2c replaces it with scoped identities and moves it to break-glass.
 
-  Exit: from the host, `lab status` shows the node Ready; `k3s secrets-encrypt status`
+  Exit: from the host, `kubectl get nodes` with the kubeconfig from Vault (`cmd.kubeconfig`)
+  shows the node Ready; `k3s secrets-encrypt status`
   shows enabled and a throwaway Secret's value is absent from
   `/var/lib/rancher/k3s/server/db/state.db` (S2); a throwaway pod with `lab.test CA` mounted from a throwaway
   ConfigMap resolves `vault.lab.test` and gets 200 from `/v1/sys/health`.
@@ -1979,13 +1997,13 @@ run by the learner under `lab k3s-admin`, and the API audit log (8.2d) records i
   prunes what was removed, a `HelmRelease` installs a chart.)
   - `clusters/backend/flux-system/gotk-components.yaml`, generated by the pinned
     `flux install --export --components=source-controller,kustomize-controller,helm-controller`
-    and committed (a Flux upgrade is a pull request). `lab cluster` applies it
+    and committed (a Flux upgrade is a pull request). The `cluster` job applies it
     server-side; `flux bootstrap` is not used, because it pushes to `main`, which is
     protected (3.5a).
   - (From 8.2c, the first install below, before Flux exists, runs on be-1 through the
     `k3s` role with the node's own admin config; later runs only refresh the two Secrets,
     as `lab-ci`.)
-  - `lab cluster` writes, on stdin, Secret `flux-system/gitea-auth` (`username`
+  - The `cluster` job writes, on stdin, Secret `flux-system/gitea-auth` (`username`
     `lab-flux`, `password` = the token from `kv/lab/pipeline/gitea-flux`, `ca.crt` =
     `lab.test CA`) and Secret `flux-system/lab-ca` (`ca.crt`), then applies
     `gotk-sync.yaml`: GitRepository `lab` (`https://gitea.lab.test/lab/lab.git`, branch
@@ -2013,7 +2031,7 @@ run by the learner under `lab k3s-admin`, and the API audit log (8.2d) records i
   `lib/flux.py` · **Records** `flux.source` (GitRepository, URL, auth Secret),
   `flux.kustomizations` (names, `dependsOn`, gates), `cmd.flux-wait` (reconcile, then
   wait for Ready at the merged revision) · **Check** Exit
-- **8.1c Chart mirror.** Flux never fetches a chart from the internet. `lab cluster`
+- **8.1c Chart mirror.** Flux never fetches a chart from the internet. The `cluster` job
   pulls each pinned chart with `helm pull` on the host (Istio `base`, `istiod`, `cni`,
   `ztunnel`; `cloudnative-pg`; `vault-secrets-operator`; `k8s-monitoring`, whose
   subcharts are inside its archive),
@@ -2034,7 +2052,7 @@ run by the learner under `lab k3s-admin`, and the API audit log (8.2d) records i
     - Reviewer: ServiceAccount `vault-auth` in namespace `vault-auth`, with
       `system:auth-delegator` and a long-lived token Secret, all in
       `platform/vault-auth.yaml` (Kubernetes fills the token in; git holds no value).
-      `lab cluster` waits for `platform`, then reads the token into `auth/k3s/config`
+      The `cluster` job waits for `platform`, then reads the token into `auth/k3s/config`
       (from 8.2c the `k3s` role reads it on be-1, so no job identity can read Secrets in
       `vault-auth`).
   Exit: `kubectl auth can-i create tokenreviews --as=system:serviceaccount:vault-auth:vault-auth`
@@ -2063,9 +2081,9 @@ run by the learner under `lab k3s-admin`, and the API audit log (8.2d) records i
 
     | Identity | Grants | Used by |
     |---|---|---|
-    | `lab-ci` | ClusterRole `view` (it has no Secrets, exec or port-forward) and `lab-flux-read` (get, list, watch on GitRepositories, Kustomizations, HelmRepositories, HelmReleases, and CNPG `clusters`, since `view` may not aggregate CRDs); `get`, `update`, `patch` by `resourceNames` on the Secrets it owns: `flux-system/{gitea-auth,lab-ca}`, `istio-system/cacerts`, `ingress/backend-tls`, `db/vault-ca`, `app/vault-ca`, `monitoring/vault-ca`, and ConfigMap `flux-system/app-images`; `create` on Secrets or ConfigMaps in those namespaces only (RBAC cannot limit `create` by name); `create` on `pods/portforward` in `istio-system` only (`istioctl`'s ztunnel views); in `probe` and `probe-plain`: pods `create`, `delete`, `get`, `list`, `watch` and `pods/log` `get` | every `deliver` job, `verify`, `status` in the pipeline |
-    | `lab-dbops` | `view`; in `db`: `get` and `create` on `pods/exec` with `resourceNames: [postgres-1]` (WebSocket exec is authorized as `get` by older API servers, `create` by newer); `get`, `delete` on CNPG `clusters` named `postgres` | `backup`, `restore-drill`, `dr-drill`'s canary cleanup; E1, E3, S3 and S4's settings half in `verify` and `demo` |
-    | `lab-operator` | `view` and `lab-flux-read` | `status` and other local reads, the operator at a terminal |
+    | `lab-ci` | ClusterRole `view` (it has no Secrets, exec or port-forward) and `lab-flux-read` (get, list, watch on GitRepositories, Kustomizations, HelmRepositories, HelmReleases, and CNPG `clusters`, since `view` may not aggregate CRDs); `get`, `update`, `patch` by `resourceNames` on the Secrets it owns: `flux-system/{gitea-auth,lab-ca}`, `istio-system/cacerts`, `ingress/backend-tls`, `db/vault-ca`, `app/vault-ca`, `monitoring/vault-ca`, and ConfigMap `flux-system/app-images`; `create` on Secrets or ConfigMaps in those namespaces only (RBAC cannot limit `create` by name); `create` on `pods/portforward` in `istio-system` only (`istioctl`'s ztunnel views); in `probe` and `probe-plain`: pods `create`, `delete`, `get`, `list`, `watch` and `pods/log` `get` | every `deliver` job and `verify` |
+    | `lab-dbops` | `view`; in `db`: `get` and `create` on `pods/exec` with `resourceNames: [postgres-1]` (WebSocket exec is authorized as `get` by older API servers, `create` by newer); `get`, `delete` on CNPG `clusters` named `postgres` | `backup`, `restore-drill`, the canary cleanup of the DR drill in `up`'s local stage; E1, E3, S3 and S4's settings half in `verify` |
+    | `lab-operator` | `view` and `lab-flux-read` | read-only hand checks by the operator at a terminal |
     | `vault-token-issuer` | in `lab-access`: `create` on `serviceaccounts/token`, `resourceNames: [lab-ci, lab-dbops, lab-operator]` | Vault only |
 
     No identity may patch a Flux object: a Kustomization's `spec.patches` would let its
@@ -2087,9 +2105,9 @@ run by the learner under `lab k3s-admin`, and the API audit log (8.2d) records i
   - **Break-glass:** the `cluster` job deposits the node's admin kubeconfig (server
     rewritten to `k3s.lab.test`) at `kv/lab/breakglass/k3s-admin` (write-only, and only
     when the `k3s` role installed or reinstalled k3s, so a rebuilt be-1 never leaves a
-    stale one), then deletes `kv/lab/pipeline/k3s`. `lab k3s-admin`
-    (local, root, `lab-bootstrap`) is the only way to use it: `down`'s k3s rows (§14
-    0–3), `demo`'s S4 and G4, and hand checks.
+    stale one), then deletes `kv/lab/pipeline/k3s`. Only `lab-bootstrap` (local, root)
+    reads it, for `teardown`'s k3s rows (§14 0–3) and hand checks; a hand check writes
+    it to a `0600` temp file and deletes it after use (runbook).
 
   Exit: `kubectl auth can-i` with each identity's token: `lab-operator` may `list pods
   -A` but not `get secrets -n db`, `create pods --subresource=exec -n db`, `create pods
@@ -2106,9 +2124,10 @@ run by the learner under `lab k3s-admin`, and the API audit log (8.2d) records i
   `cmd.flux-wait`, `flux.kustomizations`, `vault.auth.k3s`, `k8s.sa.vault-auth`,
   `vault.policy.*`, `vm.be-1` · **Produces** `clusters/backend/platform/access/`, the
   on-node Flux bootstrap in `ansible/roles/k3s/`, `k3s-creds` setup in `cluster.py`,
-  `kubeconfig(identity)` in `lib/kube.py`, `lab k3s-admin` · **Records** `k8s.access`
-  (identities, Roles, who may request each, TTLs), `vault.kv.k3s-admin`,
-  `cmd.kubeconfig` (now per identity), `cmd.k3s-admin`, `cmd.flux-wait` (wait only); the
+  `kubeconfig(identity)` in `lib/kube.py`, the break-glass deposit in the `cluster` job ·
+  **Records** `k8s.access` (identities, Roles, who may request each, TTLs),
+  `vault.kv.k3s-admin`, `cmd.kubeconfig` (now per identity), `cmd.flux-wait` (wait
+  only); the
   `k3s-creds` role names · **Check** Exit; K1
 - **8.2d The k3s API audit log.** RBAC decides who may; the audit log shows who did. The
   `k3s` role installs `ansible/roles/k3s/files/audit-policy.yaml` as
@@ -2133,17 +2152,18 @@ run by the learner under `lab k3s-admin`, and the API audit log (8.2d) records i
      on `serviceaccounts/token` in `app` and `db`.
   6. `None`: everything else, the read-only system traffic included.
 
-  The log stays on be-1 as the record A1 reads; `lab` reads it over SSH and parses the
+  The log stays on be-1 as the record A1 reads; `verify` reads it over SSH and parses the
   JSON lines. node-agents' alloy-audit ships a copy to Loki (8.8d, §15). The policy is
   unchanged by that: Alloy's `pods/log` reads fall under rule 6, its `/metrics` scrapes
   under rule 1.
-  Exit: as `lab-ci`, `kubectl exec` into a CoreDNS pod is refused; under `lab k3s-admin`,
+  Exit: as `lab-ci`, `kubectl exec` into a CoreDNS pod is refused; with the break-glass
+  kubeconfig (runbook),
   a `kubectl port-forward` to it works; both appear in the audit log with
   `user.username` (`system:serviceaccount:lab-access:lab-ci`, `system:admin`),
   `objectRef.subresource` and the response code (A1); no `secrets` event carries a
   `requestObject` or `responseObject`.
 
-  ⤷ **Needs** 8.2c · **Recalls** `k8s.access`, `cmd.k3s-admin`, `cmd.kubeconfig`,
+  ⤷ **Needs** 8.2c · **Recalls** `k8s.access`, `vault.kv.k3s-admin`, `cmd.kubeconfig`,
   `vm.be-1` · **Produces** `ansible/roles/k3s/files/audit-policy.yaml`, the audit flags in
   the `k3s` role, the audit-log reader in `lib/kube.py` · **Records** `k8s.audit` (policy
   file, log path, rotation, reader) · **Check** Exit; A1
@@ -2152,10 +2172,10 @@ run by the learner under `lab k3s-admin`, and the API audit log (8.2d) records i
   CONNECT tunnel on port 15008, with each workload's **SPIFFE** identity
   `spiffe://cluster.local/ns/<ns>/sa/<sa>` in its certificate.) The CA chains to the
   separate `pki_mesh` root (§6, decided 2026-11-05).
-  1. `lab mesh` generates the istiod CA key and CSR in memory.
+  1. The `mesh` job generates the istiod CA key and CSR in memory.
   2. Vault signs it via `pki_mesh/root/sign-intermediate` (CA:TRUE, path length 0,
      `permitted_dns_domains=cluster.local`, 1-year TTL).
-  3. `lab mesh` writes Secret `istio-system/cacerts` (`ca-cert.pem`, `ca-key.pem`,
+  3. The `mesh` job writes Secret `istio-system/cacerts` (`ca-cert.pem`, `ca-key.pem`,
      `root-cert.pem` = `lab mesh root`, `cert-chain.pem`) **before** istiod starts.
      istiod reads it only at startup (then watches the files): if it is missing at
      install, istiod silently creates its own self-signed root in Secret
@@ -2249,7 +2269,8 @@ run by the learner under `lab k3s-admin`, and the API audit log (8.2d) records i
     `inheritedMetadata.annotations` `prometheus.io/scrape: "true"`, `prometheus.io/port:
     "9187"` (the instance exporter; it stays STRICT), and the CNPG HelmRelease sets
     `podAnnotations` with port `8080` (the operator's metrics).
-  - Deleting the `Cluster` deletes its PVC and the database; only 9.2 and `down` do,
+  - Deleting the `Cluster` deletes its PVC and the database; only 9.2 and `teardown`
+    (also run by `destroy`) do,
     each after a fresh backup (§11).
 
   Exit: `kubectl get cluster -n db postgres` reports a healthy cluster; pod
@@ -2257,11 +2278,12 @@ run by the learner under `lab k3s-admin`, and the API audit log (8.2d) records i
   `psql -d app -c '\dp customers'` (as `postgres` over the local socket) shows only
   `app=ar`; no Secret `postgres-superuser` exists; a root pod in ns `db` is rejected by
   admission; `SELECT … FROM pg_hba_file_rules` shows the three pinned lines and no
-  `trust`; under `lab k3s-admin`, `kubectl port-forward pod/postgres-1 15432:5432` then
+  `trust`; with the break-glass kubeconfig (runbook), `kubectl port-forward
+  pod/postgres-1 15432:5432` then
   `psql "host=127.0.0.1 port=15432 user=postgres sslmode=require"` is rejected by
   `pg_hba`, and `user=app` with a wrong password fails authentication (S4).
 
-  ⤷ **Needs** 8.3c, 8.1c · **Recalls** `cmd.kubeconfig`, `cmd.flux-wait`, `cmd.k3s-admin`,
+  ⤷ **Needs** 8.3c, 8.1c · **Recalls** `cmd.kubeconfig`, `cmd.flux-wait`, `vault.kv.k3s-admin`,
   `flux.kustomizations`, `flux.charts`, `code.versions` · **Produces**
   `clusters/backend/operators/` (CNPG), `apps/db/cluster.yaml`,
   `mesh/db-status-port.yaml`, `gates/app/`, `app.py` (waits), the `app` job ·
@@ -2269,7 +2291,7 @@ run by the learner under `lab k3s-admin`, and the API audit log (8.2d) records i
   `db.schema`, `k8s.ns.app-db` · **Check** Exit; S4
 - **8.4b The `app` password: Vault → VSO → CNPG.** (VSO, the Vault Secrets Operator:
   logs in to Vault and keeps a Kubernetes Secret equal to a Vault path.)
-  - `lab app` generates the `app` password **once** into `kv/app/db` (fields
+  - The `app` job generates the `app` password **once** into `kv/app/db` (fields
     `username`, `password`, `host`, `dbname`), never printed: only a definite NotFound
     creates it, any other Vault error stops the run (rule 18).
   - HelmRelease `vault-secrets-operator` in `operators/` (ns `vso`, not in the mesh).
@@ -2651,31 +2673,33 @@ run by the learner under `lab k3s-admin`, and the API audit log (8.2d) records i
   `10.250.0.112:9100` and `10.0.3.10:9100` time out (N4).
 
   ⤷ **Needs** 8.8a, 8.2d · **Recalls** `mon.collector`, `mon.backends`, `k8s.audit`,
-  `mesh.authz`, `fw.vm`, `cmd.istioctl`, `cmd.k3s-admin` · **Produces** the
+  `mesh.authz`, `fw.vm`, `cmd.istioctl`, `vault.kv.k3s-admin` · **Produces** the
   node-exporter and receiver values, `monitoring/node-agents/`,
   `monitoring/policies/alloy-allow.yaml` · **Records** `mon.targets`, `mon.logs`
   (streams, labels, retention), `mesh.authz` · **Check** Exit; O4 (audit half)
 
 ### Phase 9 — Backup, restore, DR and crypto-shredding
 
-- **9.1a Backup: the Vault snapshot and the database.** `lab backup`:
+- **9.1a Backup: the Vault snapshot and the database.** The `backup` job
+  (`python3 -B -m lab.backup`; `schedules.yml` nightly, or dispatch):
   - `vault operator raft snapshot save`
   - `pg_dump -Fc -d app` as `postgres` over the instance's local socket (`kubectl exec
     postgres-1 -c postgres` as `lab-dbops`, the one identity allowed to exec, and only
     there, 8.2c; no superuser password exists, §6). CNPG's native backup to MinIO is not
     used (§15)
-  - both to `/var/lib/lab/backups/<timestamp>/` (survives `down`; the newest 14 kept)
+  - both to `/var/lib/lab/backups/<timestamp>/` (survives `teardown` and `destroy`; the
+    newest 14 kept)
 
   A Raft snapshot is encrypted by Vault's barrier and is useless without the unseal
   key. The unseal key is **not** in the backup; offline custody of it is an operator
-  duty, stated in the walkthrough (14.4).
+  duty, stated in the runbook (14.4).
   Exit: both files exist with non-zero sizes; `vault operator raft snapshot inspect`
   reads the snapshot; `pg_restore --list` reads the dump.
 
   ⤷ **Needs** 8.7c · **Recalls** `runner.owned-paths`, `cmd.kubeconfig`, `k8s.access` · **Produces**
-  `backup.py`, `lab backup` · **Records** `backup.dir`, `cmd.backup` · **Check** Exit
-- **9.2 Restore drill** (`lab restore-drill`). Take a fresh backup (so the dump
-  matches the key's current `min_decryption_version`, whatever `demo` did to it),
+  `backup.py`, the `backup` job · **Records** `backup.dir`, `cmd.backup` · **Check** Exit
+- **9.2 Restore drill** (the `restore-drill` job, on dispatch). Take a fresh backup (so
+  the dump matches the key's current `min_decryption_version`),
   delete the `Cluster` `postgres` as `lab-dbops` (CNPG removes its pod and PVC: the data
   is gone), and wait for Flux's next reconcile of `apps` (no job identity may patch a
   Flux object, 8.2c): Flux re-creates the `Cluster` from git, CNPG
@@ -2685,10 +2709,10 @@ run by the learner under `lab k3s-admin`, and the API audit log (8.2d) records i
   Exit: B1 passes; the row count after the restore equals the count in the backup.
 
   ⤷ **Needs** 9.1a · **Recalls** `cmd.backup`, `db.cluster`, `vault.kv.app-db` ·
-  **Produces** `lab restore-drill` · **Records** `cmd.restore-drill` · **Check** Exit; B1
-- **9.3a Vault DR drill: a scratch Vault from the snapshot** (`lab dr-drill`, **local, as
-  root**: it needs the unseal key, which the runner can never read). Proves the crown
-  jewels actually restore. Scratch containers on an internal Podman network (no
+  **Produces** the `restore-drill` job · **Records** `cmd.restore-drill` · **Check** Exit; B1
+- **9.3a Vault DR drill: a scratch Vault from the snapshot** (the DR drill in `up`'s
+  local stage, **local, as root**, after the pipeline is green: it needs the unseal key,
+  which the runner can never read). Proves the crown jewels actually restore (R3). Scratch containers on an internal Podman network (no
   published ports, nothing else attached): a scratch Vault and a scratch Postgres. The
   scratch Vault has a TLS-disabled listener on its own loopback only and is driven with
   `podman exec`, so no certificate is involved.
@@ -2707,7 +2731,8 @@ run by the learner under `lab k3s-admin`, and the API audit log (8.2d) records i
   the live Vault's `sys/health` is unchanged throughout.
 
   ⤷ **Needs** 9.1a · **Recalls** `path.vault-init`, `vault.approle.lab-bootstrap`,
-  `vault.audit`, `backup.dir` · **Produces** `lab dr-drill` (Vault half) · **Records**
+  `vault.audit`, `backup.dir` · **Produces** the DR drill in `up`'s local stage (Vault
+  half) · **Records**
   `dr.scratch` (network and container names), `dr.canary` (how it is found and removed)
   · **Check** Exit
 - **9.3b Vault DR drill: the canary decrypts.**
@@ -2717,7 +2742,7 @@ run by the learner under `lab k3s-admin`, and the API audit log (8.2d) records i
   Exit: B3 passes; the live Vault's `sys/health` is unchanged throughout.
 
   ⤷ **Needs** 9.3a · **Recalls** `dr.scratch`, `dr.canary`, `db.schema` · **Produces**
-  `lab dr-drill` (database half) · **Records** — · **Check** Exit; B3
+  the DR drill in `up`'s local stage (database half) · **Records** — · **Check** Exit; B3
 - **9.4 Crypto-shredding** (same scratch pair, continuing 9.3b). In the scratch Vault,
   allow deletion of `customers` and delete it, still as `lab-bootstrap`. Decrypting
   the canary row now fails; every `card_number` in the scratch Postgres is unreadable
@@ -2726,12 +2751,13 @@ run by the learner under `lab k3s-admin`, and the API audit log (8.2d) records i
   Exit: B2 passes; the scratch containers and network are removed.
 
   This is the point to make: the database backup is safe to lose; the Vault snapshot
-  plus the unseal key are the crown jewels. A corollary: E3 in `demo` (rewrap, then
-  raise `min_decryption_version`) makes every **older** dump undecryptable, so take a
-  backup right after it (12.2 reminds the operator).
+  plus the unseal key are the crown jewels. A corollary: rewrapping the real `customers`
+  key and then raising its `min_decryption_version` (E3's operation, which `verify` runs
+  only on a scratch key) makes every **older** dump undecryptable, so whoever does it
+  takes a backup right after.
 
   ⤷ **Needs** 9.3b · **Recalls** `dr.scratch`, `dr.canary` · **Produces** the shred and
-  cleanup in `lab dr-drill` · **Records** — · **Check** Exit; B2
+  cleanup in the DR drill in `up`'s local stage · **Records** — · **Check** Exit; B2
 
 ### Phase 10 — Pipeline gates and schedules
 
@@ -2740,8 +2766,8 @@ hardens how changes get in and adds what runs on a timer. 10.2 and 10.3a run `ve
 so they come after 12.1c.
 
 - **10.1 `pr.yml`, on every pull request** (on the one host runner, with the
-  pipeline identity: step 2.10's accepted risk): unit tests →
-  `terraform plan -lock=false` → policy gate → `trivy config` on the Dockerfiles and
+  pipeline identity: step 2.10's accepted risk): `terraform plan -lock=false` → policy
+  gate → `trivy config` on the Dockerfiles and
   manifests → kubeconform over `kustomize build` of every Kustomization path in
   `clusters/backend/` (with the Flux, Gateway API, Istio, CNPG and VSO CRD schemas
   pinned in the repo) → the **no-Secrets-in-git** rule: any `Secret` with `data` or
@@ -2776,9 +2802,10 @@ so they come after 12.1c.
 
 ### Phase 12 — Verification
 
-- **12.1 `verify`.** Every check in §12 except B1–B3 (run by `restore-drill` and
-  `dr-drill`), G1–G3 (proven by the pipeline's own history) and V1–V5 (true only after
-  `down`; run by `revert-check`), each implemented once in `lab/verify.py` with a
+- **12.1 `verify`.** Every check in §12 except B1 (run by the `restore-drill` job), B2–B3
+  (the DR drill in `up`'s local stage), G1–G3 (proven by the pipeline's own history) and
+  V1–V5 (true only after `destroy` and its reboot; checked when `destroy` runs again,
+  13.2), each implemented once in `lab/verify.py` with a
   pass/fail line and the evidence. Non-zero exit on any failure. E2/E3 run against a
   scratch Transit key that is deleted afterwards, so `verify` changes nothing. Built in
   four steps; each check reuses the commands of the Exit that first proved it.
@@ -2804,7 +2831,8 @@ so they come after 12.1c.
     `k8s.audit`, `db.cluster` · **Produces** checks in `verify.py` · **Records**
     `verify.checks` · **Check** Exit; E1–E3, S1–S4, T1, T2, Z1, Z2, P2, K1 (access half), A1
   - **12.1c TLS checks and the `verify` job:** P1, P3, the P4 sweep over §5's fixed
-    port lists (§6), P5 and T3; then the `verify` job in `deliver`.
+    port lists (§6), P5 and T3; then the `verify` job in `deliver` (`python3 -B -m
+    lab.verify`).
     Exit: they pass; a temporary plain-HTTP listener on a §5 port fails P4; `verify`
     green twice in a row.
 
@@ -2815,69 +2843,68 @@ so they come after 12.1c.
     monitoring half (Alloy's and kube-state-metrics' ServiceAccounts). They read
     Prometheus and Loki through Grafana's datasource proxy with the verify token.
     Exit: they pass; with Kustomization `apps` suspended and an AuthorizationPolicy
-    edited by hand (both under `lab k3s-admin`), G4 fails naming it (then `apps` is resumed and Flux restores it).
+    edited by hand (both with the break-glass kubeconfig, runbook), G4 fails naming it
+    (then `apps` is resumed and Flux restores it).
 
     ⤷ **Needs** 12.1c, 8.8b, 8.8d, 3.5c · **Recalls** `verify.checks`, `mon.targets`,
     `mon.dashboards`, `mon.backends`, `mon.logs`, `vault.kv.grafana-verify`,
     `spike.denial-metric`, `console.urls`, `flux.kustomizations`,
     `img.app.digests` · **Produces** checks in `verify.py` · **Records** `verify.checks` ·
     **Check** Exit; O1–O5, C1, G4, K1 (monitoring half)
-- **12.2 `demo`: shape, tunnel, application, encryption.** `lab demo` runs §13 items
-  1–4 as re-runnable proofs with human-readable output, reusing the `verify` checks; E2
-  and E3 act on the real `customers` key, and E3 rewraps every row first, so it re-runs
-  at any key version (§12). It reminds the operator to take a backup after E3 (9.4).
-  Exit: items 1–4 run twice in a row without a manual fix in between.
-
-  ⤷ **Needs** 12.1f, 9.1a · **Recalls** `verify.checks`, `vault.transit.customers`,
-  `cmd.backup` · **Produces** `demo.py` (items 1–4) · **Records** `demo.items` ·
-  **Check** Exit
-- **12.3 `demo`: zero trust, trust chain, backup, operations.** §13 items 5–8:
-  T1/T2/Z1/Z2 with K1, S4 and A1 (the one `demo` port-forward runs under the break-glass
-  identity), P1/P2, B3 then B2 through `dr-drill`, and the operations view (C1, O2/O3,
-  O4 on the Logs dashboard, G4's drift repair, the hand edit under `lab k3s-admin`).
-  Exit: the whole §13 walkthrough runs in about 14 minutes, twice.
-
-  ⤷ **Needs** 12.2, 9.4 · **Recalls** `demo.items`, `dr.canary`, `console.urls`,
-  `flux.kustomizations`, `cmd.k3s-admin`, `k8s.audit` · **Produces** `demo.py` (items 5–8) · **Records** `demo.items` ·
-  **Check** Exit
+The evidence (§13) is a green `deliver` run ending in `verify`, plus `up`'s local-stage
+output (B2, B3). Proofs that only the old walkthrough showed are dropped: E2 and E3 on
+the real `customers` key (`verify` proves both on a scratch key) and the break-glass
+port-forward in A1 and O4 (`verify` still proves A1 with the `lab-dbops` exec and the
+refused `lab-ci` port-forward). S4's port-forward half was proven once by 8.4a, and
+G4's hand edit by 12.1f.
 
 ### Phase 13 — Teardown and revert
 
-- **13.1 `down`** runs §14 in order. Each step tolerates "already gone". Teardown
-  never reads state that an earlier teardown step deleted. Helpers return success on
+- **13.1 `teardown` and `destroy`** run §14 in order. Each row tolerates "already
+  gone". No row reads state that an earlier row deleted. Helpers return success on
   "not found". Each phase's `down()` was written with the phase; this step composes
-  them and proves them once, on the full build, as the final `down`.
-  - **13.1a Orchestration:** `lab down` runs §14 rows −1 to 9 in order, each phase's
-    `down()` with the state it reads. It needs the whole lab built and the `demo`
-    output captured first (14.4).
-    Exit: on the built lab, rows −1 to 9 complete; a second `down` reports every row
-    already gone.
+  them and proves them once, on the full build, as the final `destroy`.
+  - **13.1a `teardown` and `destroy` orchestration:** `teardown` runs §14's tenant rows
+    (the VPC, tiers and VMs, so the k3s cluster goes with be-1, and the state and Vault
+    entries that belong only to them) and keeps the host platform. `destroy` runs
+    teardown's rows, then the platform rows to 9, each phase's `down()` with the state
+    it reads, then the host restore (13.1b). It needs the whole lab built and the
+    evidence captured first (14.4).
+    Exit: on the built lab, `teardown` completes and a second `teardown` reports every
+    row already gone; the next `up` rebuilds only the tenant side (its log shows each
+    platform phase's `check()` passing); then `destroy` completes rows −1 to 9 and a
+    second run reports every row already gone.
 
-    ⤷ **Needs** 12.3, 14.4, 10.1, 10.2, 10.3a, 9.2 · **Recalls** `runner.user`,
+    ⤷ **Needs** 12.1f, 14.4, 10.1, 10.2, 10.3a, 9.2 · **Recalls** `runner.user`,
     `tf.backend`, `vault.kv.cs-admin`, `vault.kv.k3s-admin` · **Produces** `teardown.py` · **Records** — ·
     **Check** Exit
-  - **13.1b Host restore:** rows 9a–12: users and groups, the netplan restore inside one
-    `netplan try` window, `state/`, the reboot.
+  - **13.1b Host restore:** `destroy`'s rows 9a–12: users and groups, the netplan
+    restore inside one `netplan try` window, `state/`, the reboot.
     Exit: after the reboot the host reaches `LAN_GATEWAY` on `HOST_IP` and no lab bridge
     exists.
 
     ⤷ **Needs** 13.1a · **Recalls** `path.netplan-orig`, `path.baseline`, `net.host` ·
     **Produces** host restore in `teardown.py` · **Records** — · **Check** Exit; V2
-- **13.2 `revert-check`** (after the reboot) compares against
-  `/var/backups/lab/baseline.json` (V1–V5) and writes a pass/fail report.
-  Exit: green.
+- **13.2 Revert check in `destroy`.** Run again after the reboot, `destroy` finds nothing
+  left, compares the host against `/var/backups/lab/baseline.json` (V1–V5) and writes a
+  pass/fail report.
+  Exit: green; every row reports already gone.
 
   ⤷ **Needs** 13.1b · **Recalls** `path.baseline`, `path.install-id` · **Produces**
   `revert.py`, the V1–V5 report · **Records** — · **Check** Exit; V1–V5
 
 ### Phase 14 — Documentation
 
-- **14.4** `docs/walkthrough.md`: §13, with real output pasted in, and the operator duty
-  to keep the unseal key offline (9.1a). Once the final `down` runs (13.1a), it is the
-  evidence for R1–R3 and R5–R7.
+- **14.4 Runbook and evidence.** `docs/runbook.md`: short manual procedures for reading
+  a console login from Vault (3.5c), a Vault shell with the `lab-bootstrap` AppRole, the
+  break-glass k3s kubeconfig in a `0600` temp file deleted after use, and keeping the
+  unseal key offline (9.1a); then links to one green `deliver` run ending in `verify`
+  and one `up` local-stage output (B2, B3). Once the final `destroy` runs (13.1a), those
+  two are the evidence for R1–R3 and R5–R7 (§13).
 
-  ⤷ **Needs** 12.3 · **Recalls** `demo.items` · **Produces** `docs/walkthrough.md` ·
-  **Records** — · **Check** output from one real `demo` run
+  ⤷ **Needs** 12.1f, 9.4 · **Recalls** `console.urls`, `vault.approle.lab-bootstrap`,
+  `vault.kv.k3s-admin`, `path.vault-init` · **Produces** `docs/runbook.md` ·
+  **Records** — · **Check** each procedure run once by hand; both links open
 
 ---
 
@@ -2890,7 +2917,7 @@ so they come after 12.1c.
    schema makes the management server loop on 503 forever. Preflight refuses one the
    lab did not make; 3.1a never deploys over an existing one, checks its schema
    version against the pin by asking MySQL (never a tracker file), and refuses a
-   mismatch; teardown drops it.
+   mismatch; `destroy` drops it.
 3. **Gate on health, with timeouts longer than the gates.** Readiness = HTTP 200 from
    the API, not an open port. Systemd start timeouts must exceed the wait budget.
    First boot of the management server takes minutes. And a control plane reports its
@@ -3007,7 +3034,7 @@ cluster first.*
 | The host is a VM | all | check nested KVM and foreign-MAC acceptance by hand before the build (§5); `timeouts.nested_factor` stretches every wait; if the outer hypervisor will not pass foreign MACs, system VMs and VPC routers never get LAN connectivity |
 | The SSVM cannot fetch the golden image from the host | 3.1d, 4.3 | CloudStack refuses private-address URLs unless `secstorage.allowed.internal.sites` lists `HOST_IP` (set before the SSVM starts); the template's status in `cmk list templates` names the failure; the checksum guards the plain-HTTP fetch |
 | mgmt NIC added after boot (`cloudstack_nic`) | 4.1b, 5.4a | the image's netplan and the userdata's static file both match eth1, so it configures on hotplug; 5.4a Exit fails fast if eth1 has no address |
-| A shared-network NIC on a VM inside a VPC may be refused by CloudStack | 3.3b, 5.4a | proven by the 3.3b spike, run as soon as 3.3a closes, before Terraform depends on it. The cheap fallback is deploy-time multi-network (`deployVirtualMachine` with `networkids` and `iptonetworklist`, documented in 4.22), done by `lab setup` because `cloudstack_instance` takes one network (5.4a) **[verify]**. Only if that fails too, stop before Phase 5; the candidate redesign is then a VPC **private gateway** onto `cloudbr1`, so the host reaches the tiers through the VPC router under ACLs instead of through a second NIC |
+| A shared-network NIC on a VM inside a VPC may be refused by CloudStack | 3.3b, 5.4a | proven by the 3.3b spike, run as soon as 3.3a closes, before Terraform depends on it. The cheap fallback is deploy-time multi-network (`deployVirtualMachine` with `networkids` and `iptonetworklist`, documented in 4.22), done by the `setup` job because `cloudstack_instance` takes one network (5.4a) **[verify]**. Only if that fails too, stop before Phase 5; the candidate redesign is then a VPC **private gateway** onto `cloudbr1`, so the host reaches the tiers through the VPC router under ACLs instead of through a second NIC |
 | Same-node HBONE capture point for T1 | 8.3c, T1 | settled in 8.3c's smoke test before the application depends on it |
 | Istio ambient on k3s (CNI paths) | 8.3b | k3s-specific install values; smoke namespace before any workload; fallback is sidecar mode |
 | Flux applies a manifest before its run-time Secret exists | 8.1b, 8.3a, 8.4a, 8.8a | a gate Kustomization per job health-checks the job's objects and dependents `dependsOn` it; P2 also asserts no `istio-ca-secret` (istiod never started without `cacerts`) |
@@ -3022,31 +3049,34 @@ cluster first.*
 | istiod `cacerts` key names | 8.3a | write all four Istio file names; Exit checks the workload chain, not just the Secret |
 | Egress allow-list too tight | 2.9, 4.1a, 6.1a, 8.x | denials are logged by Squid; grow the list from the log, never by opening the ACL |
 | Host memory (32 GB ceiling) | all | §5 budget with a 4 GB reserve, measured per phase; `up` refuses a phase that would breach the reserve; §5 cut order if it overruns |
-| Vault sealed after a host reboot | everything | pipeline jobs fail fast with "Vault sealed"; the operator runs `bootstrap.sh unseal` (the runner cannot read the unseal key, by design); production answer is KMS auto-unseal |
-| Losing the unseal key or Vault snapshot | 9 | that is total loss of encrypted data, by design; the walkthrough (14.4) makes offline custody of both an explicit operator duty |
-| MinIO community edition distribution | 2.7 | upstream changed how community images and binaries ship; the image is pinned by digest and kept as a `podman save` archive in `/var/lib/lab/images/`, which `down` keeps (2.7). If it can no longer be pulled at all, Garage or SeaweedFS (both S3-compatible, both work as a Terraform S3 backend) replace it behind the same `minio.lab.test` name |
-| Vault audit device unwritable | 2.4a | daily rotation with `SIGHUP`, disk-usage warning in `lab status` |
-| The gateway is a single point of failure for every web service | 2.6 | Vault, CoreDNS, Squid and SSH never depend on it, so unseal, DNS and break-glass access survive a gateway outage; `lab status` names it first when it is down |
+| Vault sealed after a host reboot | everything | pipeline jobs fail fast with "Vault sealed"; the operator runs `sudo ./bootstrap.sh up` (or `update`), which unseals first (the runner cannot read the unseal key, by design); production answer is KMS auto-unseal |
+| Losing the unseal key or Vault snapshot | 9 | that is total loss of encrypted data, by design; the runbook (14.4) makes offline custody of both an explicit operator duty |
+| MinIO community edition distribution | 2.7 | upstream changed how community images and binaries ship; the image is pinned by digest and kept as a `podman save` archive in `/var/lib/lab/images/`, which `destroy` keeps (2.7). If it can no longer be pulled at all, Garage or SeaweedFS (both S3-compatible, both work as a Terraform S3 backend) replace it behind the same `minio.lab.test` name |
+| Vault audit device unwritable | 2.4a | daily rotation with `SIGHUP`, disk-usage warning logged by `up` and `update` |
+| The gateway is a single point of failure for every web service | 2.6 | Vault, CoreDNS, Squid and SSH never depend on it, so unseal, DNS and break-glass access survive a gateway outage; `up` and `update` name it first when it is down |
 | ServiceLB exposes the backend gateway on every node address | 8.7d | be-1's nftables admit 8000 only on `wg1` from `10.99.0.2`; P4 and Z1 test the tier and mgmt addresses too |
 | PR code runs on the host with the pipeline identity | 2.10 | accepted for one operator (§15); `main` is protected, so nothing reaches `deliver` without a merge; with no `docker` group and rootless builds, it runs with `lab-runner`'s rights, not root's |
-| Podman comes from Ubuntu's universe component, paired with an older netavark (4.9.3 with 1.4.0) | 2.1b, 2.1c, 2.2 | security fixes come from the community or Ubuntu Pro, not a vendor repo; versions are pinned and shown by `lab status`; no container port faces the LAN except through the firewall. Netavark features after 1.4 (the nftables driver, `isolate=strict`) are absent, so 2.1c proves the driver, the DNAT path and DNS before 2.2 depends on them. If it fails: Podman 5.x with netavark ≥ 1.10 (nftables driver) from a pinned third-party repository (2.1c names it); Docker is the last resort |
+| Podman comes from Ubuntu's universe component, paired with an older netavark (4.9.3 with 1.4.0) | 2.1b, 2.1c, 2.2 | security fixes come from the community or Ubuntu Pro, not a vendor repo; versions are pinned (`versions.py`) and logged by `up`; no container port faces the LAN except through the firewall. Netavark features after 1.4 (the nftables driver, `isolate=strict`) are absent, so 2.1c proves the driver, the DNAT path and DNS before 2.2 depends on them. If it fails: Podman 5.x with netavark ≥ 1.10 (nftables driver) from a pinned third-party repository (2.1c names it); Docker is the last resort |
 | aardvark-dns and CoreDNS both want port 53 | 2.1b, 2.3a | aardvark-dns moves to `dns_bind_port` 1053; the lab's own nat rule redirects containers' TCP and UDP port 53 queries to it on every network, since netavark 1.4 does it for UDP only and never on internal networks (2.1c, 2.2) |
 | A mesh CA forging names other clients trust | 2.5f, 8.3a | decided 2026-11-05: the istiod CA is under its own root, `pki_mesh`, which no host or VM trusts (§6); P2 proves the chain ends there and not at `lab.test CA` |
 | One compromised ztunnel impersonates every workload on its node | 8.3b | ambient keeps keys out of pods but in ztunnel; with one node that is every identity (§6). Accepted for the lab; production spreads workloads over hardened nodes |
-| Deleting the CNPG `Cluster` (or its PVC) erases the database | 8.4a, 9.2, 14 | `local-path` reclaims with `Delete`; only 9.2 (after a fresh backup) and `down` delete it; production uses a `Retain` StorageClass and CNPG's own backups |
-| A k3s credential walks past the mesh: exec, port-forward, Secret reads, policy edits, a pod borrowing `sa/api` | 8.2c, 8.2d, 8.4a | split by role: Flux applies, `lab-ci` writes only its named run-time objects, `lab-dbops` may exec into `postgres-1` only, people get `view`; cluster-admin only through `lab k3s-admin`; `pg_hba` rejects `postgres` from every address; K1, A1 and S4 prove it. Admission policy against borrowed identities is not built (§15) |
+| Deleting the CNPG `Cluster` (or its PVC) erases the database | 8.4a, 9.2, 14 | `local-path` reclaims with `Delete`; only 9.2 (after a fresh backup), `teardown` and `destroy` delete it; production uses a `Retain` StorageClass and CNPG's own backups |
+| A k3s credential walks past the mesh: exec, port-forward, Secret reads, policy edits, a pod borrowing `sa/api` | 8.2c, 8.2d, 8.4a | split by role: Flux applies, `lab-ci` writes only its named run-time objects, `lab-dbops` may exec into `postgres-1` only, people get `view`; cluster-admin only through the break-glass kubeconfig (runbook); `pg_hba` rejects `postgres` from every address; K1, A1 and S4 prove it. Admission policy against borrowed identities is not built (§15) |
 | `lab-dbops` can run `psql` as `postgres` in `postgres-1` | 8.2c, 9.1a | `pg_dump` needs it; one pod by name, 15-minute tokens, every exec in the audit log (A1); `card_number` is Transit ciphertext, so the database alone reveals no card |
 | `lab-ci` may `create` any Secret in the namespaces where it owns one | 8.2c | RBAC cannot limit `create` by name; it still cannot read or change any other Secret, and Flux never applies what it creates |
 | Root on be-1 is cluster-admin, and `lab-pipeline` holds the lab SSH key | 8.1, 8.2c | the node's `k3s.yaml` and client certificates are there; accepted like 2.10's runner risk. RBAC governs API credentials, not SSH; `k3s kubectl` on the node still goes through the API server, so A1 records it as `system:admin` |
 | The API audit log fills be-1's disk | 8.2d | rotated at 50 MB, 5 backups, 7 days; secrets at `Metadata` only; read traffic dropped |
-| Bootstrap runs as root from the operator's user-writable checkout | 0–3, `demo`, `down` | the user could change code (or plant a symlink at `state/`) that root then runs or writes through; accepted for one operator who already has sudo (the precursor skipped the same fix). Production installs the tool root-owned (`/opt/lab`) and keeps its state there, and root never runs a user-writable binary |
+| Bootstrap runs as root from the operator's user-writable checkout | 0–3, `up`, `update`, `teardown`, `destroy` | the user could change code (or plant a symlink at `state/`) that root then runs or writes through; accepted for one operator who already has sudo (the precursor skipped the same fix). Production installs the tool root-owned (`/opt/lab`) and keeps its state there, and root never runs a user-writable binary |
 
 ---
 
 ## 12. Verification catalog
 
 Every check is first proven by a step in §17.4. The mTLS checks (T1–T3, Z1, Z2, P2, P5)
-are required, like the rest.
+are required, like the rest. After that, the `verify` job (12.1) runs every check except
+B1–B3, G1–G3 and V1–V5: B1 runs in the `restore-drill` job, B3 and B2 in the DR drill in
+`up`'s local stage (it needs the unseal key), G1–G3 are the pipeline's own history, and
+V1–V5 run in `destroy` after its reboot.
 
 | ID | Check | How |
 |---|---|---|
@@ -3058,8 +3088,8 @@ are required, like the rest.
 | **N6** | the hub forwards one flow only | fe-1 → `10.99.1.2:22` and `:5432` time out and tun-1 logs `lab-hub-drop` |
 | **H2** | CloudStack platform healthy | `/client/api` returns 200; the KVM host is `Up`; SSVM and CPVM are `Running`; every system VM and router `cmk` lists as `Running` has a running domain of the same instance name in `virsh --readonly list` |
 | **E1** | field-level encryption | `psql` shows `vault:v<n>:…` (any key version); API returns `**** 4242` |
-| **E2** | key rotation | rotate → new ciphertext carries the new version (`vault:v2:…` on first run); the older ciphertext still decrypts (`verify`: scratch key; `demo`: the real key) |
-| **E3** | rewrap + retire | rewrap to the latest version; set `min_decryption_version` to it; a ciphertext saved before the rotation fails to decrypt (`verify`: scratch key; `demo`: rewraps every row first, so it re-runs at any key version) |
+| **E2** | key rotation | rotate → new ciphertext carries the new version (`vault:v2:…` on first run); the older ciphertext still decrypts (`verify`: on a scratch Transit key) |
+| **E3** | rewrap + retire | rewrap to the latest version; set `min_decryption_version` to it; a ciphertext saved before the rotation fails to decrypt (`verify`: on a scratch Transit key) |
 | **T1** | mTLS on the wire | `tcpdump` on be-1 during a request: api ↔ postgres only on TCP 15008, no SQL text |
 | **T2** | workload identity | ztunnel log shows `spiffe://cluster.local/ns/app/sa/api` → `ns/db/sa/postgres` |
 | **T3** | tun-1 sees only ciphertext | during a POST through the UI, `tcpdump -i wg0 -nn -X 'tcp port 8000'` (and `-i wg1`) on tun-1 shows TLS records only (content types 22/23): no `HTTP/1.1`, no `/customers`, no card digits |
@@ -3073,20 +3103,20 @@ are required, like the rest.
 | **S1** | no secrets in manifests | the api Deployment has no secret env or mounts; the password is at `kv/app/db`, and its only Kubernetes copy is VSO's `db/app-db`; no `Secret` with data exists under `clusters/` |
 | **S2** | Secrets encrypted at rest | `k3s secrets-encrypt status` = Enabled; a known Secret value does not appear in `/var/lib/rancher/k3s/server/db/state.db` |
 | **S3** | least-privilege database role | role `app` can `SELECT` and `INSERT` on `customers` and is refused `DELETE`, `UPDATE` and `CREATE TABLE` (8.4b: from the `sa/api` pod over the Service; `verify`: `SET ROLE app` over the socket as `lab-dbops`, rolled back); no superuser password exists (`enableSuperuserAccess: false`) |
-| **S4** | no passwordless path into Postgres | `pg_hba_file_rules` holds no `trust` and the three pinned lines (`verify`, as `lab-dbops`); through a `kubectl port-forward` to 5432 (`demo` and 8.4a, under `lab k3s-admin`, the only identity allowed to port-forward there), `user=postgres` is rejected by `pg_hba` and `user=app` with a wrong password fails |
+| **S4** | no passwordless path into Postgres | `pg_hba_file_rules` holds no `trust` and the three pinned lines (`verify`, as `lab-dbops`); through a `kubectl port-forward` to 5432 (8.4a's Exit, with the break-glass kubeconfig (runbook), the only identity allowed to port-forward there), `user=postgres` is rejected by `pg_hba` and `user=app` with a wrong password fails |
 | **K1** | the k3s API is least privilege | `kubectl auth can-i` with each identity's own token: `lab-operator` and `lab-ci` get `no` for exec, attach and port-forward in `db` and `app`, `get secrets` in `db`, `create pods` in `app` and `db`, `patch` on `authorizationpolicies`, `peerauthentications` and Flux Kustomizations, and `create rolebindings`; `lab-dbops` gets `yes` only for exec into `postgres-1`; Alloy's ServiceAccount gets `no` for `get secrets -n istio-system` and kube-state-metrics' for `list secrets -A`; `lab-pipeline` cannot read `kv/lab/breakglass/k3s-admin` |
-| **A1** | API access is audited | the audit log on be-1 holds, with `user.username` and the response code, this run's `lab-dbops` exec into `postgres-1` and a refused `lab-ci` port-forward to it (and in `demo`, the break-glass port-forward as `system:admin`); no `secrets` event carries a request or response body |
+| **A1** | API access is audited | the audit log on be-1 holds, with `user.username` and the response code, this run's `lab-dbops` exec into `postgres-1` and a refused `lab-ci` port-forward to it; no `secrets` event carries a request or response body |
 | **B1** | restore drill | the api reads and decrypts restored rows |
 | **B2** | crypto-shredding | in a Vault restored from the snapshot, deleting the Transit key makes every restored `card_number` undecryptable while names stay readable |
 | **B3** | Vault disaster recovery | a scratch Vault restored from the newest snapshot and unsealed with the kept key decrypts the drill's canary row to its known card number |
 | **G1–G3** | pipeline | a PR opening `0.0.0.0/0` or adding a Secret with data under `clusters/` fails and cannot merge; a merge rebuilds, redeploys and verifies; nightly backup and verify run on schedule |
-| **G4** | GitOps in sync | every Flux Kustomization and HelmRelease (HelmRelease `k8s-monitoring` included) is Ready at `main`'s HEAD; the running api digest equals `flux-system/app-images`; (in `demo`) a hand-edited AuthorizationPolicy is restored by Flux |
+| **G4** | GitOps in sync | every Flux Kustomization and HelmRelease (HelmRelease `k8s-monitoring` included) is Ready at `main`'s HEAD; the running api digest equals `flux-system/app-images`; a hand-edited AuthorizationPolicy is restored by Flux (12.1f's Exit) |
 | **O1** | metrics collected | in host Prometheus (through Grafana's datasource proxy), every job in `mon.targets` is `up`: kubelet, cAdvisor, kubelet resource and probes, API server, kube-state-metrics, node-exporter, istiod, ztunnel, istio-cni, the backend gateway, CoreDNS, Flux's controllers, the CNPG operator, the Postgres exporter, VSO, the api and Alloy itself; no `(job, instance)` pair appears twice |
 | **O2** | mesh traffic visible | after a POST, the *Mesh traffic and denials* dashboard in Grafana on the host shows connections `ns/app/sa/api` → `ns/db/sa/postgres` |
 | **O3** | denials visible | the Z1 probe shows on the denials panel in Grafana on the host within 2 minutes (the metric recorded in `spike.denial-metric`) |
 | **O4** | logs collected | Loki holds recent lines from every namespace that runs pods, and within 2 minutes this run's ztunnel deny line for the Z1 probe, a Kubernetes event and the A1 audit events (`{job="k3s-audit"}`); the *Logs* dashboard shows them to the Viewer login |
 | **O5** | the write paths admit only be-1's Alloy | from the host, and from fe-1, a POST to `prometheus.lab.test/api/v1/write` or `loki.lab.test/loki/api/v1/push` gets 403; from be-1 without credentials, 401; a GET of either name's query API gets 404; from a `LAN_CIDR` source nothing answers |
-| **C1** | consoles | on the host, each of the five §5 console URLs (Grafana's `https://grafana.lab.test/`, Viewer) returns its login page over TLS verified against `lab.test CA` (no `-k`) and its `lab consoles --show` login works; from a `LAN_CIDR` source none answers |
+| **C1** | consoles | on the host, each of the five §5 console URLs (Grafana's `https://grafana.lab.test/`, Viewer) returns its login page over TLS verified against `lab.test CA` (no `-k`) and its login, read from Vault (runbook), works (3.5c's Exit; `verify` checks the pages, since the runner never reads `kv/lab/bootstrap/*`); from a `LAN_CIDR` source none answers |
 | **V1** | packages and sources | the package list equals the baseline's (no CloudStack, Podman (with netavark, aardvark-dns, conmon, crun, `uidmap`, `slirp4netns`, `dbus-user-session`, and `iptables` if the baseline lacked it), libvirt, MySQL, NFS, chrony, qemu or `dnsutils` additions; `systemd-timesyncd` back); apt sources and keys match |
 | **V2** | network | `/etc/netplan` byte-identical; no lab bridges (`cloudbr0`, `cloudbr1`, `cloud0`, `virbr0`, `podman*`); `/etc/resolv.conf` links where it did; no `inet lab` table and no nftables rules beyond the baseline's; the host reaches `LAN_GATEWAY` on `HOST_IP` |
 | **V3** | services and listeners | enabled units, timers and listening ports match the baseline; no containers, no `lab-*` units, `podman.socket` as in the baseline, no resolved drop-ins |
@@ -3095,66 +3125,55 @@ are required, like the rest.
 
 ---
 
-## 13. Examiner walkthrough (`demo`, about 14 minutes)
+## 13. Evidence
 
-1. **Show the shape** (1 min): `lab status`, the architecture diagram in §4, the last
-   `deliver` run in Gitea (every phase is a pipeline job, G2), and `flux get
-   kustomizations`: k3s is what `main` says (G4).
-2. **Tiers and the tunnel** (2 min): N1 (fe-1 cannot reach be-1's tier address) →
-   N2 (it reaches the backend gateway over the tunnel) → N6 (anything else is dropped
-   at the hub, here is the log line) → bring `wg1` down on tun-1 → N2 fails → up.
-   Then N3: the tiers have no internet, and here is the proxy denial in the log.
-3. **The application** (1 min): open `https://app.lab.test` from a LAN machine that
-   uses `HOST_IP` for DNS and trusts `lab.test CA`, and add a customer while T3 runs:
-   tun-1 sees TLS records only. P5: from fe-1, a client without the frontend's
-   certificate is refused.
-4. **Encryption service** (2 min): E1 (`psql` vs the UI), E2, E3, S3. Point out that
-   the API never holds key material and that its database role cannot delete.
-5. **Zero trust inside the cluster** (3 min): T1 `tcpdump`, T2 the identities, Z1
-   (a pod that is not the api is refused by Postgres; default deny), Z2. Then the API
-   side (rule 25): K1 (the operator's and CI's tokens may not exec, port-forward or
-   create pods in `app`/`db`), S4 (under `lab k3s-admin`, a port-forward to 5432 still
-   gets no passwordless login), and A1 (that port-forward, in the audit log as
-   `system:admin`).
-6. **Trust chain** (1 min): P1/P2: `openssl` output ending at `lab.test CA` for the
-   gateway and at `lab mesh root` for a workload; why three roots (§6).
-7. **Backup** (1 min): B3 (Vault restores from its snapshot and decrypts), then B2
-   (delete the key and the same dump is useless). Name what *is* critical: the Vault
-   snapshot and the unseal key.
-8. **Operations** (3 min): the consoles from the host (C1); Grafana's mesh dashboard
-   showing the item 3 POST (O2) and the item 5 denial (O3); its *Logs* dashboard showing
-   ztunnel's deny line and item 5's `system:admin` port-forward from the API audit log
-   (O4); edit an AuthorizationPolicy by hand and watch Flux put it back (G4).
+Two outputs prove the build. The runbook (14.4) links one of each.
 
-Close with what was deliberately **not** built and why (§15).
+1. **A green `deliver.yml` run on `main` ending in the `verify` job.** Every §12 check
+   except B1–B3, G1–G3 and V1–V5 passes, each with its evidence line. G1–G3 are the
+   pipeline's own history: a refused PR, the merge run, the nightly `schedules.yml`
+   runs. B1 is the `restore-drill` job.
+2. **`up`'s local-stage output.** The Vault DR drill (B3, then B2), run as root because
+   it needs the unseal key the runner can never read, then the `verify` job's pass/fail
+   summary.
+
+The final `destroy`, run again after its reboot, writes the V1–V5 report (R4). What was
+deliberately **not** built, and why, is in §15; a human-readable walkthrough is one of
+those options.
 
 ---
 
-## 14. Teardown order (`down`)
+## 14. Teardown order (`teardown`, `destroy`)
 
 Each line runs that phase's `down()`. The state each step reads is listed so that no
-step depends on something already deleted.
+step depends on something already deleted. Every row tolerates "already gone".
+
+- `teardown` runs rows −1 to 6: the tenant side (the VPC, tiers and VMs, so the k3s
+  cluster goes with be-1) and the Vault and `state/` entries that belong only to it. The
+  host platform and the golden image template stay, so the next `up` is quick.
+- `destroy` runs every row: teardown's, then the rows marked *destroy only*, ending with
+  a reboot.
 
 | # | Step | Reads | Removes |
 |---|---|---|---|
-| −1 | pipeline | Gitea | disables `schedules.yml`, cancels running runs, stops the runner service, so no job races the teardown |
+| −1 | pipeline | Gitea | disables `schedules.yml` and cancels running runs, so no job races the teardown; *destroy only:* stops the runner service |
 | 0 | `monitoring` | the break-glass kubeconfig (`kv/lab/breakglass/k3s-admin`, read by `lab-bootstrap`; rows 0–3 are its one routine use, since `flux uninstall` and suspending Flux need cluster-admin) | **suspends Flux's root Kustomization first**, so nothing deleted below comes back; then Kustomizations `monitoring` and `gate-monitoring`, deleted with pruning (Flux uninstalls k8s-monitoring, whose Alloy Operator pre-delete hook removes the Alloy instances first, and the `node-agents` objects); Secret `monitoring/vault-ca`; Vault `auth/k3s/role/vso-monitoring` (`kv/app/alloy-write` goes with row 1's `kv/app/*`) |
 | 1 | `app` | break-glass kubeconfig, inventory | the CNPG `Cluster` first, waiting until CNPG has removed its pod and PVC (its finalizer needs the operator still running); then Kustomizations `apps` and `gate-app` with pruning (VSO objects, api, `backend` gateway, ALLOWs), then `operators` (CNPG and VSO, after everything carrying their finalizers is gone); the run-time objects (§6); Vault `auth/k3s/role/{api,vso-db}`, `kv/app/*`, `transit/keys/customers` (deletion allowed first) |
 | 2 | `mesh` | break-glass kubeconfig | Kustomizations `mesh` and `gate-mesh` with pruning (Flux uninstalls the Istio HelmReleases), Secret `cacerts` |
 | 3 | `cluster` | break-glass kubeconfig | the root Kustomization, `platform` (Gateway API CRDs, namespaces, `access/`), `flux uninstall`; Vault `auth/k3s` and the `k3s-creds/` mount; then deletes `kv/lab/breakglass/k3s-admin` (read last, by this row) and `kv/lab/pipeline/gitea-flux` |
 | 5 | `tunnel`, `base` | inventory | nothing to undo on VMs that are about to be destroyed; WireGuard public keys in Vault (`kv/lab/pipeline/wg/*`) |
 | 6 | `setup` | Vault (`iac`, the `tfstate` MinIO user) | `terraform destroy` (run directly, not through the policy gate, which forbids destroying the public IP); then the state object; the `app.lab.test` and `k3s.lab.test` records |
-| 7 | `image` | Vault (admin) | the CloudStack template; MinIO `images/*` |
-| 8 | `provision` | — | CloudStack: services, system VMs, `cloud` and `cloud_usage` DBs, then **purges** `/var/lib/mysql` (an old `cloud` DB left there would poison a reinstall, rule 2), packages (libvirt included), `/etc/cloudstack/` (the generated `key` file outlives a package purge), NFS exports and `/export/*`, `/etc/nfs.conf` pins, the management server's key line in root's `authorized_keys` (the file itself if the baseline had none), the bridge-netfilter udev rule and sysctl file, drop-ins, the CloudStack apt repository, key and version pin, `cmk` |
-| 9 | `platform` | — | unregisters the runner, removes its service; as `lab-runner`, `podman system reset --force` (its rootless images, owned by sub-UIDs); `loginctl disable-linger lab-runner`; `lab-runner`'s work directory; `docker-compose down --volumes` (gateway, Prometheus, Loki and Grafana included), then disables and removes `lab-platform.service` and runs `daemon-reload`, and disables `podman.socket`; removes any containers, the three networks and the volumes left (theirs included; Loki's bucket goes with MinIO's); purges Podman and every package 2.1b and 2.10 added with it (`uidmap`, `slirp4netns`, `dbus-user-session`, and `iptables` if the baseline lacked it) and the dependencies apt pulled in with them (every package the list holds beyond the baseline's; V1), the `/etc/containers/containers.conf.d/` lab file and `/var/lib/containers`; any netavark chains left in the `ip filter` and `ip nat` tables (V2) **[verify what netavark 1.4 leaves after its last network is removed]**; `lab-nftables.service`, the `inet lab` table and `/etc/lab/`; if `decision.podman-fw` chose the fallback, its apt repository and key (2.1c; V1); the systemd-resolved drop-in and the original `/etc/resolv.conf` link; chrony removed and the `systemd-timesyncd` package **reinstalled** and enabled; the Vault and Squid logrotate rules; `/opt/lab/`; `/var/lib/lab/platform`, `/var/lib/lab/certs`, `/var/lib/lab/traefik` (dynamic routes, the users file) and `/var/lib/lab/grafana`; the lab CA from the host trust store |
-| 9a | users | baseline | `userdel`/`groupdel` every user and group the baseline does not have (`lab-runner` with its `/etc/subuid` and `/etc/subgid` lines, `cloud`, `libvirt-qemu`, `libvirt`, and memberships added to `kvm`): package purges leave them behind |
-| 10 | host | `/var/backups/lab/netplan.orig/` | restores the original netplan files, then inside one `netplan try` window deletes `cloud0`, `cloudbr0` and `cloudbr1` (networkd does not release a NIC from a bridge on its own) and applies the restored config; the automation confirms (SIGUSR1) only after it reaches `LAN_GATEWAY` again, otherwise it auto-reverts |
-| 11 | `state/` | — | copies `bootstrap.log` to `/var/backups/lab/down-<timestamp>.log`, then deletes `state/` |
-| 12 | reboot | — | — then run `revert-check` |
+| 7 | `image` (*destroy only*) | Vault (admin) | the CloudStack template; MinIO `images/*` |
+| 8 | `provision` (*destroy only*) | — | CloudStack: services, system VMs, `cloud` and `cloud_usage` DBs, then **purges** `/var/lib/mysql` (an old `cloud` DB left there would poison a reinstall, rule 2), packages (libvirt included), `/etc/cloudstack/` (the generated `key` file outlives a package purge), NFS exports and `/export/*`, `/etc/nfs.conf` pins, the management server's key line in root's `authorized_keys` (the file itself if the baseline had none), the bridge-netfilter udev rule and sysctl file, drop-ins, the CloudStack apt repository, key and version pin, `cmk` |
+| 9 | `platform` (*destroy only*) | — | unregisters the runner, removes its service; as `lab-runner`, `podman system reset --force` (its rootless images, owned by sub-UIDs); `loginctl disable-linger lab-runner`; `lab-runner`'s work directory; `docker-compose down --volumes` (gateway, Prometheus, Loki and Grafana included), then disables and removes `lab-platform.service` and runs `daemon-reload`, and disables `podman.socket`; removes any containers, the three networks and the volumes left (theirs included; Loki's bucket goes with MinIO's); purges Podman and every package 2.1b and 2.10 added with it (`uidmap`, `slirp4netns`, `dbus-user-session`, and `iptables` if the baseline lacked it) and the dependencies apt pulled in with them (every package the list holds beyond the baseline's; V1), the `/etc/containers/containers.conf.d/` lab file and `/var/lib/containers`; any netavark chains left in the `ip filter` and `ip nat` tables (V2) **[verify what netavark 1.4 leaves after its last network is removed]**; `lab-nftables.service`, the `inet lab` table and `/etc/lab/`; if `decision.podman-fw` chose the fallback, its apt repository and key (2.1c; V1); the systemd-resolved drop-in and the original `/etc/resolv.conf` link; chrony removed and the `systemd-timesyncd` package **reinstalled** and enabled; the Vault and Squid logrotate rules; `/opt/lab/`; `/var/lib/lab/platform`, `/var/lib/lab/certs`, `/var/lib/lab/traefik` (dynamic routes, the users file) and `/var/lib/lab/grafana`; the lab CA from the host trust store |
+| 9a | users (*destroy only*) | baseline | `userdel`/`groupdel` every user and group the baseline does not have (`lab-runner` with its `/etc/subuid` and `/etc/subgid` lines, `cloud`, `libvirt-qemu`, `libvirt`, and memberships added to `kvm`): package purges leave them behind |
+| 10 | host (*destroy only*) | `/var/backups/lab/netplan.orig/` | restores the original netplan files, then inside one `netplan try` window deletes `cloud0`, `cloudbr0` and `cloudbr1` (networkd does not release a NIC from a bridge on its own) and applies the restored config; the automation confirms (SIGUSR1) only after it reaches `LAN_GATEWAY` again, otherwise it auto-reverts |
+| 11 | `state/` (*destroy only*) | — | copies `bootstrap.log` to `/var/backups/lab/destroy-<timestamp>.log`, then deletes `state/` |
+| 12 | reboot (*destroy only*) | — | — then run `destroy` again: it finds nothing left and runs the revert checks V1–V5, writing the pass/fail report (13.2) |
 
-`/var/lib/lab/` (unseal key, backups, `archive/`) is **kept** by default, and the next
-`up` archives rather than overwrites it (2.4b). `down --purge-secrets`
-removes it after a confirmation prompt naming every file.
+`/var/lib/lab/` (unseal key, backups, `archive/`) is **kept**, and the next `up`
+archives rather than overwrites it (2.4b). No command removes it: the operator deletes
+it by hand once the unseal key and snapshots are no longer needed.
 
 ---
 
@@ -3168,7 +3187,7 @@ removes it after a confirmation prompt naming every file.
 | Mesh trust root | **decided 2026-11-05: a separate root `pki_mesh`** that signs only the istiod CA (built in the precursor, issue_197 A1), so host trust and mesh trust never overlap. Chosen by the security-first rule (§2): it costs one mount and P2 chaining to it | the istiod sub-CA under `lab.test CA`, DNS-constrained to `cluster.local`: one root fewer, but it could still mint any `*.svc.cluster.local` certificate, and IP SANs if the IP constraint is unavailable, that every host client accepts (§6) |
 | k3s Secrets at rest | `--secrets-encryption` (key on the node); RBAC limits who reads Secrets (8.2c) | a KMS provider plugin, so the key is off the node: the production answer; here it protects `state.db` copies, not the node (§6) |
 | k3s API access | **built:** scoped ServiceAccounts with namespaced Roles, tokens issued per command by Vault's Kubernetes secrets engine, people read-only (`view`), cluster-admin as an audited break-glass kubeconfig in Vault, the API audit log, `pg_hba` without `trust` (8.2c, 8.2d, 8.4a) | admission policy (a `ValidatingAdmissionPolicy` or Kyverno rule) refusing pods in `app`/`db` that use `sa/api` unless created by its Deployment, and refusing exec into `db`: the stronger guard against a borrowed identity, but one more policy layer to debug with the mesh; OIDC logins for people and just-in-time admin (Teleport, an access broker) instead of a static break-glass certificate; rotating k3s's client CA to retire the admin certificate: all production answers, out of scope |
-| API audit log destination | on be-1, rotated (7 days, A1's record, read by `lab` over SSH), plus a copy in Loki (30 days) through node-agents' alloy-audit (8.8d) | a SIEM with alerts on exec, port-forward and `system:admin`: needs alert routing nobody would receive in the build window |
+| API audit log destination | on be-1, rotated (7 days, A1's record, read by `verify` over SSH), plus a copy in Loki (30 days) through node-agents' alloy-audit (8.8d) | a SIEM with alerts on exec, port-forward and `system:admin`: needs alert routing nobody would receive in the build window |
 | Database | CloudNativePG `Cluster`, 1 instance, schema and grants in `postInitApplicationSQL`, no superuser | a hand-written StatefulSet with schema code in the `app` job (the earlier plan): more to write and get wrong (create-once superuser Secret, password re-sets) for no extra lesson; 3 instances with failover: memory |
 | Schema changes | `postInitApplicationSQL`, which runs only at `initdb` | a migration tool (a Job running Alembic, Flyway or Atlas on each release): needed once the schema changes after the first deploy; out of scope |
 | Database backup | `pg_dump` through `kubectl exec`, kept with the Vault snapshot (9.1a) | CNPG's native backups to MinIO (Barman Cloud plugin, WAL archiving, point-in-time restore): the production answer, but it adds a plugin, a bucket with credentials and a CNPG restore path, and the scratch DR drill (9.3) would need a CNPG cluster instead of a plain container; `pg_dump` proves B1–B3 as well |
@@ -3188,24 +3207,27 @@ removes it after a confirmation prompt naming every file.
 | Directory login | not built | a Samba AD DC on its own tier, VMs joined with realmd/SSSD: AD users log in, `sudo` by AD group, one disable revokes access everywhere. Adds a VM, an ACL set and a join role; R1–R7 do not need it |
 | Observability | **decided 2026-11-09 (Option B):** k8s-monitoring (Grafana Alloy) in k3s by Flux, collecting metrics from everything in the cluster, in and out of the mesh, plus pod logs, events and the API audit log; it writes to Prometheus (7 days, 2 GB cap) and Loki (7 days, the audit log 30 days) on the host, behind the gateway with basic auth from be-1 only (`decision.telemetry-auth`: a client certificate from a separate root is the upgrade path); Grafana a fifth host console, Viewer login, the mixin and three lab dashboards; Alertmanager off | in-cluster kube-prometheus-stack (the earlier design): a second gateway and a mgmt-NIC listener on be-1, metrics lost on a restart, no logs; alerts on tunnel handshakes, hub drops, mesh denials and unexpected Vault decrypts: alert routing nobody would receive in the build window; Mimir and long retention: the production answer for many clusters |
 | Telemetry: traces (OpenTelemetry) | **highly recommended option, not in the core build** (added 2026-11-09; slot after 8.8d): OpenTelemetry auto-instrumentation in the api (Flask, `psycopg`, and `requests`, which carries `hvac`'s Vault calls; packages pinned with `--require-hashes` like the rest), exporting OTLP/HTTP to Alloy's receiver `alloy.monitoring:4318` (`applicationObservability` on; ALLOW Alloy ← `sa/api` on 4318; Alloy's ClusterRole gains `replicasets`); Alloy forwards it through an `otlp` destination to Tempo on the host through the gateway (`tempo.lab.test`, one more SAN, `Path(/v1/traces)`, the same allowlist and basic auth), Tempo's data in a MinIO bucket `tempo`, Tempo added to Grafana. About a day of work, ~0.4 GB on the host and ~0.1 GB more for Alloy; no firewall or waypoint change, since pod egress to `10.250.0.1:443` is already allowed. Proof: one `POST /customers` shows the api, Vault-login, Transit and Postgres spans in one trace | frontend and gateway spans for an end-to-end trace from fe-1 (fe-1 → host OTLP is a new mgmt flow); Istio waypoints for per-hop L7 spans (an Envoy per namespace: memory on be-1) |
-| Longevity and hardening | 30-day host certificates, no renewal timer; nothing that only matters after the build window | renewal timers and hot-reload checks, CRLs and revocation, istiod CA rotation, CIS hardening and an image scan/SBOM, `tfstate` versioning, Gitea and state backups, teardown and reboot drills, ADRs and a runbook: worth having for a long-lived estate, not for a 3-week build proven by `demo` |
+| Longevity and hardening | 30-day host certificates, no renewal timer; nothing that only matters after the build window | renewal timers and hot-reload checks, CRLs and revocation, istiod CA rotation, CIS hardening and an image scan/SBOM, `tfstate` versioning, Gitea and state backups, teardown and reboot drills, ADRs and a full runbook (beyond 14.4's few procedures): worth having for a long-lived estate, not for a 3-week build proven by a green pipeline run and `up`'s local stage (§13) |
 | Frontend → api encryption | **built:** mutual TLS from the frontend to the backend gateway, end to end inside the WireGuard tunnels (`pki_app`, both keys generated where used), so tun-1 forwards ciphertext only | server-auth TLS only: simpler, but anything that reached the overlay could call the api; the client certificate reuses fe-1's CSR flow (8.7f). TLS straight to the api pod: the gateway would pass it through and the api would carry TLS code the mesh already provides |
-| Third-party image mirror | **option, not in the core build** (added 2026-11-09; slot after 8.1c): `lab cluster` copies each pinned public image (Istio, CloudNativePG, the Vault Secrets Operator, the k8s-monitoring images, Caddy) by digest from its registry to `gitea.lab.test/lab/mirror/` with `skopeo copy`, on the host, after a Trivy scan, the way 8.1c mirrors charts; a digest already there is skipped. be-1's `registries.yaml` and fe-1's `registries.conf` point `docker.io`, `quay.io`, `ghcr.io` and `registry.k8s.io` at that mirror (**[verify]** k3s's `rewrite` and Podman's `location` with a path prefix at the pinned versions), and the registries leave Squid's allow-list, so VMs fetch only apt packages and the k3s binary through Squid. About one M session and a few GB in Gitea; no new service and no firewall change, since VMs already reach the gateway. Proof: with the registries off the allow-list, a rebuilt be-1 starts every pod and Squid's log shows no registry request | Harbor or Nexus as a pull-through cache: the enterprise answer, but ~2 GB on the host and another console; Zot with on-demand sync: lighter, still one more service; air-gap bundles carried in by hand: the answer for networks with no egress at all |
+| Third-party image mirror | **option, not in the core build** (added 2026-11-09; slot after 8.1c): the `cluster` job copies each pinned public image (Istio, CloudNativePG, the Vault Secrets Operator, the k8s-monitoring images, Caddy) by digest from its registry to `gitea.lab.test/lab/mirror/` with `skopeo copy`, on the host, after a Trivy scan, the way 8.1c mirrors charts; a digest already there is skipped. be-1's `registries.yaml` and fe-1's `registries.conf` point `docker.io`, `quay.io`, `ghcr.io` and `registry.k8s.io` at that mirror (**[verify]** k3s's `rewrite` and Podman's `location` with a path prefix at the pinned versions), and the registries leave Squid's allow-list, so VMs fetch only apt packages and the k3s binary through Squid. About one M session and a few GB in Gitea; no new service and no firewall change, since VMs already reach the gateway. Proof: with the registries off the allow-list, a rebuilt be-1 starts every pod and Squid's log shows no registry request | Harbor or Nexus as a pull-through cache: the enterprise answer, but ~2 GB on the host and another console; Zot with on-demand sync: lighter, still one more service; air-gap bundles carried in by hand: the answer for networks with no egress at all |
 | Egress control | proxy allow-list | ACL allow-list by CIDR: registries and mirrors sit behind CDNs, so CIDR lists rot |
 | Console exposure | host only, each tool's own login, read-only identities everywhere | consoles on the LAN behind SSO (OIDC from a directory): the enterprise answer; needs the directory (above) |
 | Grafana access | a host console behind the gateway, on the one gateway certificate, Viewer login | on be-1 behind its own Istio gateway on the mgmt NIC (the earlier design): a second gateway, a DNAT rule and a `pki/sign/grafana` role; `kubectl port-forward`: plain HTTP on the host's loopback and a helper process to keep alive |
 | CI runner | one runner on the host as `lab-runner` (in `kvm` only; images built with rootless Podman), one label, every job; `main` protected by a required `pr.yml` check with 0 approvals | separate untrusted runners for pull requests (no host access, no deploy credentials), a deploy runner only `main` can reach, a remote BuildKit service, and a required second reviewer: the enterprise answer once more than one person pushes. With one operator, every PR is the operator's own code, so a PR running with host access and the pipeline identity is an accepted, stated risk |
-| Control-plane runtime | **decided 2026-11-09: Podman over Docker; 2026-11-10: Compose over quadlets.** Rootful Podman from the Ubuntu 24.04 archive, the host services in one `compose.yaml` run by a pinned `docker-compose` v2 against Podman's socket, started by `lab-platform.service` after the firewall; TLS at a gateway, Vault direct; rootless Podman for the runner's image builds | Docker Compose (the earlier design): a root daemon, a third-party apt repo and key, and the `docker` group, which made the runner root-equivalent; Docker also set FORWARD to drop and loaded `br_netfilter`, which the lab had to undo (§10 rule 13). Podman has no daemon and the runner needs no privileged group. Quadlets (one systemd unit per container, the native way on a Podman production host) were the first choice; Compose replaced them because the operator already knows it, one file shows the whole control plane, and Podman 4.9's quadlets lack `AddHost=` and `Notify=healthy`. Compose's costs: rootful Podman's API socket is on (root-only), services are not separate systemd units (`podman logs`, `docker-compose restart`), and the firewall dependency is on the whole stack. Its costs: netavark adds no forward filtering, so the lab's table is the default deny (2.2), and aardvark-dns moves off port 53 (2.1c). If the 2.1c spike fails, the named fallback is Podman 5.x with netavark ≥ 1.10 (nftables driver) from a pinned third-party apt repository, today OBS `home:alvistack` **[verify]**, removed by `down`; returning to Docker is the last resort. A host k3s cluster with a mesh: the mesh's CA would be Vault running inside it, CloudStack and `/dev/kvm` builds cannot move in, and k3s needs bridge netfilter on, which breaks bridged VM traffic (§10 rule 13). Enterprises keep foundation services (DNS, PKI, SCM, artifact store) outside the platforms they bootstrap |
+| Control-plane runtime | **decided 2026-11-09: Podman over Docker; 2026-11-10: Compose over quadlets.** Rootful Podman from the Ubuntu 24.04 archive, the host services in one `compose.yaml` run by a pinned `docker-compose` v2 against Podman's socket, started by `lab-platform.service` after the firewall; TLS at a gateway, Vault direct; rootless Podman for the runner's image builds | Docker Compose (the earlier design): a root daemon, a third-party apt repo and key, and the `docker` group, which made the runner root-equivalent; Docker also set FORWARD to drop and loaded `br_netfilter`, which the lab had to undo (§10 rule 13). Podman has no daemon and the runner needs no privileged group. Quadlets (one systemd unit per container, the native way on a Podman production host) were the first choice; Compose replaced them because the operator already knows it, one file shows the whole control plane, and Podman 4.9's quadlets lack `AddHost=` and `Notify=healthy`. Compose's costs: rootful Podman's API socket is on (root-only), services are not separate systemd units (`podman logs`, `docker-compose restart`), and the firewall dependency is on the whole stack. Its costs: netavark adds no forward filtering, so the lab's table is the default deny (2.2), and aardvark-dns moves off port 53 (2.1c). If the 2.1c spike fails, the named fallback is Podman 5.x with netavark ≥ 1.10 (nftables driver) from a pinned third-party apt repository, today OBS `home:alvistack` **[verify]**, removed by `destroy`; returning to Docker is the last resort. A host k3s cluster with a mesh: the mesh's CA would be Vault running inside it, CloudStack and `/dev/kvm` builds cannot move in, and k3s needs bridge netfilter on, which breaks bridged VM traffic (§10 rule 13). Enterprises keep foundation services (DNS, PKI, SCM, artifact store) outside the platforms they bootstrap |
 | Supply-chain admission | images scanned and pinned by digest; Pod Security Admission `restricted` | cosign signing at push with a Kyverno/policy-controller verify rule at admission: the production answer for "only our images run"; here digest pinning in reviewed manifests gives the same guarantee for a single registry and operator |
-| Gateway certificates | one certificate for every gateway name, issued by `lab maintain`, Traefik restarted on re-issue | per-hostname certificates hot-reloaded on renewal, or ACME from Vault's PKI (Traefik as an ACME client): the common enterprise pattern; renewal machinery a 3-week build never exercises |
+| Gateway certificates | one certificate for every gateway name, issued by the renewal that `up`, `update` and the platform phase run, Traefik restarted on re-issue | per-hostname certificates hot-reloaded on renewal, or ACME from Vault's PKI (Traefik as an ACME client): the common enterprise pattern; renewal machinery a 3-week build never exercises |
 | Golden-image transport | SSVM copy over plain HTTP from the gateway's `images/` route, checksum verified | direct-download templates over HTTPS with `lab.test CA` uploaded to the KVM host: TLS on that hop, but an extra trust upload and an admin-only registration path |
 | Behind the gateway | plain HTTP on an internal Podman network and loopback | re-encrypting to every backend: needed when the network behind the gateway is shared or untrusted; here it never leaves the host |
 | SSH host trust | per-job `known_hosts` with `accept-new` | Vault's SSH CA signing host and user certificates, so host keys are verified and no static key exists: the production answer, out of scope |
 | istiod CA name constraints | DNS constrained to `cluster.local`; IP/URI constraints only if the pinned Vault accepts them (2.5d) | an offline-root PKI where the intermediate is constrained by the signing ceremony itself: out of scope; the pipeline identity that could request it already runs with host access (2.10) |
 | Management network isolation | in-guest nftables on a shared host-only bridge | private VLANs or per-VM L2 isolation, so a VM's root cannot reach another VM's mgmt NIC: needs Open vSwitch PVLAN support in CloudStack |
 | Privileged access | SSH to the host as Ubuntu ships it, from `LAN_CIDR` only (2.2); CloudStack adds the KVM host as root with a key limited by `from=` to the host's own address (3.1c) | key-only SSH hardening (the option below); AD logins (above), Teleport/Boundary with an SSH CA and session recording: the production answer, out of scope |
-| Host SSH hardening | **option, not in the core build** (moved out of 2.2 on 2026-11-10; about one M session, folds into 2.2): config key `OPERATOR_LOGIN`, which preflight requires to be a local non-root user with a usable key in the file `sshd -T -C user=<login>` names (owned by the user, not group- or world-writable); a drop-in `/etc/ssh/sshd_config.d/00-lab.conf` (sorts before cloud-init's `50-cloud-init.conf`; sshd keeps the first value) with `PasswordAuthentication no`, `KbdInteractiveAuthentication no`, `PermitRootLogin prohibit-password`, `AllowUsers <OPERATOR_LOGIN> root@<HOST_IP>` (the second for 3.1c; `user@host` avoids a `Match` block), `X11Forwarding no`, `AllowAgentForwarding no`, `PermitTunnel no`, `AllowStreamLocalForwarding no`, `AllowTcpForwarding local` (`ssh -D`, `-L`, `-J` work; `-R` does not); a per-source nftables meter on new tcp 22 connections (`limit rate over 10/minute burst 10 packets`); lockout guards: the key check re-runs, `install -d -m 0755 /run/sshd` then `sshd -t` (a failure removes the file), then `systemctl try-reload-or-restart ssh`, the applying session kept open. Check H1: `ssh -o PreferredAuthentications=none` as `OPERATOR_LOGIN`, root and an unknown user lists only `publickey`; root and a temporary keyed user from the LAN are refused. 1.1 records `sshd -T`; teardown removes the drop-in and reloads; V3 compares `sshd -T` with the baseline. Further tightenings: refuse stray `AllowUsers`/`AllowGroups`/`Match` lines elsewhere in the sshd config (sshd adds up `AllowUsers` from every file); a timed undo (`systemd-run --on-active=5min` removes the drop-in unless confirmed from a new session) | the core build keeps Ubuntu's SSH defaults to stay on the core functions; the risk accepted is password logins from `LAN_CIDR` if the host allows them |
-| Linting | **option, not in the core build** (moved out of 0.2c on 2026-11-10; about one M session): a `lint` command and `pr.yml` job running ruff, mypy, shellcheck (`bootstrap.sh`), yamllint, ansible-lint and tflint, each only over the file types that exist so far, failing when files of a type exist but its linter is missing; ruff, mypy, yamllint and ansible-lint hash-pinned in `requirements-dev.txt`, shellcheck and tflint pinned in `versions.py` | not needed for the core functions; unit tests, `terraform plan` + policy, `trivy config`, kubeconform and the no-Secrets rule still gate every PR (10.1) |
+| Host SSH hardening | **option, not in the core build** (moved out of 2.2 on 2026-11-10; about one M session, folds into 2.2): config key `OPERATOR_LOGIN`, which preflight requires to be a local non-root user with a usable key in the file `sshd -T -C user=<login>` names (owned by the user, not group- or world-writable); a drop-in `/etc/ssh/sshd_config.d/00-lab.conf` (sorts before cloud-init's `50-cloud-init.conf`; sshd keeps the first value) with `PasswordAuthentication no`, `KbdInteractiveAuthentication no`, `PermitRootLogin prohibit-password`, `AllowUsers <OPERATOR_LOGIN> root@<HOST_IP>` (the second for 3.1c; `user@host` avoids a `Match` block), `X11Forwarding no`, `AllowAgentForwarding no`, `PermitTunnel no`, `AllowStreamLocalForwarding no`, `AllowTcpForwarding local` (`ssh -D`, `-L`, `-J` work; `-R` does not); a per-source nftables meter on new tcp 22 connections (`limit rate over 10/minute burst 10 packets`); lockout guards: the key check re-runs, `install -d -m 0755 /run/sshd` then `sshd -t` (a failure removes the file), then `systemctl try-reload-or-restart ssh`, the applying session kept open. Check H1: `ssh -o PreferredAuthentications=none` as `OPERATOR_LOGIN`, root and an unknown user lists only `publickey`; root and a temporary keyed user from the LAN are refused. 1.1 records `sshd -T`; `destroy` removes the drop-in and reloads; V3 compares `sshd -T` with the baseline. Further tightenings: refuse stray `AllowUsers`/`AllowGroups`/`Match` lines elsewhere in the sshd config (sshd adds up `AllowUsers` from every file); a timed undo (`systemd-run --on-active=5min` removes the drop-in unless confirmed from a new session) | the core build keeps Ubuntu's SSH defaults to stay on the core functions; the risk accepted is password logins from `LAN_CIDR` if the host allows them |
+| Linting | **option, not in the core build** (moved out of the scaffold step on 2026-11-10; about one M session): a `lint` job in `pr.yml` running ruff, mypy, shellcheck (`bootstrap.sh`), yamllint, ansible-lint and tflint, each only over the file types that exist so far, failing when files of a type exist but its linter is missing; ruff, mypy, yamllint and ansible-lint hash-pinned in a dev requirements file this option adds, shellcheck and tflint pinned in `versions.py` | not needed for the core functions; `terraform plan` + policy, `trivy config`, kubeconform and the no-Secrets rule still gate every PR (10.1) |
+| Unit tests | **option, not in the core build** (removed 2026-11-10): pytest over `lab/` in a `tests/` tree, with a `pyproject.toml`, hash-pinned dev tools in `requirements-dev.txt` and a repo `.venv/`, run as a `pr.yml` job | testing happens as the lab is built: each step's Exit is run by hand on the CLI, and every change runs through the Gitea pipeline (`pr.yml`'s gates, then `verify`); most units would only mock CloudStack, Vault and k3s |
+| `status` command | **option, not in the core build** (removed 2026-11-10): a read-only `status` command printing each phase's `check()` result, the pinned versions, Vault's seal state, the gateway, the Vault audit disk usage and host memory against the §5 budget | the core build keeps four commands; `up` and `update` log each phase's state as they converge, and a version is one `/opt/lab/bin/<tool> version` away |
+| Examiner walkthrough (`demo`) | **option, not in the core build** (removed 2026-11-10; about two M sessions): a `demo` command running a 14-minute walkthrough (shape, tiers and tunnel, application, encryption, zero trust, trust chain, backup, operations) as re-runnable proofs with human-readable output, reusing the `verify` checks; E2/E3 on the real `customers` key with every row rewrapped first; the break-glass port-forward shown in S4 and A1; a hand edit Flux reverts; kept as `docs/walkthrough.md` with real output | the evidence already exists without it: a green `deliver.yml` run ending in `verify`, and `up`'s local stage for B2/B3 (§13); a walkthrough re-states it for a human audience |
 | Egress tightening | **option, not in the core build** (added 2026-11-09; folds into 2.2, minutes of work): Gitea's public egress in rule 4 also excludes `100.64.0.0/10` (carrier-grade NAT) and `169.254.0.0/16` (link-local, where cloud metadata services listen), so a compromised Gitea cannot reach a provider's metadata endpoint or a CGNAT neighbour; the 2.2 Exit adds `169.254.169.254:443` timing out from Gitea's address | not needed for the core functions |
 | Defence in depth inside k3s | mesh identity (AuthorizationPolicy) only | Kubernetes NetworkPolicies as an L3 layer under the mesh: worth it with many teams; its interplay with ambient's HBONE port needs care, out of scope |
 | Git provenance | protected `main`, read-only Flux token | Flux verifying signed commits: needs every merge signed by a key Flux trusts, Gitea's merge commits included |
@@ -3222,7 +3244,7 @@ removes it after a confirmation prompt naming every file.
 | Alloy | Grafana Alloy: a telemetry collector that scrapes metrics, reads logs and forwards both (here by remote write to Prometheus and push to Loki on the host) |
 | Alloy Operator | the controller k8s-monitoring 4.x uses to run Alloy from an `Alloy` custom resource; here confined to `monitoring`, with no ClusterRoles of its own |
 | AppRole | a Vault login for machines: a `role_id` (like a username) plus a `secret_id` (like a password, with a TTL) |
-| break-glass | an emergency credential kept out of daily use: here the k3s cluster-admin kubeconfig, read only through `lab k3s-admin`, `down` and two `demo` proofs, every read audited |
+| break-glass | an emergency credential kept out of daily use: here the k3s cluster-admin kubeconfig, read only by `teardown`/`destroy` (§14 rows 0–3) and by hand through the runbook's procedure (a `0600` temp file deleted after use), every read audited |
 | CPVM / SSVM | CloudStack system VMs: the console proxy (browser VM consoles) and the secondary-storage VM (copies templates) |
 | CNPG | CloudNativePG: an operator that runs PostgreSQL from a `Cluster` resource (pods, PVCs, Services, TLS, declared roles) |
 | `cmk` | CloudMonkey, CloudStack's CLI |
@@ -3234,6 +3256,7 @@ removes it after a confirmation prompt naming every file.
 | hub (tun-1) | the tunnel tier's VM; terminates both WireGuard tunnels and forwards one allowed flow |
 | k8s-monitoring | Grafana's Helm chart that deploys Alloy, the Alloy Operator, kube-state-metrics and node-exporter and writes Alloy's configuration from feature switches |
 | kubernetes-mixin | the community's recording rules and dashboards for Kubernetes (with the node-mixin for node-exporter), rendered from jsonnet |
+| local stage (`up`) | what `up` runs as root on the host once the pipeline is green: the Vault DR drill (B3, B2), which needs the unseal key the runner can never read, then the `verify` job's pass/fail summary |
 | Loki | Grafana's log store: indexes labels only, keeps chunks in object storage (here MinIO) |
 | meter (nftables) | a rule that adds each source to a dynamic set with its own rate limit, so one noisy address is limited without affecting others; used by the SSH-hardening option (§15) |
 | `min_decryption_version` | Transit key setting: ciphertext older than this key version can no longer be decrypted |
@@ -3259,7 +3282,7 @@ removes it after a confirmation prompt naming every file.
 
 ## 17. Build tracking: steps, handoffs and the registry
 
-The build spans 94 sessions, and each starts cold. Two records outside the repo carry what a session needs from earlier ones, in a private repo `~/lab-tracker`
+The build spans 91 sessions, and each starts cold. Two records outside the repo carry what a session needs from earlier ones, in a private repo `~/lab-tracker`
 (created when the build starts; the learner commits it, Claude never does):
 
 - **beads** (`bd`): one issue per step (§17.4), with the Needs as dependencies. It answers
@@ -3287,7 +3310,7 @@ place), and the story in the log.
 | Image and Terraform | `img.`, `cfg.`, `tf.`, `policy.` | image versions, state location, gate files | `img.template`, `tf.backend` |
 | VMs | `vm.`, `ssh.`, `ansible.`, `wg.` | per-VM addresses, access, roles, tunnel | `vm.be-1`, `wg.keys` |
 | Cluster and app | `k8s.`, `flux.`, `mesh.`, `db.`, `vso.`, `api.`, `fe.`, `mon.` | cluster objects, GitOps, mesh CA, app pieces, monitoring | `flux.kustomizations`, `mesh.ca`, `db.cluster` |
-| Operations | `ci.`, `backup.`, `dr.`, `verify.`, `demo.`, `console.` | pipeline, drills, checks, consoles | `ci.dispatch`, `dr.canary`, `console.urls` |
+| Operations | `ci.`, `backup.`, `dr.`, `verify.`, `console.` | pipeline, drills, checks, consoles | `ci.dispatch`, `dr.canary`, `console.urls` |
 | Code map | `code.`, `cmd.` | where a helper lives; the exact command for a recurring task | `code.config`, `cmd.kubeconfig` |
 | Decisions | `decision.` | a choice made during the build, and the alternative | `decision.mesh-root`, `decision.observability`, `decision.runtime` |
 | Spikes | `spike.` | results that gate later steps | `spike.netavark-fw`, `spike.mgmt-nic`, `spike.t1-capture` |
@@ -3370,7 +3393,7 @@ words. A contract may name a family: `vault.policy.*`, `vm.<name>`.
 
 ### 17.4 Step index
 
-94 steps, all required: 21 S (60 min), 73 M (105 min), 148.75 h in the full study
+91 steps, all required: 20 S (60 min), 71 M (105 min), 144.25 h in the full study
 loop. Import one bead per row.
 
 | ID | Title | Needs | Phase | Size |
@@ -3378,7 +3401,6 @@ loop. Import one bead per row.
 | 0.1 | Shim and package | — | 0 | M |
 | 0.2a | Command map and phase interface | 0.1 | 0 | M |
 | 0.2b | Config and pins | 0.2a | 0 | S |
-| 0.2c | Dev tools and tests | 0.2a | 0 | S |
 | 1.1 | Baseline and netplan backup | 0.2b | 1 | M |
 | 1.2a | Preflight checks | 1.1 | 1 | M |
 | 1.3 | Toolchain | 1.2a | 1 | M |
@@ -3391,7 +3413,7 @@ loop. Import one bead per row.
 | 2.4a | Vault server | 2.3a | 2 | M |
 | 2.4b | Init and unseal | 2.4a | 2 | M |
 | 2.5a | PKI: the CA and its roles | 2.4b | 2 | M |
-| 2.5b | Vault's own certificate, host trust and `lab maintain` | 2.5a | 2 | S |
+| 2.5b | Vault's own certificate, host trust and renewal | 2.5a | 2 | S |
 | 2.5c | KV and Transit | 2.4b | 2 | S |
 | 2.5f | Separate roots: `pki_mesh` and `pki_app` | 2.4b | 2 | S |
 | 2.5d | Policies | 2.5a, 2.5c, 2.5f | 2 | M |
@@ -3409,7 +3431,7 @@ loop. Import one bead per row.
 | 3.2a | `cmk` and the scoped accounts | 3.1d | 3 | M |
 | 3.3a | Offerings and the mgmt network | 3.2a | 3 | M |
 | 3.3b | Spike: a mgmt NIC on a VPC VM | 3.3a, 3.2a | 3 | M |
-| 3.5a | Seed, workflows and branch protection | 2.10, 0.2c | 3 | M |
+| 3.5a | Seed, workflows and branch protection | 2.10 | 3 | M |
 | 3.5b | Hand-off: dispatch and follow | 3.5a, 3.3b | 3 | M |
 | 3.5c | Platform consoles | 3.2a, 2.7, 2.7b, 2.8, 2.5e | 3 | M |
 | 4.1a | Build through the proxy | 2.9, 1.3, 3.5b | 4 | M |
@@ -3463,21 +3485,22 @@ loop. Import one bead per row.
 | 12.1b | `verify`: data, secrets, mesh and API access | 12.1a | 12 | M |
 | 12.1c | `verify`: TLS and the `verify` job | 12.1b | 12 | M |
 | 12.1f | `verify`: observability, consoles and GitOps | 12.1c, 8.8b, 8.8d, 3.5c | 12 | M |
-| 12.2 | `demo`: shape, tunnel, application, encryption | 12.1f, 9.1a | 12 | M |
-| 12.3 | `demo`: zero trust, trust chain, backup, operations | 12.2, 9.4 | 12 | M |
-| 13.1a | `down` orchestration | 12.3, 14.4, 10.1, 10.2, 10.3a, 9.2 | 13 | M |
+| 13.1a | `teardown` and `destroy` orchestration | 12.1f, 14.4, 10.1, 10.2, 10.3a, 9.2 | 13 | M |
 | 13.1b | Host restore | 13.1a | 13 | M |
-| 13.2 | `revert-check` | 13.1b | 13 | M |
-| 14.4 | Walkthrough with real output | 12.3 | 14 | S |
+| 13.2 | Revert check in `destroy` | 13.1b | 13 | M |
+| 14.4 | Runbook and evidence | 12.1f, 9.4 | 14 | S |
 
 ### 17.5 Old → new step numbers
 
 Steps not listed kept their number. A bare old number now names the whole group.
 **Removed** numbers stay unused; what they built is summarised in §15.
+On 2026-11-10, 0.2c (dev tools and unit tests), 12.2 and 12.3 (`demo`) were removed:
+each step's Exit, run by hand, and the Gitea pipeline are the tests, and the evidence is a
+green `deliver.yml` run plus `up`'s local stage (§13).
 
 | Old | New |
 |---|---|
-| 0.2 | 0.2a, 0.2b, 0.2c |
+| 0.2 | 0.2a, 0.2b; 0.2c removed (2026-11-10) |
 | 1.2 | 1.2a; 1.2b removed (nested-host checks: by hand, §5) |
 | 2.1, 2.3, 2.4 | 2.1a–2.1b, 2.3a–2.3b, 2.4a–2.4b; new 2.1c (spike: netavark's firewall driver) |
 | 2.5 | 2.5a–2.5e; new 2.5f (separate roots `pki_mesh`, `pki_app`) |
@@ -3501,6 +3524,6 @@ Steps not listed kept their number. A bare old number now names the whole group.
 | 9.3 | 9.3a, 9.3b |
 | 10.3 | 10.3a; 10.3b removed |
 | Phase 11 (11.1a–11.2) | removed; a smaller monitoring stack returned as 8.8a, 8.8b, 8.8d and 2.7b |
-| 12.1 | 12.1a; 12.1b (was 12.1b + 12.1c); 12.1c (was 12.1d + the job from 12.1e); 12.1d, 12.1e removed; new 12.1f (observability, consoles, GitOps); new 12.2, 12.3 (`demo`) |
+| 12.1 | 12.1a; 12.1b (was 12.1b + 12.1c); 12.1c (was 12.1d + the job from 12.1e); 12.1d, 12.1e removed; new 12.1f (observability, consoles, GitOps); 12.2, 12.3 (`demo`) added, then removed 2026-11-10 |
 | 13.1 | 13.1a, 13.1b; 13.1c–13.1e removed |
-| 14.1, 14.2 (14.2a, 14.2b), 14.3, 14.5 | removed; 14.4 kept |
+| 14.1, 14.2 (14.2a, 14.2b), 14.3, 14.5 | removed; 14.4 kept (now "Runbook and evidence", 2026-11-10) |

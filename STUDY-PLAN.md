@@ -20,9 +20,9 @@ learning loop adopted in `senior_jqr/issue_197/LESSON_PLAN.md` ("How every step 
 
 The format decides what "write it from a blank page" means in §2 (level W4). Find out and fill it in.
 
-**Scope in three weeks.** Every step of PLAN §17.4 is scheduled: 92 steps, all required.
+**Scope in three weeks.** Every step of PLAN §17.4 is scheduled: 91 steps, all required.
 Exam-critical steps run the full loop; plumbing runs on the fast track (§3.8). The first six
-steps of §3.8's cut order are already on the fast track, which leaves about 3 h of slack
+steps of §3.8's cut order are already on the fast track, which leaves about 4.6 h of slack
 (§6.1); read the rest of the cut order before week 1.
 
 ---
@@ -102,8 +102,8 @@ tier follows the session mode (§3.8): guided steps make Tier A, fast-track step
 | Tier | What | Target in the window | Examples from PLAN-enterprise.md |
 |---|---|---|---|
 | **A — write from blank** | Files from guided steps: they carry R1–R3, R5's GitOps and the security properties an examiner probes | E3 · W3 · D3 (level 4 needs ≥ 7 days since last study: only if the exam is a week or more after the window) | Vault config + init/unseal (2.4a–2.4b); PKI roots and roles, Vault's certificate, policies (2.5a, 2.5b, 2.5d, 2.5f); Terraform VPC/tiers/ACLs (5.2); Rego policy and the gated apply (5.3a–5.3b); `base` nftables (6.1b); the hub's forward policy (6.2b); the Flux tree and its gates (8.1b); Vault Kubernetes auth (8.2a); the k3s RBAC split, `k3s-creds` and break-glass (8.2c); istiod CA, Istio HelmReleases, STRICT (8.3a–8.3c); CNPG `Cluster` with its `pg_hba`, VSO objects (8.4a–8.4b); `api` policy and role (8.5); the api's Transit client and endpoints (8.7b–8.7c); the mutual-TLS gateway, the client certificate, default deny (8.7d, 8.7g, 8.7h); backup, restore, the scratch-Vault DR, shred (9.1a–9.3a, 9.4) |
-| **B — explain what Claude wrote** | Fast-track files (§3.8) | E3 · W1 · D2 | `bootstrap.sh` shim and `lib/` (0); host nftables (2.2); KV/Transit and the bootstrap AppRole (2.5c, 2.5e); Terraform compute (5.4a); WireGuard keys and tunnels (6.2a); the k3s API audit policy (8.2d); postgres's AuthorizationPolicy (8.4c); the DR canary decrypt (9.3b); Corefile (2.3a); Traefik, MinIO, Gitea, runner (2.6–2.10); CloudStack provisioning (3); `lab consoles` (3.5c); Packer (4); Ansible `base`, `k3s`, `frontend` roles; chart mirror (8.1c); images (8.6); kube-prometheus-stack values, dashboards, the `ops` gateway (8.8a–8.8c); `pr.yml`, `deliver.yml`, `schedules.yml` (10); `verify`/`demo` (12); teardown/revert (13) |
-| **C — explain its role** | Third-party and generated files; what was not built | E2 | the CloudStack packages' own setup scripts (`cloudstack-setup-databases`, `cloudstack-setup-management`); Flux's `gotk-components.yaml`; `versions.py` pins; dev-tool config (`pyproject.toml`, `.yamllint`); PLAN §15's not-built rows (directory login, Loki and alerting, CNPG native backups, schema migrations, longevity and hardening) |
+| **B — explain what Claude wrote** | Fast-track files (§3.8) | E3 · W1 · D2 | `bootstrap.sh` shim and `lib/` (0); host nftables (2.2); KV/Transit and the bootstrap AppRole (2.5c, 2.5e); Terraform compute (5.4a); WireGuard keys and tunnels (6.2a); the k3s API audit policy (8.2d); postgres's AuthorizationPolicy (8.4c); the DR canary decrypt (9.3b); Corefile (2.3a); Traefik, MinIO, Gitea, runner (2.6–2.10); CloudStack provisioning (3); the console logins (3.5c); Packer (4); Ansible `base`, `k3s`, `frontend` roles; chart mirror (8.1c); images (8.6); kube-prometheus-stack values, dashboards, the `ops` gateway (8.8a–8.8c); `pr.yml`, `deliver.yml`, `schedules.yml` (10); `verify` (12); `teardown`, `destroy` and the revert check (13); the runbook (14.4) |
+| **C — explain its role** | Third-party and generated files; what was not built | E2 | the CloudStack packages' own setup scripts (`cloudstack-setup-databases`, `cloudstack-setup-management`); Flux's `gotk-components.yaml`; `versions.py` pins; PLAN §15's not-built rows (directory login, Loki and alerting, CNPG native backups, schema migrations, longevity and hardening) |
 
 Move a file up a tier if your exam format turns out to need it.
 
@@ -234,7 +234,7 @@ In the 3-week plan the fast track (§3.8) uses this hatch by default for plumbin
 | **"Fill it in" costs a prediction, annotation, W1 cap and a 48-h rebuild** | Keeps the escape hatch while making sure generation still happens later [36]. |
 | **Claude never writes the *Why*** | Earlier log entries were reconstructed by Claude. Generating it yourself is the learning [16]; rewrite those entries in your own words when you next review them. |
 | **Closing recall shortened from 15 to 8–10 min, plus next-day retrieval** | Recall straight after study is mostly short-term memory; the delayed retrieval in the next session's warm-up is the real test [1][8]. |
-| **Fast track for plumbing (§3.8)** | 92 full loops (146.75 h) do not fit three weeks. Generation is spent where the exam probes; prediction and annotation keep the rest from becoming passive reading [32][36]. |
+| **Fast track for plumbing (§3.8)** | 91 full loops (144.25 h) do not fit three weeks. Generation is spent where the exam probes; prediction and annotation keep the rest from becoming passive reading [32][36]. |
 
 ### 3.8 Fast track (the 3-week default for plumbing)
 
@@ -244,7 +244,7 @@ The full loop runs only on exam-critical steps. Every other required step is **f
 | Mode | Required steps (PLAN §17.4) | Session | Tier |
 |---|---|---|---|
 | **Guided** (§3.1), 29 steps | Vault and the three roots 2.4a–2.4b, 2.5a, 2.5b, 2.5d, 2.5f · VPC/VPN 5.2, 5.3a–5.3b, 6.1b, 6.2b · GitOps 8.1b · Vault for the cluster 8.2a · k3s API least privilege 8.2c · mesh 8.3a–8.3c · database (CNPG, VSO) and encryption 8.4a–8.4b, 8.5, 8.7b–8.7c · end-to-end mTLS and default deny 8.7d, 8.7g, 8.7h · backup, restore, DR, crypto-shredding 9.1a–9.3a, 9.4 | S 60 · M 105 min | A |
-| **Fast track**, 63 steps | scaffolding and preflight (0–1); host plumbing (2.1a–2.3b, 2.6–2.10); moved from guided by the cut order below: 2.5c, 2.5e, 5.4a, 6.2a, 8.4c, 9.3b; the CloudStack install and the consoles (3); the golden image (4); 5.1, 5.4b, 6.1a; k3s, its API audit log, chart mirror and images (8.1, 8.2d, 8.1c, 8.6a–8.6b); api plumbing, frontend, edge TLS (8.7a, 8.7e–8.7f); monitoring and the Grafana console (8.8a–8.8c); CI wiring (10); `verify`/`demo` (12); teardown (13); 14.4 | S 35 · M 60 min | B |
+| **Fast track**, 62 steps | scaffolding and preflight (0–1); host plumbing (2.1a–2.3b, 2.6–2.10); moved from guided by the cut order below: 2.5c, 2.5e, 5.4a, 6.2a, 8.4c, 9.3b; the CloudStack install and the consoles (3); the golden image (4); 5.1, 5.4b, 6.1a; k3s, its API audit log, chart mirror and images (8.1, 8.2d, 8.1c, 8.6a–8.6b); api plumbing, frontend, edge TLS (8.7a, 8.7e–8.7f); monitoring and the Grafana console (8.8a–8.8c); CI wiring (10); `verify` (12); `teardown` and `destroy` (13); the runbook (14.4) | S 35 · M 60 min | B |
 
 A fast-track M session: retrieve (5) → read the step and write what the code will contain and do
 (10) → Claude writes it; you annotate every line and run the Exit yourself (35; installs and
@@ -266,7 +266,7 @@ E1–E3, S3, G4, B1/B2).
 
 ### 4.1 One study unit per step
 
-For every step of the plan's step index (PLAN §17.4: 92 steps; one step is one session, sized S
+For every step of the plan's step index (PLAN §17.4: 91 steps; one step is one session, sized S
 or M; e.g. `2.4b`, `5.3a`, `8.5`) build a study unit. A guided step gets all
 five parts below (about 15 minutes, done by you at the start of the step, from the plan text); a
 fast-track step (§3.8) only the concept list, ≤ 2 cards and the examiner line (5 minutes).
@@ -280,7 +280,7 @@ check for the rebuild drill.
 | **Cards** | Concepts, the step's gotchas, its Exit | Cards of the types in §5.1 | ≤ 6 new cards |
 | **Rebuild drill** | Each Tier A/B file the step creates | Requirement text (one paragraph, from the plan), the check that proves it, the time budget | 1 per key file |
 | **Fault drills** | §10 Rules, §11 Risks, `docs/failure-log.md`, the step's own warnings ("otherwise…", "never…") | 2–4 faults: break → symptom → evidence command → fix | 2–4 per step |
-| **Examiner drill** | §12 IDs proved by this step, §13 walkthrough lines, §15 alternatives | The 2-min explanation + 3 likely follow-ups | 1 per §12 ID |
+| **Examiner drill** | §12 IDs proved by this step, §13 evidence, §15 alternatives | The 2-min explanation + 3 likely follow-ups | 1 per §12 ID |
 
 ### 4.2 Where the earlier issues fit
 
@@ -430,7 +430,7 @@ Role missing `cacerts` in its `resourceNames` (the `mesh` job gets 403 on the wr
 audit log names the user and verb); the issuer Role naming the wrong ServiceAccount (Vault's
 `k3s-creds/creds/lab-ci` fails with a TokenRequest 403).
 
-**Examiner drill:** §13 items 3–5 (T3, P5, E1–E3, S3, T1, T2, Z1, Z2) back to back in 5 minutes.
+**Examiner drill:** T3, P5, E1–E3, S3, T1, T2, Z1 and Z2 (§12) back to back in 5 minutes.
 Follow-ups: "Why static DB credentials and not the Vault database engine?" (§15); "Why does the
 api read Vault directly but CNPG gets a synced Secret?"; "Pull (Flux) or push (CI `kubectl
 apply`): what does each give you?"; "What exactly do you need to restore the data, and what is
@@ -473,7 +473,7 @@ copied text; a `why` or failure-mode card for every *what* card that matters; ca
 ### 5.2 How many
 
 - **≤ 4 new cards per guided step, ≤ 2 per fast-track step, ≤ 12 new cards per day.** 29 guided and
-  63 fast-track steps allow about 115 + 125 ≈ 240 cards, but the daily cap holds 18 build days to
+  62 fast-track steps allow about 116 + 124 ≈ 240 cards, but the daily cap holds 18 build days to
   about 215: write cards from misses first. Plus the issue_197 decks (import only what Phases 8–9
   need). By week 3 that is about 35–45 reviews a day (20 min).
 - **Daily review cap: 20 minutes.** If you are over it for 3 days, stop adding cards until you
@@ -527,16 +527,18 @@ if the exam is later), under the same exam cap.
 | Mode | Steps | Sessions | Hours |
 |---|---|---|---|
 | Guided | 29 | 26 M + 3 S | 48.5 |
-| Fast track | 63 | 47 M + 16 S | 56.3 |
-| **All steps** | **92** | **92** | **104.8** |
+| Fast track | 62 | 45 M + 17 S | 54.9 |
+| **All steps** | **91** | **91** | **103.4** |
 
-At the default 6 h × 6 days, three weeks hold 108 h of sessions: the build fits with **3.2 h of
+At the default 6 h × 6 days, three weeks hold 108 h of sessions: the build fits with **4.6 h of
 slack** (it was 15 h before GitOps, CNPG/VSO, end-to-end mTLS, monitoring and the consoles were
 added, and 2.3 h before the k3s API split and audit log, 8.2c–8.2d, which cost 2.3 h; the first
-six §3.8 cuts, already applied, bought back 3.2 h). Mocks 1 and 2 take about 1.5 h of it, so
-CloudStack, image or pipeline waits a session cannot absorb have about 1.7 h of buffer. The rest
+six §3.8 cuts, already applied, bought back 3.2 h; the netavark spike and the host telemetry
+stores, 2.1c and 2.7b, cost 1.6 h; removing the unit tests and `demo`, 0.2c, 12.2 and 12.3,
+gave back 3.0 h on 2026-11-10). Mocks 1 and 2 take about 1.5 h of it, so
+CloudStack, image or pipeline waits a session cannot absorb have about 3.1 h of buffer. The rest
 of the §3.8 cut order gives back 4.2 h more. It does **not** fit at 4 h/day: fast-track
-everything (92 sessions ≈ 84 h ≈ 4.7 h/day, still over).
+everything (91 sessions ≈ 83 h ≈ 4.6 h/day, still over).
 
 ### 6.2 Rebuild blocks
 
@@ -551,15 +553,15 @@ goes back into the next block.
 
 | Days | Build (PLAN §17.4) | Hours | Review and mocks |
 |---|---|---|---|
-| **Week 1**, D1–D6 | Phases 0–3: scaffolding, preflight, the control plane (Vault and the three roots guided), CloudStack, the consoles, the hand-off to `deliver` | 35.1 | D7: Sunday review; rebuild 2.5a/2.5f and 2.5d at S3 |
-| **Week 2**, D8–D13 | Phases 4–6 and 8.1–8.6b: image, VPC and policy gate, base and tunnel, k3s, Flux and the chart mirror, the k3s API split and audit log (8.2c guided, 8.2d fast), mesh (STRICT mTLS), CNPG and VSO, Vault for the api, images | 36.4 | D14: Sunday review; rebuild 5.2/5.3a, 6.2b and 8.1b at S3; **Mock 0**: §13 items 1–2 from memory |
-| **Week 3**, D15–D19 | 8.7a–8.8c, Phases 9, 10 and 12: the app end to end with mutual TLS and default deny, monitoring and Grafana, backup/DR/shred, pipeline gates, `verify` (12.1a–12.1f), `demo`; on D19 also 14.4 (one real `demo` run in `docs/walkthrough.md`) | 30.4 | daily: 2 mixed fault drills from different layers (inside the session time); D19 end: **Mock 1**, the §13 walkthrough from memory (13 min), then 20 min of examiner questions from §12 and §15 |
-| D20 | 13.1a–13.2: the final `down`, host restore and reboot, `revert-check` (R4) | 3.0 | before the `down`, **Mock 2 with faults**: Claude breaks 3 things in the built lab; you find and fix them during the walkthrough. Card final pass |
-| D21 | review, or the exam | — | 2 h: rebuild the Phase 8–9 Tier A files at S3; every "Describe" issue in 2 min each; 30 min of cards; nothing new, early night. If the exam needs the lab live, start `up` after D20's `revert-check`: it runs unattended for hours |
+| **Week 1**, D1–D6 | Phases 0–3: scaffolding, preflight, the control plane (Vault and the three roots guided), CloudStack, the consoles, the hand-off to `deliver` | 35.7 | D7: Sunday review; rebuild 2.5a/2.5f and 2.5d at S3 |
+| **Week 2**, D8–D13 | Phases 4–6 and 8.1–8.6b: image, VPC and policy gate, base and tunnel, k3s, Flux and the chart mirror, the k3s API split and audit log (8.2c guided, 8.2d fast), mesh (STRICT mTLS), CNPG and VSO, Vault for the api, images | 36.4 | D14: Sunday review; rebuild 5.2/5.3a, 6.2b and 8.1b at S3; **Mock 0**: N1–N3 and N6 (§12) explained from memory, with the command that proves each |
+| **Week 3**, D15–D19 | 8.7a–8.8c, Phases 9, 10 and 12: the app end to end with mutual TLS and default deny, monitoring and Grafana, backup/DR/shred, pipeline gates, `verify` (12.1a–12.1f); on D19 also 14.4 (`docs/runbook.md`, linking one green `deliver.yml` run and one `up` local-stage output) | 28.3 | daily: 2 mixed fault drills from different layers (inside the session time); D19 end: **Mock 1**, the evidence from memory (13 min): each check of a green `verify` job by §12 ID, then the DR drill in `up`'s local stage (B3, B2); then 20 min of examiner questions from §12 and §15 |
+| D20 | 13.1a–13.2: the final `destroy` (teardown rows, host restore, reboot), then `destroy` again for the revert checks V1–V5 (R4) | 3.0 | before the `destroy`, **Mock 2 with faults**: Claude breaks 3 things in the built lab; you find and fix them while you explain the evidence. Card final pass |
+| D21 | review, or the exam | — | 2 h: rebuild the Phase 8–9 Tier A files at S3; every "Describe" issue in 2 min each; 30 min of cards; nothing new, early night. If the exam needs the lab live, start `up` after D20's second `destroy` (the revert check): it runs unattended for hours |
 
-Week 1 ends 0.9 h early, so 4.1a starts on D6 and week 2's 36.4 h fits its 36 h. D15–D19 hold
-30.4 h of build in 30 h, so 0.4 h spills into D20, which then holds 3.4 h of build plus Mock 2;
-with Mock 1 that leaves about 1.7 h to spare in the whole window. Behind by more than half a day at the end of
+Week 1 ends 0.3 h early, so 4.1a starts on D6 and week 2's 36.4 h about fits its 36 h. D15–D19
+hold 28.3 h of build in 30 h, so D20 holds only its own 3.0 h of build plus Mock 2;
+with Mock 1 that leaves about 3.1 h to spare in the whole window. Behind by more than half a day at the end of
 a week: apply the §3.8 cut order before touching the reviews. A **Mock 3** under full
 exam conditions (time limit, allowed references only, no Claude) only if the exam is after D21.
 
@@ -571,11 +573,11 @@ exam conditions (time limit, allowed references only, no Claude) only if the exa
 | Writing | Every Tier A file **W3** at least once, the last time ≥ 2 days after you built it; every Tier B file E3 (each annotated line explained) |
 | Debugging | ≥ 8 of 10 random mixed fault drills in guided areas diagnosed in ≤ 15 min each, with the evidence named |
 | Explaining | Every R1–R7 §12 check ID explained at E3+ (incl. T3, P5, S3, S4, K1, A1, G4, O1–O3, C1); every §16 glossary term in one sentence, no misses |
-| Walkthrough | §13 done twice in ≤ 15 min with no notes; ≥ 10 of 12 unseen follow-up questions answered at E3 |
+| Evidence | §13 explained twice in ≤ 15 min with no notes: a green `deliver.yml` run's `verify` checks by §12 ID and the DR drill in `up`'s local stage; ≥ 10 of 12 unseen follow-up questions answered at E3 |
 | GitOps and mTLS | From a blank page: the Flux Kustomization chain with its gates, and the gateway's mutual-TLS listener; explain why tun-1 sees only ciphertext and why istiod cannot start before `cacerts` |
 | Describe issues | Every "Describe" JQR item answered in ≤ 2 min at E3, using this lab as the example |
 | Calibration | Mean gap between predicted and actual level ≤ 0.5 over the last 15 tests |
-| From the build | Every step closed in beads; each of the five consoles logged in to once from the host; `demo` → `down` → `revert-check` run once, with every phase and teardown row explained as it ran |
+| From the build | Every step closed in beads; each of the five consoles logged in to once from the host (runbook); `up` with its local-stage DR drill → `destroy` → `destroy` again after the reboot (the revert check) run once, with every phase, local-stage check and teardown row explained as it ran |
 
 If an area fails, the D19–D21 review time targets only that area.
 

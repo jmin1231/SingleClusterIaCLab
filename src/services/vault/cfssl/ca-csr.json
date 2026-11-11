@@ -1,0 +1,5 @@
+{
+  "CN": "lab bootstrap CA",
+  "key": { "algo": "ecdsa", "size": 256 },
+  "ca": { "expiry": "336h" }
+}

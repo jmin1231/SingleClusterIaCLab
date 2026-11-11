@@ -2,7 +2,7 @@
 lab.test:53 {
     bind 10.250.0.1 {$HOST_IP}
     hosts {
-        10.250.0.1 cloudstack.lab.test gitea.lab.test
+        10.250.0.1 cloudstack.lab.test gitea.lab.test vault.lab.test
     }
     errors
     log

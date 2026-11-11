@@ -1,4 +1,4 @@
-"""Entry point: bootstrap.sh runs `python3 -B -m lab <command>`."""
+"""Entry point: bootstrap.sh runs `python3 -B -m src <command>`."""
 
 import argparse
 import fcntl
@@ -6,8 +6,10 @@ import logging
 import sys
 from collections.abc import Callable
 
-from lab.lib.log import BASE_DIR, setup_logging
-from lab.phases import dns, network, podman, preflight
+from src.host import network, ntp, podman, preflight
+from src.lib.config import BASE_DIR
+from src.lib.log import setup_logging
+from src.services import dns
 
 log = logging.getLogger(__name__)
 
@@ -17,6 +19,7 @@ LOCK_FILE = BASE_DIR / "state" / "run.lock"
 def cmd_up() -> None:
     preflight.up()
     network.up()
+    ntp.up()
     podman.up()
     dns.up()
 
@@ -30,7 +33,12 @@ def cmd_teardown() -> None:
 
 
 def cmd_destroy() -> None:
-    log.info("destroy: not implemented yet")
+    # Reverse of up: services before the Podman they run on, chrony and CoreDNS before cloudbr1
+    dns.down()
+    podman.down()
+    ntp.down()
+    network.down()
+    log.info("destroy complete: everything the lab installed is removed")
 
 
 COMMANDS: dict[str, tuple[Callable[[], None], str]] = {

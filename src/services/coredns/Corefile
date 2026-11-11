@@ -8,10 +8,11 @@ lab.test:53 {
     log
 }
 
-# everything else: forwarded to the host's real upstream DNS
+# everything else: forwarded to systemd-resolved, which sends it to the host's upstream DNS.
+# No loop: resolved only sends lab.test here, and the block above answers lab.test.
 .:53 {
     bind 10.250.0.1 {$HOST_IP}
-    forward . /etc/upstream-resolv.conf
+    forward . 127.0.0.53
     cache 30
     errors
     log

@@ -1,0 +1,16 @@
+# Installed by `bootstrap.sh up` to /etc/netplan/; `destroy` deletes it.
+# Must match BRIDGE and VMNET in src/lib/config.py, and ANCHOR in src/host/network.py.
+network:
+  version: 2
+  dummy-devices:
+    cloudbr1-anchor: {}
+  bridges:
+    cloudbr1:
+      interfaces: [cloudbr1-anchor]
+      addresses: [10.250.0.1/24]
+      nameservers:
+        addresses: [10.250.0.1]
+        search: [~lab.test]
+      ignore-carrier: true
+      parameters:
+        stp: false

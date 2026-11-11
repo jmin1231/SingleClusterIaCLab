@@ -10,5 +10,4 @@ services:
       HOST_IP: ${HOST_IP}
     volumes:
       - ./Corefile:/etc/coredns/Corefile:ro
-      - /run/systemd/resolve/resolv.conf:/etc/upstream-resolv.conf:ro
     command: ["-conf", "/etc/coredns/Corefile"]

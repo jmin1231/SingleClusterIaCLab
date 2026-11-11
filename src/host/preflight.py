@@ -4,7 +4,7 @@ import logging
 import os
 import sys
 
-from lab.lib.system import ip_json
+from src.lib.system import ip_json
 
 log = logging.getLogger(__name__)
 

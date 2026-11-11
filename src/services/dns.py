@@ -2,9 +2,10 @@
 
 import logging
 
-from lab.lib.config import VMNET
-from lab.lib.system import compose
-from lab.phases.preflight import detect_network
+from src.host import podman
+from src.host.preflight import detect_network
+from src.lib.config import VMNET
+from src.lib.system import compose
 
 log = logging.getLogger(__name__)
 
@@ -18,5 +19,8 @@ def up() -> None:
 
 def down() -> None:
     """Remove the CoreDNS container; does nothing if it isn't there."""
+    if not podman.check():
+        log.info("Podman is not set up; no CoreDNS container to remove")
+        return
     compose("coredns", "down", env={"HOST_IP": detect_network()["host_ip"]})
     log.info("CoreDNS stopped and removed")

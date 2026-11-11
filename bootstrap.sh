@@ -42,7 +42,7 @@ main() {
     cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
     ensure_root
     ensure_python
-    exec "${PYTHON}" -B -m lab "$@"
+    exec "${PYTHON}" -B -m src "$@"
 }
 
 main "$@"

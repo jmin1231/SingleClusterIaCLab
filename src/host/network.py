@@ -1,4 +1,7 @@
-"""Create the host-only bridge cloudbr1 that the VMs use to reach the host."""
+"""Create the host-only bridge cloudbr1 that the VMs use to reach the host.
+
+The host also asks CoreDNS (on cloudbr1) for lab.test names, and nothing else.
+"""
 
 import ipaddress
 import json
@@ -8,24 +11,15 @@ import sys
 import time
 from pathlib import Path
 
-from lab.lib.config import BRIDGE, VMNET
-from lab.lib.system import ip_json
+from src.lib.config import BRIDGE, VMNET
+from src.lib.system import ip_json
 
 log = logging.getLogger(__name__)
 
-NETPLAN_FILE = Path("/etc/netplan/60-lab-cloudbr1.yaml")
+ANCHOR = "cloudbr1-anchor"  # the bridge's always-up port; see the netplan file
+NETPLAN_SRC = Path(__file__).parent / "files" / "60-lab-cloudbr1.yaml"
+NETPLAN_FILE = Path("/etc/netplan") / NETPLAN_SRC.name
 UP_TIMEOUT = 30  # seconds; NetworkManager activates the bridge after netplan apply returns
-
-NETPLAN = f"""\
-network:
-  version: 2
-  bridges:
-    {BRIDGE}:
-      addresses: [{VMNET}]
-      ignore-carrier: true
-      parameters:
-        stp: false
-"""
 
 
 def vmnet_conflicts() -> list[str]:
@@ -50,8 +44,9 @@ def check() -> bool:
 
 
 def up() -> None:
-    """Create cloudbr1 through netplan; a re-run changes nothing."""
-    if NETPLAN_FILE.exists() and NETPLAN_FILE.read_text() == NETPLAN and check():
+    """Install the lab's netplan file and create cloudbr1; a re-run changes nothing."""
+    netplan = NETPLAN_SRC.read_bytes()
+    if NETPLAN_FILE.exists() and NETPLAN_FILE.read_bytes() == netplan and check():
         log.info("%s is already up with %s", BRIDGE, VMNET)
         return
 
@@ -60,7 +55,7 @@ def up() -> None:
         log.error("%s is already in use: %s", VMNET.network, ", ".join(conflicts))
         sys.exit(1)
 
-    NETPLAN_FILE.write_text(NETPLAN)
+    NETPLAN_FILE.write_bytes(netplan)
     NETPLAN_FILE.chmod(0o600)
     subprocess.run(["netplan", "apply"], check=True)
 
@@ -76,8 +71,10 @@ def up() -> None:
 
 
 def down() -> None:
-    """Remove the file and the bridge (networkd leaves a removed bridge in place)."""
+    """Remove the file, the bridge and its anchor port (networkd leaves removed devices in place)."""
     NETPLAN_FILE.unlink(missing_ok=True)
     subprocess.run(["netplan", "apply"], check=True)
-    if Path("/sys/class/net", BRIDGE).exists():
-        subprocess.run(["ip", "link", "delete", BRIDGE], check=True)
+    for dev in (BRIDGE, ANCHOR):
+        if Path("/sys/class/net", dev).exists():
+            subprocess.run(["ip", "link", "delete", dev], check=True)
+    log.info("%s and %s removed", BRIDGE, NETPLAN_FILE)

@@ -3,8 +3,9 @@
 import logging
 import sys
 from datetime import datetime
-from pathlib import Path
 from typing import override
+
+from src.lib.config import BASE_DIR
 
 PREFIX: dict[int, str] = {
     logging.INFO: "[+]",
@@ -12,7 +13,6 @@ PREFIX: dict[int, str] = {
     logging.ERROR: "[x]",
 }
 
-BASE_DIR = Path(__file__).resolve().parents[2]  # lab/lib/log.py -> lab/lib -> lab -> repo root
 LOG_FILE = BASE_DIR / "state" / "bootstrap.log"
 
 

@@ -40,8 +40,8 @@ def up() -> None:
 
 def down() -> None:
     """Remove every container, image and volume, disable the socket and purge the packages."""
-    subprocess.run(["systemctl", "disable", "--now", SOCKET], check=False)
     if shutil.which("podman"):
+        subprocess.run(["systemctl", "disable", "--now", SOCKET], check=True)
         # The official wipe: stops containers and unmounts storage before deleting it
         subprocess.run(["podman", "system", "reset", "--force"], check=True)
     shutil.rmtree("/var/lib/containers", ignore_errors=True)

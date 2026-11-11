@@ -4,6 +4,8 @@ import logging
 import os
 import sys
 
+from lab.lib.system import ip_json
+
 log = logging.getLogger(__name__)
 
 
@@ -16,5 +18,32 @@ def check_host() -> None:
     log.info("KVM is usable")
 
 
+def detect_network() -> dict:
+    """The host's LAN, read live: the default route's card and gateway, and that card's address."""
+    route = ip_json("-4", "route", "show", "default")[0]
+    card = route["dev"]
+    gateway = route["gateway"]
+
+    link = ip_json("-4", "addr", "show", "dev", card)[0]
+    addr = link["addr_info"][0]
+
+    return {
+        "card": card,
+        "host_ip": addr["local"],
+        "prefix": addr["prefixlen"],
+        "gateway": gateway,
+        "dhcp": addr.get("dynamic", False),
+    }
+
+
+def log_network() -> None:
+    """Log the host's LAN, so every run records what the lab is building on."""
+    network = detect_network()
+    log.info("LAN: %s on %s/%d, gateway %s (%s)",
+             network["card"], network["host_ip"], network["prefix"], network["gateway"],
+             "DHCP" if network["dhcp"] else "static")
+
+
 def up() -> None:
     check_host()
+    log_network()

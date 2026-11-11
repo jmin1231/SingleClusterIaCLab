@@ -7,7 +7,7 @@ import sys
 from collections.abc import Callable
 
 from lab.lib.log import BASE_DIR, setup_logging
-from lab.phases import platform, preflight
+from lab.phases import network, podman, preflight
 
 log = logging.getLogger(__name__)
 
@@ -16,7 +16,8 @@ LOCK_FILE = BASE_DIR / "state" / "run.lock"
 
 def cmd_up() -> None:
     preflight.up()
-    platform.up()
+    network.up()
+    podman.up()
 
 
 def cmd_update() -> None:

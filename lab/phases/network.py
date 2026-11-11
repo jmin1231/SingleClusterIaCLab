@@ -8,6 +8,8 @@ import sys
 import time
 from pathlib import Path
 
+from lab.lib.system import ip_json
+
 log = logging.getLogger(__name__)
 
 BRIDGE = "cloudbr1"
@@ -25,11 +27,6 @@ network:
       parameters:
         stp: false
 """
-
-
-def ip_json(*args: str) -> list[dict]:
-    out = subprocess.run(["ip", "-j", *args], capture_output=True, text=True, check=True).stdout
-    return json.loads(out)
 
 
 def vmnet_conflicts() -> list[str]:

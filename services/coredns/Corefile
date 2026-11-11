@@ -1,0 +1,18 @@
+# lab.test: answered from the hosts list below
+lab.test:53 {
+    bind 10.250.0.1 {$HOST_IP}
+    hosts {
+        10.250.0.1 cloudstack.lab.test gitea.lab.test
+    }
+    errors
+    log
+}
+
+# everything else: forwarded to the host's real upstream DNS
+.:53 {
+    bind 10.250.0.1 {$HOST_IP}
+    forward . /etc/upstream-resolv.conf
+    cache 30
+    errors
+    log
+}

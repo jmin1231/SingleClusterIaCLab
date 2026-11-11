@@ -8,8 +8,6 @@ log = logging.getLogger(__name__)
 
 PACKAGES = ["podman", "netavark", "aardvark-dns", "docker-compose-v2"]
 SOCKET = "podman.socket"
-COMPOSE = "/usr/libexec/docker/cli-plugins/docker-compose"
-
 APT_ENV = {**os.environ, "DEBIAN_FRONTEND": "noninteractive"}
 
 

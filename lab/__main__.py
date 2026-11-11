@@ -7,7 +7,7 @@ import sys
 from collections.abc import Callable
 
 from lab.lib.log import BASE_DIR, setup_logging
-from lab.phases import network, podman, preflight
+from lab.phases import dns, network, podman, preflight
 
 log = logging.getLogger(__name__)
 
@@ -18,6 +18,7 @@ def cmd_up() -> None:
     preflight.up()
     network.up()
     podman.up()
+    dns.up()
 
 
 def cmd_update() -> None:

@@ -8,12 +8,11 @@ import sys
 import time
 from pathlib import Path
 
+from lab.lib.config import BRIDGE, VMNET
 from lab.lib.system import ip_json
 
 log = logging.getLogger(__name__)
 
-BRIDGE = "cloudbr1"
-VMNET = ipaddress.ip_interface("10.250.0.1/24")
 NETPLAN_FILE = Path("/etc/netplan/60-lab-cloudbr1.yaml")
 UP_TIMEOUT = 30  # seconds; NetworkManager activates the bridge after netplan apply returns
 

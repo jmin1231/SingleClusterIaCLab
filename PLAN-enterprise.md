@@ -380,10 +380,7 @@ control plane's memory.
 **If measurements overrun:** drop the redundant VPC router (a single router saves
 ~0.25 GB but loses the HA story).
 
-**Host:** **Ubuntu Server 24.04** (netplan renders to systemd-networkd; Ubuntu Desktop's
-NetworkManager is not supported: `ignore-carrier`, the `cloudbr0` move and `netplan try`
-assume networkd, and GNOME costs ~1 GB; decided 2026-11-10, preflight refuses a host
-where `systemd-networkd` is not active) · 8 cores · **32 GB RAM (ceiling)** · 250 GB
+**Host:** **Ubuntu 24.04 Desktop** · 8 cores · **32 GB RAM (ceiling)** · 250 GB
 disk · `/dev/kvm`. Built from a **clean snapshot**: a static `HOST_IP` in netplan,
 `systemd-timesyncd` as shipped, `open-vm-tools` on a VMware host. The host may
 be bare metal **or a VM**. As a VM, every CloudStack guest (system VMs, lab VMs, the
@@ -768,9 +765,8 @@ are in §17.
 
 ### Phase 1 — Host preflight and reversibility
 
-**Preflight grows with the lab** (decided 2026-11-10). It starts with two checks, that
-`/dev/kvm` is usable and that `systemd-networkd` is active (§5: Ubuntu Server), in
-`lab/phases/preflight.py`. Each later step adds to it the
+**Preflight grows with the lab** (decided 2026-11-10). It starts with one check, that
+`/dev/kvm` is usable, in `lab/phases/preflight.py`. Each later step adds to it the
 check or the dependency it needs, in the same change, and nothing goes in before a step
 needs it. **Dependencies are split by what installing them does** (decided 2026-11-10):
 - **inert ones, installed by preflight:** the pinned CLIs (1.3), `qemu-utils`,

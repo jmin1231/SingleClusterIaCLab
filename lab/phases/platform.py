@@ -5,6 +5,7 @@ import json
 import logging
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -12,6 +13,7 @@ log = logging.getLogger(__name__)
 BRIDGE = "cloudbr1"
 VMNET = ipaddress.ip_interface("10.250.0.1/24")
 NETPLAN_FILE = Path("/etc/netplan/60-lab-cloudbr1.yaml")
+UP_TIMEOUT = 30  # seconds; NetworkManager activates the bridge after netplan apply returns
 
 NETPLAN = f"""\
 network:
@@ -66,9 +68,14 @@ def up() -> None:
     NETPLAN_FILE.chmod(0o600)
     subprocess.run(["netplan", "apply"], check=True)
 
-    if not check():
-        log.error("%s did not come up with %s after netplan apply", BRIDGE, VMNET)
-        sys.exit(1)
+    # netplan apply returns once NetworkManager restarts; the address appears a moment later
+    deadline = time.monotonic() + UP_TIMEOUT
+    while not check():
+        if time.monotonic() > deadline:
+            log.error("%s did not come up with %s within %ds of netplan apply",
+                      BRIDGE, VMNET, UP_TIMEOUT)
+            sys.exit(1)
+        time.sleep(1)
     log.info("%s is up with %s", BRIDGE, VMNET)
 
 

@@ -147,7 +147,7 @@ left out, and why, is in §15.
   API follows the same rule (8.2c): Flux's own controllers do every apply; jobs and people
   get short-lived, Vault-issued ServiceAccount tokens bound to namespaced Roles (people:
   read-only `view`); cluster-admin is a break-glass kubeconfig in Vault, read only by
-  `lab-bootstrap` and audited by Vault and by the k3s API audit log (8.2d).
+  `lab-bootstrap`, its API calls recorded in the k3s API audit log (8.2d).
 - **Secrets are issued at run time**, with the exceptions in §6, each named and
   protected. None is ever in git: the `pr.yml` gate rejects a Secret with data under
   `clusters/` (10.1).
@@ -438,7 +438,7 @@ exist outside Vault, and each one is listed with its location and protection.
 
 | Secret | Lives in | Protection / rotation |
 |---|---|---|
-| Vault unseal key + initial root token | `/var/lib/lab/vault-init.json` (outside the repo) | root `0600`. The root token is used for steps 2.4b–2.5e only, then **revoked**; regenerate it with `vault operator generate-root` when needed. The unseal key is the one thing to back up offline. A later `up` never overwrites it: 2.4 archives it first (with the backups it opens) |
+| Vault unseal key + initial root token | `/var/lib/lab/vault-init.json` (outside the repo) | root `0600`. The root token is used for steps 2.4b–2.5e only, then **revoked**; regenerate it with `vault operator generate-root` when needed. The unseal key is the one thing to back up offline. A later `up` never overwrites it; `destroy` deletes it together with Vault's data (2.4b) |
 | Runner registration and pipeline AppRole (`lab-pipeline`) role_id + secret_id | `/var/lib/lab/runner/` | owned by `lab-runner`, `0600`; secret_id TTL 30 days, re-issued by the renewal that every `up` and `update` runs (as `lab-bootstrap`, inside the platform phase) when under 7 days remain; never stored in Gitea or the repo. Every job, PR jobs included, runs on the host as `lab-runner` and can use this identity: an accepted risk for a single-operator lab (§15) |
 | Gitea `operator` password and its personal access token | the password in `kv/lab/bootstrap/gitea-operator`; the token in the operator's own git credential store | created in 2.8; the token is the operator's, scoped to repository write |
 | Pipeline registry credential (Gitea user `lab-ci`, token with `write:package` on org `lab` only) | `kv/lab/pipeline/gitea-ci` | created in 2.8; read by the `app` job into a temp `REGISTRY_AUTH_FILE` |
@@ -447,7 +447,7 @@ exist outside Vault, and each one is listed with its location and protection.
 | Bootstrap AppRole (`lab-bootstrap`) role_id + secret_id | `/var/lib/lab/approle.json` | root `0600`; secret_id TTL 30 days. Every `bootstrap.sh` command re-issues it when under 7 days remain (it authenticates with the current one). If it ever expires, recovery is `vault operator generate-root` with the unseal key |
 | Lab SSH private key (Ansible → VMs) | Vault KV; written to a per-job `0600` temp directory with its own `known_hosts` (`StrictHostKeyChecking=accept-new`, so replaced VMs do not break SSH) | deleted when the job ends |
 | Tool credentials (`cmk` API keys, `mc` aliases, registry login) | per-job temp configs only: `cmk` with a temp config file, `mc` through `MC_HOST_*` variables, Podman through a temp `REGISTRY_AUTH_FILE` | nothing credential-bearing persists in `lab-runner`'s home between jobs |
-| k3s break-glass kubeconfig (cluster-admin: k3s's `system:admin` client certificate, group `system:masters`) | Vault `kv/lab/breakglass/k3s-admin`; the node's own copy `/etc/rancher/k3s/k3s.yaml` on be-1, root `0600` | deposited by the `cluster` job whenever the `k3s` role (re)installs k3s; its `lab-pipeline` policy may only **write** that path (create and update, never read or list it); read only by `lab-bootstrap`, by `teardown` (§14 rows 0–3) and by hand through the runbook (14.4; e.g. 8.4a's port-forward and 12.1f's drift test), each read in Vault's audit log and each API call in k3s's (8.2d). A client certificate cannot be revoked (only `k3s certificate rotate-ca` ends it), which is why it is never on disk beyond one command's `0600` temp file. Until 8.2c it sits at `kv/lab/pipeline/k3s` as the build's scaffold; 8.2c moves it. Deleted by `teardown` |
+| k3s break-glass kubeconfig (cluster-admin: k3s's `system:admin` client certificate, group `system:masters`) | Vault `kv/lab/breakglass/k3s-admin`; the node's own copy `/etc/rancher/k3s/k3s.yaml` on be-1, root `0600` | deposited by the `cluster` job whenever the `k3s` role (re)installs k3s; its `lab-pipeline` policy may only **write** that path (create and update, never read or list it); read only by `lab-bootstrap`, by `teardown` (§14 rows 0–3) and by hand through the runbook (14.4; e.g. 8.4a's port-forward and 12.1f's drift test), each API call recorded in k3s's audit log (8.2d). A client certificate cannot be revoked (only `k3s certificate rotate-ca` ends it), which is why it is never on disk beyond one command's `0600` temp file. Until 8.2c it sits at `kv/lab/pipeline/k3s` as the build's scaffold; 8.2c moves it. Deleted by `teardown` |
 | k3s API tokens for jobs and people (ServiceAccounts `lab-ci`, `lab-dbops`, `lab-operator` in ns `lab-access`) | nowhere at rest: Vault's Kubernetes secrets engine `k3s-creds/` requests each one from the API (TokenRequest) when a command starts | `lab-ci` 1 h, `lab-dbops` 15 min, `lab-operator` 1 h; written into a per-command `0600` temp kubeconfig with the k3s CA (rule 21) and deleted after; they expire, so none needs revoking. `lab-pipeline` may request all three, `lab-bootstrap` all three (8.2c) |
 | Token-issuer JWT (SA `lab-access/vault-token-issuer`) | its long-lived token Secret in k3s, and Vault's `k3s-creds/config` | read on be-1 by the `k3s` Ansible role, never by a job's k3s identity; it may only create tokens for the three ServiceAccounts above (`serviceaccounts/token` with `resourceNames`), so a rewritten Vault role cannot mint anything stronger; rotated by re-running the `cluster` job |
 | WireGuard private keys | generated **on** each VM; never leave it | public keys published to Vault KV |
@@ -556,7 +556,7 @@ in a host Kubernetes cluster (§15).
 |---|---|---|
 | VMs, containers, host, runner → Gitea, registry, MinIO, CloudStack UI/API, Grafana | TLS at the gateway | clients verify against the system trust store, never `-k` |
 | gateway → those backends; Grafana → Prometheus, Loki | plain HTTP | skipped: internal Podman network and host loopback, no published ports |
-| anything → Vault | TLS, Vault's own listener | Vault is the CA, so it is never behind the gateway |
+| anything → Vault | TLS, Vault's own listener (cfssl certificate) | Vault terminates its own TLS, so unseal never depends on the gateway |
 | Vault, `lab` → k3s API (be-1) | TLS, k3s CA | k3s CA pinned in `auth/k3s/config`, `k3s-creds/config` and every kubeconfig |
 | be-1 (Flux, containerd, VSO, Alloy) → Gitea, registry, chart repo, Vault; Alloy → Prometheus, Loki write paths | TLS, `lab.test CA` | pod traffic leaves be-1's mgmt NIC to `10.250.0.1` only (6.1b); Alloy also sends basic auth, accepted only from `10.250.0.112` (2.7b) |
 | CloudStack management ↔ KVM agent / system VMs (8250) | TLS, CloudStack's own CA | CloudStack manages that CA itself |
@@ -1135,42 +1135,38 @@ runbook (14.4): a subshell with `VAULT_TOKEN` from a `lab-bootstrap` AppRole log
   ⤷ **Needs** 2.2 · **Recalls** `cmd.netns-test`, `path.baseline` · **Produces** chrony
   config · **Records** `ntp.server` · **Check** Exit
 - **2.4a Vault server.** Integrated **Raft** storage (snapshots in
-  Phase 9); the web UI on (`ui = true`; its login comes in 3.5c); TLS listener on a cfssl certificate (built 2026-11-11 with a
-  throwaway bootstrap CA whose key is deleted after signing; 2.5a re-issues it from `lab.test CA`);
-  audit device to a file, rotated daily by a logrotate rule
-  that sends Vault `SIGHUP` (Vault stops answering requests if its only audit
-  device cannot be written, so a full disk or a broken rotation is an outage; the
-  rotation keeps 14 days and the platform phase's check logs a warning on every `up`
-  and `update` when the volume is over 80%).
+  Phase 9); the web UI on (`ui = true`; its login comes in 3.5c); TLS listener on a cfssl
+  certificate signed by the bootstrap CA (built 2026-11-11). The CA key is **kept**, not
+  deleted after signing: it is needed to sign later certificates. No audit device and
+  no logrotate rule (decided 2026-11-12): the lab only has to show that logs are
+  collected, and Vault's container log (`podman logs vault`) is enough for that.
   - Every restart comes back **sealed**, and a sealed Vault is running but unhealthy
     (`sys/health` 503). So the service's `healthcheck:` accepts sealed
     (`/v1/sys/health?sealedcode=200&uninitcode=200`) and nothing waits for "unsealed"
     before the unseal step: in the precursor a rollout that waited on readiness before
     unsealing deadlocked. Seal state is read by `up` and `update`, which unseal a sealed
     Vault themselves; the health check does not report it.
-  - Vault's config is a bind-mounted file, which Compose does not watch; the platform phase
-    compares each file it renders with the one in place and restarts the services whose
-    config files changed (`docker-compose restart <service>`, rule 19), then unseals
-    straight after.
+  - Vault's config is a bind-mounted file, which Compose does not watch. `up` restarts
+    Vault only when it makes a new certificate; a config edit is picked up by
+    `bootstrap.sh update`, which restarts the services whose config files changed
+    (`docker-compose restart <service>`, rule 19) and unseals straight after.
   - The pinned image's user decides `mlock`: an image that runs as non-root without
     `IPC_LOCK` (Vault 2.x) needs `disable_mlock = true` (recommended with Raft anyway).
   Exit: `vault status` (against its `ca.pem`) shows Initialized false,
-  Sealed true, Storage raft; `podman healthcheck run vault` passes while sealed; a config
-  edit restarts the container.
+  Sealed true, Storage raft; `podman healthcheck run vault` passes while sealed; a re-run
+  of `up` changes nothing.
 
   ⤷ **Needs** 2.3a · **Recalls** `path.platform`, `podman.networks` · **Produces**
-  `platform/vault/` (config, bootstrap cert), logrotate rule · **Records** `vault.addr`,
-  `vault.audit`, `vault.image` · **Check** Exit
+  `platform/vault/` (config, bootstrap CA and cert) · **Records** `vault.addr`,
+  `vault.image` · **Check** Exit
 - **2.4b Init and unseal.**
-  **Before** `operator init`: if `/var/lib/lab/vault-init.json` exists (kept by a
-  previous `destroy`), move it and the backups it can open to
-  `/var/lib/lab/archive/<timestamp>/`, so a rebuild never orphans an old snapshot.
   `operator init` (1 share for the lab; production uses 5/3 or KMS auto-unseal) to
   `/var/lib/lab/vault-init.json`; unseal. After a host reboot, `up` or `update` (local, root) finds Vault sealed
   and unseals it; pipeline jobs only detect a sealed Vault and stop.
   - `init` acts on the pair (Vault initialized?, key file present?): (no, no) → init;
-    (yes, yes) → skip; (yes, no) → stop, the keys are lost; (no, yes) → the archive move
-    above, never an overwrite. The file is created with `O_CREAT|O_EXCL`, mode `0600` from
+    (yes, yes) → skip; (yes, no) → stop, the keys are lost; (no, yes) → stop, the file
+    belongs to an older Vault (`destroy` deletes it with Vault's data, so this only
+    follows a manual reset); never an overwrite (decided 2026-11-12: no archive). The file is created with `O_CREAT|O_EXCL`, mode `0600` from
     creation, and `fsync`ed before anything relies on it. The unseal key goes to
     `sys/unseal` on stdin (`key=-`), never in argv.
   Exit: `vault status` unsealed; restart the container, run `sudo ./bootstrap.sh up`,
@@ -1178,7 +1174,7 @@ runbook (14.4): a subshell with `VAULT_TOKEN` from a `lab-bootstrap` AppRole log
 
   ⤷ **Needs** 2.4a · **Recalls** `vault.addr` · **Produces** init/unseal in
   `platform.py` (the automatic unseal in `up` and `update`), `vault-init.json` ·
-  **Records** `path.vault-init`, `path.archive`; how `up` and `update` unseal ·
+  **Records** `path.vault-init`; how `up` and `update` unseal ·
   **Check** Exit
 - **2.5a PKI with cfssl: the roots and the issuing code** (decided 2026-11-11, replacing
   Vault PKI; §6 "Trust bootstrap order"). One shared module, `src/lib/pki.py`, used by
@@ -2170,7 +2166,7 @@ run by the learner with the break-glass kubeconfig (runbook), and the API audit 
     §6 TTLs). `kubeconfig(identity)` in `lib/kube.py` asks `k3s-creds/creds/<identity>`
     for a token, writes the `0600` temp kubeconfig (rule 21), and asks again when under 5
     minutes remain. Chosen over a long-lived token in KV: nothing at rest to rotate or
-    leak, every issue is a Vault audit line, and the cap on what can be minted lives in
+    leak, and the cap on what can be minted lives in
     k3s's RBAC (the issuer's `resourceNames`), not in a Vault role the pipeline can edit.
   - **The bootstrap that needs cluster-admin moves onto be-1:** when Flux is absent, the
     `k3s` role applies `gotk-components.yaml`, `gotk-sync.yaml` and the two Flux Secrets
@@ -2754,7 +2750,7 @@ run by the learner with the break-glass kubeconfig (runbook), and the API audit 
     postgres-1 -c postgres` as `lab-dbops`, the one identity allowed to exec, and only
     there, 8.2c; no superuser password exists, §6). CNPG's native backup to MinIO is not
     used (§15)
-  - both to `/var/lib/lab/backups/<timestamp>/` (survives `teardown` and `destroy`; the
+  - both to `/var/lib/lab/backups/<timestamp>/` (survives `teardown`, not `destroy`; the
     newest 14 kept)
 
   A Raft snapshot is encrypted by Vault's barrier and is useless without the unseal
@@ -2788,9 +2784,7 @@ run by the learner with the break-glass kubeconfig (runbook), and the API audit 
      api only ever returns the last four digits).
   2. Take a fresh backup (9.1a).
   3. Scratch Vault: `operator init` (1 share), unseal with the **scratch** key, log in
-     with the scratch root token, mount a writable directory at the live audit
-     device's file path (an unseal fails if a configured audit device cannot be
-     opened), then `raft snapshot restore -force` the new snapshot.
+     with the scratch root token, then `raft snapshot restore -force` the new snapshot.
   4. The scratch Vault now holds the live data: unseal it with the **live** unseal key
      from `vault-init.json`, and log in with the `lab-bootstrap` AppRole (the live root
      token was revoked in 2.5e, so it does not exist in the snapshot either).
@@ -2798,7 +2792,7 @@ run by the learner with the break-glass kubeconfig (runbook), and the API audit 
   the live Vault's `sys/health` is unchanged throughout.
 
   ⤷ **Needs** 9.1a · **Recalls** `path.vault-init`, `vault.approle.lab-bootstrap`,
-  `vault.audit`, `backup.dir` · **Produces** the DR drill in `up`'s local stage (Vault
+  `backup.dir` · **Produces** the DR drill in `up`'s local stage (Vault
   half) · **Records**
   `dr.scratch` (network and container names), `dr.canary` (how it is found and removed)
   · **Check** Exit
@@ -3134,7 +3128,6 @@ cluster first.*
 | Vault sealed after a host reboot | everything | pipeline jobs fail fast with "Vault sealed"; the operator runs `sudo ./bootstrap.sh up` (or `update`), which unseals first (the runner cannot read the unseal key, by design); production answer is KMS auto-unseal |
 | Losing the unseal key or Vault snapshot | 9 | that is total loss of encrypted data, by design; the runbook (14.4) makes offline custody of both an explicit operator duty |
 | MinIO community edition distribution | 2.7 | upstream changed how community images and binaries ship; the image is pinned by digest and kept as a `podman save` archive in `/var/lib/lab/images/`, which `destroy` keeps (2.7). If it can no longer be pulled at all, Garage or SeaweedFS (both S3-compatible, both work as a Terraform S3 backend) replace it behind the same `minio.lab.test` name |
-| Vault audit device unwritable | 2.4a | daily rotation with `SIGHUP`, disk-usage warning logged by `up` and `update` |
 | The gateway is a single point of failure for every web service | 2.6 | Vault, CoreDNS, Squid and SSH never depend on it, so unseal, DNS and break-glass access survive a gateway outage; `up` and `update` name it first when it is down |
 | ServiceLB exposes the backend gateway on every node address | 8.7d | be-1's nftables admit 8000 only on `wg1` from `10.99.0.2`; P4 and Z1 test the tier and mgmt addresses too |
 | PR code runs on the host with the pipeline identity | 2.10 | accepted for one operator (§15); `main` is protected, so nothing reaches `deliver` without a merge; with no `docker` group and rootless builds, it runs with `lab-runner`'s rights, not root's |
@@ -3252,7 +3245,7 @@ step depends on something already deleted. Every row tolerates "already gone".
 | 6 | `setup` | Vault (`iac`, the `tfstate` MinIO user) | `terraform destroy` (run directly, not through the policy gate, which forbids destroying the public IP); then the state object; the `app.lab.test` and `k3s.lab.test` records |
 | 7 | `image` (*destroy only*) | Vault (admin) | the CloudStack template; MinIO `images/*` |
 | 8 | `provision` (*destroy only*) | — | CloudStack: services, system VMs, `cloud` and `cloud_usage` DBs, then **purges** `/var/lib/mysql` (an old `cloud` DB left there would poison a reinstall, rule 2), `/etc/cloudstack/` (the generated `key` file outlives a package purge), NFS exports and `/export/*`, `/etc/nfs.conf` pins, the management server's key line in root's `authorized_keys` (the file itself if the baseline had none), the bridge-netfilter udev rule and sysctl file, drop-ins, the CloudStack apt repository, key and version pin, `cmk` |
-| 9 | `platform` (*destroy only*) | — | unregisters the runner, removes its service; as `lab-runner`, `podman system reset --force` (its rootless images, owned by sub-UIDs); `loginctl disable-linger lab-runner`; `lab-runner`'s work directory; `docker-compose down --volumes` (gateway, Prometheus, Loki and Grafana included), then disables and removes `lab-platform.service` and runs `daemon-reload`, and disables `podman.socket`; removes any containers, the three networks and the volumes left (theirs included; Loki's bucket goes with MinIO's); the `/etc/containers/containers.conf.d/` lab file and `/var/lib/containers`; any netavark chains left in the `ip filter` and `ip nat` tables (V2) **[verify what netavark 1.4 leaves after its last network is removed]**; `lab-nftables.service`, the `inet lab` table and `/etc/lab/`; if `decision.podman-fw` chose the fallback, its apt repository and key (2.1c; V1); the systemd-resolved drop-in and the original `/etc/resolv.conf` link; the Vault and Squid logrotate rules; `/opt/lab/`; `/var/lib/lab/platform`, `/var/lib/lab/certs`, `/var/lib/lab/traefik` (dynamic routes, the users file) and `/var/lib/lab/grafana`; the lab CA from the host trust store |
+| 9 | `platform` (*destroy only*) | — | unregisters the runner, removes its service; as `lab-runner`, `podman system reset --force` (its rootless images, owned by sub-UIDs); `loginctl disable-linger lab-runner`; `lab-runner`'s work directory; `docker-compose down --volumes` (gateway, Prometheus, Loki and Grafana included), then disables and removes `lab-platform.service` and runs `daemon-reload`, and disables `podman.socket`; removes any containers, the three networks and the volumes left (theirs included; Loki's bucket goes with MinIO's); the `/etc/containers/containers.conf.d/` lab file and `/var/lib/containers`; any netavark chains left in the `ip filter` and `ip nat` tables (V2) **[verify what netavark 1.4 leaves after its last network is removed]**; `lab-nftables.service`, the `inet lab` table and `/etc/lab/`; if `decision.podman-fw` chose the fallback, its apt repository and key (2.1c; V1); the systemd-resolved drop-in and the original `/etc/resolv.conf` link; the Squid logrotate rule; `/opt/lab/`; `/var/lib/lab/platform`, `/var/lib/lab/certs`, `/var/lib/lab/traefik` (dynamic routes, the users file) and `/var/lib/lab/grafana`; the lab CA from the host trust store |
 | 9a | users (*destroy only*) | baseline | `userdel`/`groupdel` every user and group the baseline does not have (`lab-runner` with its `/etc/subuid` and `/etc/subgid` lines, `cloud`, `mysql`, `libvirt-qemu`, `libvirt`, and memberships added to `kvm`), with their home directories: package purges leave them behind |
 | 9b | packages (*destroy only*) | preflight's `PACKAGES` | **only what the lab installed** (decided 2026-11-10: a package someone else installs while the lab runs is not the lab's to remove): preflight's `down()` purges exactly the `PACKAGES` table (every step's entry) (CloudStack, MySQL, libvirt, NFS, Podman and its helpers, chrony, `qemu-*`, `dnsutils`, …); then one `apt-get autoremove --purge` takes the dependencies apt pulled in (apt marked them automatic); a package the lab removed is reinstalled (`systemd-timesyncd`, which chrony replaced, rule 16); then the lab's apt sources and keys by rule 26's names |
 | 9c | lab files and shared files (*destroy only*) | `/var/backups/lab/files.orig/` | everything rule 26 names that is still there; then the backed-up shared files (root's `authorized_keys`, `/etc/hosts`) are copied back |
@@ -3260,9 +3253,10 @@ step depends on something already deleted. Every row tolerates "already gone".
 | 11 | `state/` (*destroy only*) | — | copies `bootstrap.log` to `/var/backups/lab/destroy-<timestamp>.log`, then deletes `state/` |
 | 12 | reboot (*destroy only*) | — | — then run `destroy` again: it finds nothing left and runs the revert checks V1–V5, writing the pass/fail report (13.2) |
 
-`/var/lib/lab/` (unseal key, backups, `archive/`) is **kept**, and the next `up`
-archives rather than overwrites it (2.4b). No command removes it: the operator deletes
-it by hand once the unseal key and snapshots are no longer needed.
+`destroy` deletes `/var/lib/lab/vault-init.json` together with Vault's data, and
+`/var/lib/lab/backups/` with them: neither a Raft snapshot nor Transit ciphertext opens
+without that key (decided 2026-11-12, replacing the archive). `/var/lib/lab/images/` is
+kept (2.7).
 
 ---
 
@@ -3315,7 +3309,7 @@ it by hand once the unseal key and snapshots are no longer needed.
 | Host SSH hardening | **option, not in the core build** (moved out of 2.2 on 2026-11-10; about one M session, folds into 2.2): config key `OPERATOR_LOGIN`, which preflight requires to be a local non-root user with a usable key in the file `sshd -T -C user=<login>` names (owned by the user, not group- or world-writable); a drop-in `/etc/ssh/sshd_config.d/00-lab.conf` (sorts before cloud-init's `50-cloud-init.conf`; sshd keeps the first value) with `PasswordAuthentication no`, `KbdInteractiveAuthentication no`, `PermitRootLogin prohibit-password`, `AllowUsers <OPERATOR_LOGIN> root@<HOST_IP>` (the second for 3.1c; `user@host` avoids a `Match` block), `X11Forwarding no`, `AllowAgentForwarding no`, `PermitTunnel no`, `AllowStreamLocalForwarding no`, `AllowTcpForwarding local` (`ssh -D`, `-L`, `-J` work; `-R` does not); a per-source nftables meter on new tcp 22 connections (`limit rate over 10/minute burst 10 packets`); lockout guards: the key check re-runs, `install -d -m 0755 /run/sshd` then `sshd -t` (a failure removes the file), then `systemctl try-reload-or-restart ssh`, the applying session kept open. Check H1: `ssh -o PreferredAuthentications=none` as `OPERATOR_LOGIN`, root and an unknown user lists only `publickey`; root and a temporary keyed user from the LAN are refused. `destroy` removes the drop-in (rule 26 names it) and reloads. Further tightenings: refuse stray `AllowUsers`/`AllowGroups`/`Match` lines elsewhere in the sshd config (sshd adds up `AllowUsers` from every file); a timed undo (`systemd-run --on-active=5min` removes the drop-in unless confirmed from a new session) | the core build keeps Ubuntu's SSH defaults to stay on the core functions; the risk accepted is password logins from `LAN_CIDR` if the host allows them |
 | Linting | **option, not in the core build** (moved out of the scaffold step on 2026-11-10; about one M session): a `lint` job in `pr.yml` running ruff, mypy, shellcheck (`bootstrap.sh`), yamllint, ansible-lint and tflint, each only over the file types that exist so far, failing when files of a type exist but its linter is missing; ruff, mypy, yamllint and ansible-lint hash-pinned in a dev requirements file this option adds, shellcheck and tflint pinned in `config/versions.toml` | not needed for the core functions; `terraform plan` + policy, `trivy config`, kubeconform and the no-Secrets rule still gate every PR (10.1) |
 | Unit tests | **option, not in the core build** (removed 2026-11-10): pytest over `lab/` in a `tests/` tree, with a `pyproject.toml`, hash-pinned dev tools in `requirements-dev.txt` and a repo `.venv/`, run as a `pr.yml` job | testing happens as the lab is built: each step's Exit is run by hand on the CLI, and every change runs through the Gitea pipeline (`pr.yml`'s gates, then `verify`); most units would only mock CloudStack, Vault and k3s |
-| `status` command | **option, not in the core build** (removed 2026-11-10): a read-only `status` command printing each phase's `check()` result, the pinned versions, Vault's seal state, the gateway, the Vault audit disk usage and host memory against the §5 budget | the core build keeps four commands; `up` and `update` log each phase's state as they converge, and a version is one `/opt/lab/bin/<tool> version` away |
+| `status` command | **option, not in the core build** (removed 2026-11-10): a read-only `status` command printing each phase's `check()` result, the pinned versions, Vault's seal state, the gateway and host memory against the §5 budget | the core build keeps four commands; `up` and `update` log each phase's state as they converge, and a version is one `/opt/lab/bin/<tool> version` away |
 | Examiner walkthrough (`demo`) | **option, not in the core build** (removed 2026-11-10; about two M sessions): a `demo` command running a 14-minute walkthrough (shape, tiers and tunnel, application, encryption, zero trust, trust chain, backup, operations) as re-runnable proofs with human-readable output, reusing the `verify` checks; E2/E3 on the real `customers` key with every row rewrapped first; the break-glass port-forward shown in S4 and A1; a hand edit Flux reverts; kept as `docs/walkthrough.md` with real output | the evidence already exists without it: a green `deliver.yml` run ending in `verify`, and `up`'s local stage for B2/B3 (§13); a walkthrough re-states it for a human audience |
 | Egress tightening | **option, not in the core build** (added 2026-11-09; folds into 2.2, minutes of work): Gitea's public egress in rule 4 also excludes `100.64.0.0/10` (carrier-grade NAT) and `169.254.0.0/16` (link-local, where cloud metadata services listen), so a compromised Gitea cannot reach a provider's metadata endpoint or a CGNAT neighbour; the 2.2 Exit adds `169.254.169.254:443` timing out from Gitea's address | not needed for the core functions |
 | Defence in depth inside k3s | mesh identity (AuthorizationPolicy) only | Kubernetes NetworkPolicies as an L3 layer under the mesh: worth it with many teams; its interplay with ambient's HBONE port needs care, out of scope |

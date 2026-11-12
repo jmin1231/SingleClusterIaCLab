@@ -9,7 +9,8 @@ updated and torn down by one script, `bootstrap.sh`:
   backend **only** through WireGuard tunnels that terminate on the tunnel tier's VM.
 - **Application:** an HTML frontend on its own VM, calling over end-to-end mutual TLS an
   API that runs with PostgreSQL in k3s on the backend VM, inside an Istio ambient mesh,
-  with Vault as the encryption service and the CA. Flux keeps k3s equal to `main`;
+  with Vault as the encryption service; certificates come from cfssl on the host and
+  Istio's built-in CA (decided 2026-11-11). Flux keeps k3s equal to `main`;
   Grafana Alloy in k3s ships the cluster's, the mesh's and the api's metrics and logs to
   Prometheus and Loki on the host, where Grafana shows them.
 - **Control plane:** Vault, CoreDNS, MinIO, Gitea, Prometheus, Loki, Grafana, an egress
@@ -30,6 +31,31 @@ matches its original baseline.
 
 This document is complete on its own: everything needed to build the lab is here.
 
+**Review scope (decided 2026-11-11; review about 2026-11-19).** The full plan is
+larger than the time before the review. The minimum to show is **infrastructure deployed
+through CI/CD with Gitea and its runner**: a push to Gitea runs a runner job that has
+Terraform create the VPC and VMs in CloudStack (state in MinIO) and Ansible configure
+them, with Grafana showing the result. Build in this order, each step at its smallest
+working scope:
+
+1. Done: preflight, `cloudbr1`, chrony, Podman, CoreDNS, Vault server (2.4a).
+2. Vault 2.4b (init, unseal), 2.5a–2.5b (cfssl PKI, host trust), 2.5c–2.5e (KV,
+   policies, AppRole): Vault holds the pipeline's secrets, read through AppRole.
+3. CloudStack, phase 3 (3.1a–3.2a, 3.3a): the longest and riskiest step, so first.
+4. MinIO (2.7): the Terraform state bucket.
+5. Gitea and the runner (2.8, 2.10).
+6. Terraform through the pipeline (phase 5): VPC, tier, VM, state in MinIO. Until
+   phase 4 exists, a stock Ubuntu cloud image registered as a template replaces the
+   golden image, and the VPC's source NAT gives the VMs egress in place of Squid (2.9).
+7. Ansible through the pipeline (6.1a's `base` role).
+8. Grafana with Prometheus (2.7b), node-exporter on the host and on the VMs, so a new
+   VM appears on the dashboard.
+9. Consoles (3.5c, admin logins) and `teardown`/`destroy` for all of it (phase 13).
+
+If time allows, in this order: the host firewall (2.2), the gateway (2.6), the golden
+image (phase 4), Squid (2.9), WireGuard (6.2), k3s with Istio STRICT mTLS on the
+built-in CA (8.1–8.3), the app and database (8.4–8.7), backup and DR (phase 9), the rest.
+
 ---
 
 ## 1. Requirements and how each is proven
@@ -44,8 +70,9 @@ This document is complete on its own: everything needed to build the lab is here
 | **R6** | Observability: metrics, logs and dashboards for the cluster, the mesh and the api | 2.7b, 8.8a, 8.8b, 8.8d | O1–O5 |
 | **R7** | Operator consoles: CloudStack, Vault, Gitea, MinIO and Grafana, from the host only, over trusted TLS, each behind its own login | 3.5c, 2.7b | C1 |
 
-Every step in §9 is required: it builds or proves something R1–R7 needs. What was left
-out, and why, is in §15.
+Every step in §9 is required for the full build: it builds or proves something R1–R7
+needs. The review minimum (above, decided 2026-11-11) is a subset built first. What was
+left out, and why, is in §15.
 
 ---
 
@@ -53,7 +80,7 @@ out, and why, is in §15.
 
 - **Security first.** Where a more secure option costs little extra complexity, it is the
   one built: a separate root per trust domain, mutual TLS where the client can hold a
-  certificate, read-only console logins, default deny everywhere (ACLs, firewalls,
+  certificate, default deny everywhere (ACLs, firewalls,
   mesh). What was weighed and left out is in §15.
 - **Bash at the door, Python inside.** `bootstrap.sh` checks for Python ≥ 3.12 and,
   only when it is missing or older, installs `python3.12` from the Ubuntu archive (so an
@@ -115,7 +142,8 @@ out, and why, is in §15.
   revoked after bootstrap. The CloudStack global admin is used only where nothing
   less works: installing CloudStack (bootstrap) and removing it (`destroy`). Terraform runs as `iac`;
   the golden image is registered by a separate account, `publisher` (3.2a). Flux reads
-  git with a read-only token; console logins are read-only identities (3.5c). The k3s
+  git with a read-only token; console logins are admins by decision (3.5c, 2026-11-11: whoever runs `bootstrap.sh` is
+  root on the host, so a read-only console would protect nothing from them). The k3s
   API follows the same rule (8.2c): Flux's own controllers do every apply; jobs and people
   get short-lived, Vault-issued ServiceAccount tokens bound to namespaced Roles (people:
   read-only `view`); cluster-admin is a break-glass kubeconfig in Vault, read only by
@@ -140,7 +168,7 @@ out, and why, is in §15.
 | Cloud IaaS | Apache CloudStack + KVM |
 | Least-privilege deploy identity | CloudStack account `iac` with a restricted role |
 | Secrets manager + KMS | Vault: KV v2, **Transit** (encryption as a service), AppRole, Kubernetes auth |
-| Private CA | Vault PKI, one root per trust domain: `lab.test CA` (everything hosts and people trust), `pki_mesh` (only the istiod CA), `pki_app` (the frontend ↔ backend-gateway mTLS pair) |
+| Private CA | cfssl on the host (decided 2026-11-11, replacing Vault PKI), one root per trust domain: `lab.test CA` (everything hosts and people trust), `lab app root` (the frontend ↔ backend-gateway mTLS pair); the mesh uses Istio's built-in CA, its own root |
 | Edge / API gateway | Traefik on the host terminates TLS for every control-plane web service (Grafana and the telemetry write paths included) and routes by hostname; Vault stays direct |
 | Remote Terraform state + locking | MinIO S3 backend, lockfile |
 | Golden-image factory | Packer, built through the egress allow-list → versioned in MinIO |
@@ -155,12 +183,12 @@ out, and why, is in §15.
 | Managed Kubernetes | k3s, Secrets encrypted at rest |
 | Zero-trust service traffic | Istio ambient: STRICT mTLS (required), SPIFFE identities, mesh-wide default deny plus `AuthorizationPolicy` ALLOWs |
 | Managed database | CloudNativePG operator: one PostgreSQL 16 `Cluster`, schema and grants declared in its spec; the app password in Vault, synced to the operator |
-| Web front door | the frontend VM: Caddy terminates TLS with a Vault-signed certificate |
+| Web front door | the frontend VM: Caddy terminates TLS with a `lab.test CA` certificate (cfssl) |
 | Private API ingress | Istio Gateway (Gateway API) on the backend, mutual TLS with the frontend, reachable only from the tunnel |
 | Backup / DR | Vault Raft snapshot + `pg_dump`, with a restore drill |
 | CI/CD | Gitea Actions with one self-hosted runner; every change after bootstrap is a pipeline run |
 | Monitoring | k8s-monitoring (Grafana Alloy) in k3s, installed by Flux → Prometheus (remote write) and Loki on the host; Grafana a host console |
-| Operator consoles | each tool's own login, read-only identities, host-only, `lab.test CA` TLS |
+| Operator consoles | each tool's own login, one admin `labadmin` per tool, host-only, `lab.test CA` TLS |
 
 ---
 
@@ -213,7 +241,7 @@ out, and why, is in §15.
 **Application path:**
 
 ```
- user ─HTTPS :443─▶ fe-1: Caddy ─HTTP─▶ frontend ═mTLS (pki_app), inside wg0═▶ tun-1 ═inside wg1═▶ be-1:8000
+ user ─HTTPS :443─▶ fe-1: Caddy ─HTTP─▶ frontend ═mTLS (lab app root), inside wg0═▶ tun-1 ═inside wg1═▶ be-1:8000
                     (app-edge cert)     (loopback)  client cert frontend.app    (forwards one flow;  Istio Gateway
                                                                                  sees TLS records)   `backend`: ends mTLS
                                                                                                         │ HBONE mTLS
@@ -331,16 +359,19 @@ the node's resolver.
 **Consoles** (R7). Each is reached from a browser **on the host** (from a workstation:
 `ssh -D` to the host and browse through that SOCKS proxy with remote DNS, so the traffic
 still originates on the host). Every URL serves a `lab.test CA` certificate; nothing
-answers from the LAN. Credentials are generated at run time into Vault (3.5c) and read
-by hand as `lab-bootstrap`, on a terminal and never into a log (runbook, 14.4).
+answers from the LAN. Every console has one login, `labadmin`, an **admin** (decided
+2026-11-11: whoever runs `bootstrap.sh` is root on the host, and so effectively admin
+of everything). Each password is random and different per console, generated by `up`
+into `state/credentials` (root `0600`; `up` ends by printing the URLs and
+`sudo cat state/credentials`).
 
-| Console | URL | Login (read-only unless noted) | Credential in Vault |
-|---|---|---|---|
-| CloudStack | `https://cloudstack.lab.test/client/` | account `operator`, role *Read-Only Admin* | `kv/lab/bootstrap/cs-operator` |
-| Vault | `https://vault.lab.test:8200/ui/` | userpass `operator`, policy `operator-ui` (no secret reads) | `kv/lab/bootstrap/vault-operator` |
-| Gitea | `https://gitea.lab.test/` | `operator` (write to `lab/lab`, not an admin) | `kv/lab/bootstrap/gitea-operator` |
-| MinIO | `https://minio-console.lab.test/` | `operator`, policy `readonly` | `kv/lab/bootstrap/minio-operator` |
-| Grafana | `https://grafana.lab.test/` | `operator`, role *Viewer* | `kv/lab/bootstrap/grafana-operator` |
+| Console | URL | Login `labadmin` |
+|---|---|---|
+| CloudStack | `https://cloudstack.lab.test/client/` | root admin; the default `admin`/`password` login gets a random password too |
+| Vault | `https://vault.lab.test:8200/ui/` | userpass, policy `lab-admin` |
+| Gitea | `https://gitea.lab.test/` | site admin (Gitea reserves the name `admin`) |
+| MinIO | `https://minio-console.lab.test/` | the root user |
+| Grafana | `https://grafana.lab.test/` | the server admin |
 
 **Host capacity: 32 GB RAM is the ceiling, not a target.** The lab must fit
 under it with a reserve, at its peak, with no memory overcommit (CloudStack
@@ -425,24 +456,25 @@ exist outside Vault, and each one is listed with its location and protection.
 | CNPG's own TLS (server certificate, its CA) | Secrets `db/postgres-ca`, `db/postgres-server` | generated by the operator in the cluster; never in git; encrypted at rest |
 | k3s node token and Secrets-encryption key | `/var/lib/rancher/k3s/server/` on be-1 | root-only. The encryption key sits on the same node, so encryption at rest protects datastore copies and backups, not a compromised node. Without `--secrets-encryption` (k3s's default) every Secret is only base64 in `server/db/state.db` (kine/SQLite) and in every copy of it |
 | Mesh workload keys (ambient) | ztunnel's memory on be-1; never inside a pod | ztunnel holds the key of every meshed workload on its node, so a compromised ztunnel (or node root) can impersonate every identity on that node: on this one-node cluster, all of them. istiod signs only for pods on the requesting ztunnel's node, which caps the blast radius at one node |
-| istiod signing CA key | k8s Secret `istio-system/cacerts` | generated in the `mesh` job's memory, signed by `pki_mesh` (8.3a), written on stdin; encrypted at rest; 1-year TTL, so no rotation in the lab |
-| Backend gateway TLS key (`api.backend.lab.test`) | Secret `ingress/backend-tls` | generated in the `app` job's memory, signed by `pki_app/sign/backend-gw`, written on stdin, never on disk; re-issued under 10 days (8.7d) |
-| fe-1's client key (`frontend.app.lab.test`) | `/etc/frontend/tls/` on fe-1, `0600`, owned by the frontend container's UID | generated **on** fe-1; only its CSR leaves, signed by `pki_app/sign/frontend-client` (8.7g); re-signed under 10 days |
-| Grafana admin password | `kv/lab/bootstrap/grafana-admin`; rendered to `/var/lib/lab/platform/grafana.env` | generated once by the platform phase (rule 18); used only to create Grafana's `operator` login and verify service account (2.7b, 3.5c) |
+| istiod signing CA key | k8s Secret `istio-system/istio-ca-secret` | Istio's built-in CA (8.3a): istiod generates its own self-signed root at install; no job or person handles it; encrypted at rest; no rotation in the lab |
+| Backend gateway TLS key (`api.backend.lab.test`) | `kv/lab/pipeline/tls/backend-gw`; Secret `ingress/backend-tls` | issued on the host by `up`/`update` with cfssl from `lab app root` (profile `backend-gw`), re-issued under 10 days; the `app` job copies it from KV into the Secret on stdin (8.7d) |
+| fe-1's client key (`frontend.app.lab.test`) | `kv/lab/pipeline/tls/frontend-client`; `/etc/frontend/tls/` on fe-1, `0600`, owned by the frontend container's UID | issued on the host by `up`/`update` with cfssl from `lab app root` (profile `frontend-client`), re-issued under 10 days; the `app` job installs it (8.7g). The key is made on the host, not on fe-1: the cost of dropping Vault PKI (§15) |
+| Grafana admin password | `kv/lab/bootstrap/grafana-admin`; rendered to `/var/lib/lab/platform/grafana.env` | generated once by the platform phase (rule 18); it is the `labadmin` console login (3.5c) and creates the verify service account (2.7b, 3.5c) |
 | Alloy write credential (username `alloy-v<N>`, password) | `kv/app/alloy-write`; its bcrypt hash in `/var/lib/lab/traefik/alloy.htpasswd`; Secret `monitoring/alloy-write` | created once by the platform phase (rule 18); synced by VSO (SA `monitoring/vso-monitoring`, role `vso-monitoring`); it can only append metrics and logs, and only from `10.250.0.112` (2.7b). Rotation: a new KV version with the next username; the users file keeps the current and the previous entry until VSO has re-synced, so no batch is refused |
 | Grafana verify token (a Viewer service account) | `kv/lab/pipeline/grafana-verify` | created by the platform phase through Grafana's API (2.7b); `verify` and the `monitoring` job query Prometheus and Loki with it through Grafana |
-| Console logins (Vault, MinIO, CloudStack, Grafana `operator`) | `kv/lab/bootstrap/{vault,minio,cs,grafana}-operator` | read-only identities created in 3.5c (Grafana's: role Viewer); read by hand on a terminal, never into a log (runbook, 14.4) |
+| Console logins (`labadmin` on CloudStack, Vault, Gitea, MinIO, Grafana) | `state/credentials` on the host | root `0600`; admins by decision (3.5c); random, one password per console; every `up` resets each console to the stored password, and a missing file means new passwords, applied by that `up`; `destroy` deletes it |
 | Vault Secrets Operator's Vault token | the operator's memory | Kubernetes login as SA `db/vso-db` to role `vso-db`, which may read `kv/data/app/db` only, and as SA `monitoring/vso-monitoring` to role `vso-monitoring`, `kv/data/app/alloy-write` only; 1-hour TTL |
 | Vault token-reviewer JWT | k8s Secret for SA `vault-auth`, and Vault's `auth/k3s/config` | encrypted at rest; read on be-1 by the `k3s` role (from 8.2c); rotated by re-running the `cluster` job |
 | CloudStack DB password and database encryption keys | `/etc/cloudstack/management/db.properties` and `key`, MySQL, Vault `kv/lab/bootstrap/cloudstack` | root-only; generated per install by 3.1a (never `cloud:cloud` or the `password` key defaults); removed by `destroy` |
-| Control-plane start-up credentials (MinIO root, Gitea admin, Grafana admin, Loki's MinIO user), the gateway's users file (Alloy's bcrypt hash) and the two host TLS keys (Vault's listener, the gateway) | `/var/lib/lab/platform/*.env`, `/var/lib/lab/traefik/alloy.htpasswd`, `/var/lib/lab/certs/` | root `0600`, rendered from Vault by the platform phase and the renewal, on every `up` and `update`; never in the repo |
-| fe-1's TLS key (`app.lab.test`) | `/etc/caddy/tls/` on fe-1 | generated **on** fe-1; only its CSR leaves the VM, signed by the `app` job through `pki/sign/app-edge`; an `app` run re-signs it when under 10 days remain |
+| Control-plane start-up credentials (MinIO root, Gitea admin, Grafana admin, Loki's MinIO user), the gateway's users file (Alloy's bcrypt hash) and the two host TLS keys (Vault's listener, the gateway) | `/var/lib/lab/platform/*.env`, `/var/lib/lab/traefik/alloy.htpasswd`, `/var/lib/lab/certs/` | root `0600`; the env files rendered from Vault by the platform phase, the TLS keys issued with cfssl by the renewal (2.5b), on every `up` and `update`; never in the repo |
+| fe-1's TLS key (`app.lab.test`) | `kv/lab/pipeline/tls/app-edge`; `/etc/caddy/tls/` on fe-1 | issued on the host by `up`/`update` with cfssl from `lab.test CA` (profile `app-edge`), re-issued under 10 days; the `app` job installs it (8.7f) |
+| `lab.test CA` and `lab app root` keys | `state/pki/` on the host | root `0600`, made by cfssl (2.5a); never in Vault, a container or the repo; used only by `up` and `update` (root) to issue certificates; `destroy` deletes them. Deleted by hand → the next `up` makes new roots, re-issues every certificate and re-installs host trust (2.5a) |
 
 **Everything else lives only in Vault** (the start-up credentials above are rendered
 copies of Vault entries, refreshed by the platform phase), split by who may read it:
 
 - `kv/lab/bootstrap/*` (only `lab-bootstrap`): CloudStack admin API keys, MinIO
-  root, Gitea admin, Grafana admin, the runner registration token, the console logins
+  root, Gitea admin, Grafana admin, the runner registration token
 - `kv/lab/pipeline/*` (`lab-pipeline` and `lab-bootstrap`): the `iac`, `publisher`
   and `health` API keys, the per-bucket MinIO users (Loki's included), the lab SSH key,
   WireGuard public keys, Flux's Gitea token, the Grafana verify token
@@ -453,56 +485,61 @@ copies of Vault entries, refreshed by the platform phase), split by who may read
 **Run-time objects in k3s (never in git).** Flux applies everything under
 `clusters/backend/`. A value that exists only at run time reaches the cluster one of two
 ways: the Vault Secrets Operator syncs it from Vault (`db/app-db`, `monitoring/alloy-write`), or a job writes it on
-stdin as `lab-ci`, whose Roles name exactly these objects (8.2c): `istio-system/cacerts` (`mesh`), `ingress/backend-tls`, the public CA as Secret
+stdin as `lab-ci`, whose Roles name exactly these objects (8.2c): `ingress/backend-tls`, the public CA as Secret
 `vault-ca` in `db` and `app`, ConfigMap `flux-system/app-images` (image digests) (`app`),
 `monitoring/vault-ca` (`monitoring`), and
 `flux-system/gitea-auth` and `flux-system/lab-ca` (`cluster`). Flux never prunes them
 (they are not in its inventory). A **gate** Kustomization per job health-checks that
 job's objects, and the Kustomizations that use them `dependsOn` the gate, so Flux never
-starts istiod before `cacerts` exists (8.3a) or the api before its digests are known.
+starts the api before its digests are known.
 
 Paths are written as the CLI takes them (`kv/lab/pipeline/ssh`). In policies and raw
 API calls, KV v2 inserts `data/` (`kv/data/lab/pipeline/ssh`) and `metadata/` for
 listing and deleting, which is the usual cause of an unexpected 403.
 
-**Trust bootstrap order (the chicken-and-egg, broken explicitly):**
+**Trust bootstrap order (decided 2026-11-11: cfssl on the host instead of Vault PKI).**
+Vault PKI makes Vault both the CA and a client of its own CA (a bootstrap certificate,
+a re-issue, a reload) and needs mounts, roles and policy pins per issuer: days of work
+for the build window. With cfssl, certificates are files that `up` issues before the
+services that use them start, so there is no chicken-and-egg left to break.
 
-1. Vault starts with a **self-signed bootstrap certificate**, valid for one day.
-2. `init` → unseal → enable PKI → generate the **single self-signed CA**
-   `lab.test CA` (10 years; key never leaves Vault).
-3. Vault issues its **own** listener certificate from that CA and reloads with
-   `SIGHUP`. The bootstrap certificate is gone.
-4. The CA is installed into the host trust store. It is baked into the golden image,
-   so every VM trusts it from first boot.
-5. Every other certificate comes from Vault: the gateway's via the renewal that every
-   `up` and `update` runs (30-day TTL, longer than the build window: re-issued under 10
-   days, no timer); fe-1's edge certificate via `pki/sign/app-edge` (8.7f); the backend
-   gateway's server certificate and fe-1's client certificate via `pki_app` (8.7d,
-   8.7g); the istiod CA via
-   `pki_mesh/root/sign-intermediate` (8.3a). Mesh workload certificates come from
-   istiod.
+1. `up` creates the roots once with cfssl (2.5a): `lab.test CA` and `lab app root`,
+   keys in `state/pki/` (root `0600`), never in Vault, a container or the repo.
+2. `lab.test CA` goes into the host trust store and Firefox's policy (2.5b). It is baked
+   into the golden image, so every VM trusts it from first boot.
+3. `up` and `update` issue every host certificate from `lab.test CA` (profile
+   `host-svc`, 30 days, re-issued when missing or under 10 days left, no timer):
+   Vault's listener and the gateway's one certificate. Vault's exists before Vault
+   starts, so no bootstrap certificate has to be replaced.
+4. The VM-side certificates are issued the same way on the host and handed over through
+   Vault KV (`kv/lab/pipeline/tls/*`): fe-1's edge certificate from `lab.test CA`
+   (profile `app-edge`, 8.7f); the backend gateway's server certificate and fe-1's
+   client certificate from `lab app root` (8.7d, 8.7g). The `app` job installs them and
+   never holds a CA key.
+5. The mesh uses **Istio's built-in CA**: istiod creates its own self-signed root at
+   install (Secret `istio-system/istio-ca-secret`) and issues every workload a 24-hour
+   certificate (8.3a).
+6. If `state/pki/` is deleted, the next `up` makes new roots, re-issues every
+   certificate, re-installs host trust and restarts the services that use them; the
+   next `app` run installs the new VM-side certificates.
 
-**Three roots, one trust domain each (2.5a, 2.5f), and no intermediates:**
+**Three roots, one trust domain each, and no intermediates:**
 
-- `pki/` (`lab.test CA`): everything hosts and people trust; the only root in any
+- `lab.test CA` (cfssl): everything hosts and people trust; the only root in any
   system trust store.
-- `pki_mesh/`: signs only the istiod CA; mesh workloads trust only it. **Decided
-  2026-11-05** (security first, §2), from the k3s precursor (issue_197 A1): there an
-  unconstrained mesh CA under the services root forged a `vault.vault.svc` certificate
-  that passed `openssl verify`. A sub-CA under `lab.test CA`, even constrained to
-  `cluster.local`, could still mint any `*.svc.cluster.local` certificate (and IP SANs if
-  the IP constraint is unavailable) that every `lab.test CA` client accepts. Under its own
-  root, no host or VM trusts it at all. The istiod CA keeps its `cluster.local`
-  constraint as defence in depth, and every role keeps `allowed_uri_sans` empty (no leaf
-  outside the mesh may carry a SPIFFE ID).
-- `pki_app/`: the frontend ↔ backend-gateway mutual-TLS pair. The gateway accepts
-  client certificates from this root only, so no other lab certificate (Vault's, the
-  gateway's, fe-1's edge) can act as the frontend, and the frontend trusts only this
+- istiod's built-in root (Istio): signs only mesh workload certificates; mesh workloads
+  trust only it. This keeps the 2026-11-05 decision (§15 "Mesh trust root") with nothing
+  to build: in the k3s precursor (issue_197 A1) a mesh CA under the services root forged
+  a `vault.vault.svc` certificate that passed `openssl verify`. istiod's own root is in
+  no host or VM trust store, so a mesh certificate is never accepted outside the mesh.
+  No lab certificate outside the mesh carries a URI SAN (no stray SPIFFE IDs).
+- `lab app root` (cfssl): the frontend ↔ backend-gateway mutual-TLS pair. The gateway
+  accepts client certificates from this root only, so no other lab certificate (Vault's,
+  the gateway's, fe-1's edge) can act as the frontend, and the frontend trusts only this
   root for the api.
 
-A two-tier PKI exists so the root can be kept **offline**; inside one Vault both tiers
-would have the shape without that property. The one sub-CA belongs to istiod (8.3),
-because Istio must hold a signing key of its own.
+An intermediate adds safety only when its root is kept offline; both cfssl roots live on
+the host that issues from them, so the lab has none.
 
 **Transport encryption: two platforms.** The three roots sign every certificate the lab
 issues (CloudStack, k3s and CNPG keep their own internal CAs). The rule:
@@ -533,9 +570,9 @@ in a host Kubernetes cluster (§15).
 
 | Hop | Encryption | Notes |
 |---|---|---|
-| user → fe-1 | TLS at Caddy | Vault-signed `app-edge` certificate, key generated on fe-1 (8.7f) |
+| user → fe-1 | TLS at Caddy | `app-edge` certificate from `lab.test CA`, issued on the host with cfssl (8.7f) |
 | Caddy → frontend | plain HTTP | fe-1's loopback only |
-| frontend → backend gateway | **mutual TLS, end to end** (`pki_app`) | the frontend presents `frontend.app.lab.test` and verifies `api.backend.lab.test` against the `pki_app` root only; the gateway requires the client certificate (8.7d, 8.7g) |
+| frontend → backend gateway | **mutual TLS, end to end** (`lab app root`) | the frontend presents `frontend.app.lab.test` and verifies `api.backend.lab.test` against `lab app root` only; the gateway requires the client certificate (8.7d, 8.7g) |
 | fe-1 → tun-1 | WireGuard `wg0`, around the TLS | |
 | tun-1 → be-1 | WireGuard `wg1`, around the TLS | |
 | across tun-1 | TLS records only | the kernel decrypts WireGuard and re-encrypts it, and what lies between is the frontend's TLS: tun-1 forwards by address and port and never sees the payload (T3). It stays the policy point (6.2b) |
@@ -557,8 +594,8 @@ Alloy → the api, Postgres and kube-state-metrics metrics ports, alloy-audit �
 
 `verify` proves the rule (check P4, §12) from the outside in: on the host, fe-1 and be-1,
 every TCP port in §5's tables (host ports, application ports, 6443 and SSH) either
-completes a TLS handshake verifying against `lab.test CA` (the k3s CA for 6443, the
-`pki_app` root for be-1's 8000) or is an exception above (be-1's node-exporter 9100:
+completes a TLS handshake verifying against `lab.test CA` (the k3s CA for 6443,
+`lab app root` for be-1's 8000) or is an exception above (be-1's node-exporter 9100:
 HTTPS with kube-rbac-proxy's self-signed certificate and a token check, answering on the
 node only); and every gateway backend port is unreachable from a VM.
 
@@ -609,14 +646,14 @@ clusters/backend/            everything Flux applies to k3s (no Secret values, e
   flux-system/               gotk-components.yaml (`flux install --export`, pinned),
                              gotk-sync.yaml (GitRepository `lab`, root Kustomization)
   kustomizations.yaml        Flux Kustomizations and their order: platform → operators;
-                             platform → gate-mesh → mesh; gate-app, operators, mesh →
+                             platform → mesh; gate-app, operators, mesh →
                              apps; gate-monitoring, mesh, operators → monitoring
   platform/                  namespaces (PSA, ambient labels), vault-auth, Gateway API
                              CRDs, the chart source `lab-charts`; access/ (ns `lab-access`,
                              its ServiceAccounts, every Role and binding for jobs and
                              people, the probe namespaces: 8.2c)
   operators/                 HelmReleases: CloudNativePG, Vault Secrets Operator
-  gates/{mesh,app,monitoring}/  empty Kustomizations whose health checks wait for a job's
+  gates/{app,monitoring}/       empty Kustomizations whose health checks wait for a job's
                              run-time objects (§6)
   mesh/                      Istio HelmReleases (base, istiod, cni, ztunnel),
                              PeerAuthentications, mesh-wide allow-nothing
@@ -671,7 +708,7 @@ removed; their numbers are kept free so the others keep theirs.)
 | 5 | `base` | 6.1a–6.1b | setup |
 | 6 | `tunnel` | 6.2a–6.2b | base; three plays: keys on all three VMs → the hub → both spokes |
 | 7 | `cluster` | 8.1–8.2d | base; k3s with its API audit log (8.2d), Flux (8.1b), the chart mirror (8.1c), Vault's Kubernetes auth and the scoped k3s identities (8.2c) |
-| 8 | `mesh` | 8.3a–8.3c | cluster; writes `cacerts`, then waits for Flux's `mesh` |
+| 8 | `mesh` | 8.3a–8.3c | cluster; waits for Flux's `mesh` (Istio with its built-in CA) |
 | 9 | `app` | 8.4a–8.7h | mesh and tunnel; writes `kv/app/db` once, builds, scans and pushes the container images, writes the run-time objects (§6) and waits for Flux's `apps`, configures Vault for the api, then deploys the frontend to fe-1 |
 | 10 | `monitoring` | 8.8a, 8.8b, 8.8d | app; writes `monitoring/vault-ca` and Vault role `vso-monitoring`, syncs the dashboards to the host, waits for Flux's `monitoring` |
 | 11 | `verify` | 12 | everything built; non-zero on any failure |
@@ -697,7 +734,7 @@ the merged revision (`cmd.flux-wait`).
 | `verify` | last job of `deliver.yml`; nightly in `schedules.yml` | Phase 12; non-zero on any failure. A green run ending in `verify`, plus `up`'s local-stage output, is the lab's evidence (§13) |
 | `backup` / `restore-drill` | `schedules.yml` nightly / dispatch | Phase 9.1a–9.2 (`restore-drill` takes a fresh backup first) |
 
-Hand work that is not a command (reading a console login from Vault, a Vault shell
+Hand work that is not a command (reading `state/credentials`, a Vault shell
 with the `lab-bootstrap` AppRole, the break-glass k3s kubeconfig) is a short procedure
 in `docs/runbook.md` (14.4). A read-only `status` inventory is a §15 option.
 
@@ -1098,8 +1135,8 @@ runbook (14.4): a subshell with `VAULT_TOKEN` from a `lab-bootstrap` AppRole log
   ⤷ **Needs** 2.2 · **Recalls** `cmd.netns-test`, `path.baseline` · **Produces** chrony
   config · **Records** `ntp.server` · **Check** Exit
 - **2.4a Vault server.** Integrated **Raft** storage (snapshots in
-  Phase 9); the web UI on (`ui = true`; its login comes in 3.5c); TLS listener on the bootstrap certificate (regenerated if it expired
-  before 2.5b completed; a re-run never puts it back over a Vault-issued certificate);
+  Phase 9); the web UI on (`ui = true`; its login comes in 3.5c); TLS listener on a cfssl certificate (built 2026-11-11 with a
+  throwaway bootstrap CA whose key is deleted after signing; 2.5a re-issues it from `lab.test CA`);
   audit device to a file, rotated daily by a logrotate rule
   that sends Vault `SIGHUP` (Vault stops answering requests if its only audit
   device cannot be written, so a full disk or a broken rotation is an outage; the
@@ -1117,7 +1154,7 @@ runbook (14.4): a subshell with `VAULT_TOKEN` from a `lab-bootstrap` AppRole log
     straight after.
   - The pinned image's user decides `mlock`: an image that runs as non-root without
     `IPC_LOCK` (Vault 2.x) needs `disable_mlock = true` (recommended with Raft anyway).
-  Exit: `vault status` (against the bootstrap certificate) shows Initialized false,
+  Exit: `vault status` (against its `ca.pem`) shows Initialized false,
   Sealed true, Storage raft; `podman healthcheck run vault` passes while sealed; a config
   edit restarts the container.
 
@@ -1143,42 +1180,44 @@ runbook (14.4): a subshell with `VAULT_TOKEN` from a `lab-bootstrap` AppRole log
   `platform.py` (the automatic unseal in `up` and `update`), `vault-init.json` ·
   **Records** `path.vault-init`, `path.archive`; how `up` and `update` unseal ·
   **Check** Exit
-- **2.5a PKI: the CA and its roles.**
-  - Enable `pki/` and tune its `max_lease_ttl` to 10 years **before**
-    generating the CA (the default 32 days would cap the CA and everything under it);
-    `lab.test CA`. Generating a CA on a mount that already has one does not fail, it
-    silently adds a second, so generation is guarded by `pki/config/issuers` (`default`
-    is empty on a fresh mount). Roles:
-    - `host-svc`: the host's service names, 30 days (Vault and the gateway; the
-      gateway names include `grafana`, `prometheus` and `loki`, 2.7b, and `tempo` with
-      §15's tracing option). The only
-      role allowing IP SANs: a PKI role cannot restrict *which* IPs, so
-      `allow_ip_sans=true` means any IP
-    - `app-edge`: `app.lab.test` only, 30 days (fe-1, 8.7f)
-    - all: `allow_wildcard_certificates`, `allow_localhost` and `allow_ip_sans`
-      (except `host-svc`) set false explicitly (they default to allowed), and
-      `allowed_uri_sans` empty (§6: no SPIFFE ID outside the mesh)
-  Exit: `vault read pki/cert/ca` shows a 10-year `lab.test CA`; a re-run adds no second
-  issuer; `pki/issue/app-edge` refuses `vault.lab.test`, `*.lab.test`, an IP SAN and a
-  URI SAN.
+- **2.5a PKI with cfssl: the roots and the issuing code** (decided 2026-11-11, replacing
+  Vault PKI; §6 "Trust bootstrap order"). One shared module, `src/lib/pki.py`, used by
+  every service that needs a certificate:
+  - `ensure_roots()`: creates `lab.test CA` and `lab app root` with `cfssl gencert
+    -initca` only when their files are missing (`state/pki/`, keys root `0600`); 1-year
+    roots, far longer than the lab lives
+  - `issue(profile, cn, hosts, dest, owner)`: a key and certificate from the right root,
+    with 2.4a's rules (key `0600` from creation and owned by the service's container
+    user, certificate written last as the "done" marker); it re-issues when the file is
+    missing, has under 10 days left, or no longer verifies against the current root
+  - one `ca-config.json` with a profile per use, each with only the usages it needs:
+    `host-svc`, `app-edge` and `backend-gw` (server auth, 720h), `frontend-client`
+    (client auth, 720h); `hosts` lists exact names, never a wildcard, and no URI SANs (§6)
+  - Vault's 2.4a `bootstrap_cert()` becomes an `issue("host-svc", "vault.lab.test", …)`
+    call: the throwaway bootstrap CA is retired and Vault restarts once onto the new
+    certificate
+  Exit: `openssl x509 -noout -subject -enddate` shows both roots; `openssl verify
+  -CAfile` with `lab.test CA` passes for Vault's certificate; a re-run issues nothing;
+  after deleting `state/pki/`, a re-run makes new roots and re-issues Vault's
+  certificate, and `curl --cacert <new root>` works.
 
-  ⤷ **Needs** 2.4b · **Recalls** `vault.addr`, `path.vault-init` · **Produces** PKI
-  setup in `platform.py` · **Records** `vault.mount.pki`, `vault.pki.roles` · **Check**
-  Exit
-- **2.5b Vault's own certificate, host trust and the renewal.** The renewal
-  (`maintain.py`) issues Vault's certificate from `host-svc` and sends Vault `SIGHUP` (a reload keeps it
-  unsealed; a restart would not), then puts the CA in the host trust store. It issues a
-  host certificate only when it is missing or under 10 days remain: 30-day certificates
-  outlive the build window, so there is no timer: the platform phase runs it every time,
-  so every `up` and `update` does.
-  Until 2.5e it authenticates with the root token; afterwards with `lab-bootstrap`.
-  Exit: `curl https://vault.lab.test:8200/v1/sys/health` succeeds **without** `-k`;
-  `openssl s_client` shows the issuer `lab.test CA`; `http://vault.lab.test:8200` fails
-  (P3).
+  ⤷ **Needs** 2.4a · **Produces** `src/lib/pki.py`, `ca-config.json` and the CSR
+  files · **Records** `path.pki`, `pki.profiles` · **Check** Exit
+- **2.5b Host trust and the renewal.** `up` installs `lab.test CA` into the host trust
+  store (`/usr/local/share/ca-certificates/lab-test-ca.crt`, `update-ca-certificates`)
+  and into Firefox, which as a snap ignores the system store, through
+  `/etc/firefox/policies/policies.json` (`Certificates.Install`; **[verify]** a fresh
+  24.04 desktop has no such file); `destroy` removes both. The renewal (2.5a's
+  `issue()`, run by every `up` and `update`) re-issues a host certificate when it is
+  missing or under 10 days remain: 30-day certificates outlive the build window, so
+  there is no timer. A re-issued Vault certificate is loaded with `SIGHUP` (a reload
+  keeps Vault unsealed; a restart would not).
+  Exit: `curl https://vault.lab.test:8200/v1/sys/health` succeeds **without** `-k` or
+  `--cacert`; `openssl s_client` shows the issuer `lab.test CA`;
+  `http://vault.lab.test:8200` fails (P3); Firefox opens the Vault UI with no warning.
 
-  ⤷ **Needs** 2.5a · **Recalls** `vault.addr`, `vault.pki.roles` · **Produces**
-  `maintain.py`, `/var/lib/lab/certs/` · **Records** `path.lab-ca` (host trust-store
-  file), `path.certs`, `cmd.maintain` · **Check** Exit; P3
+  ⤷ **Needs** 2.5a · **Produces** the trust-store install and removal · **Records**
+  `path.lab-ca` (host trust-store file), `path.firefox-policy` · **Check** Exit; P3
 - **2.5c KV and Transit.** KV v2 at `kv/` with the `bootstrap` / `pipeline` split (§6);
   Transit at `transit/`. Seed the SSH keypair at `kv/lab/pipeline/ssh`.
   Exit: `vault kv get kv/lab/pipeline/ssh` returns the public key; a Transit round trip
@@ -1187,44 +1226,26 @@ runbook (14.4): a subshell with `VAULT_TOKEN` from a `lab-bootstrap` AppRole log
   ⤷ **Needs** 2.4b · **Recalls** `vault.addr` · **Produces** KV/Transit setup in
   `platform.py` · **Records** `vault.mount.kv`, `vault.mount.transit`, `vault.kv.ssh` ·
   **Check** Exit
-- **2.5f Separate roots: `pki_mesh` and `pki_app`** (§6 "Three roots"; the mesh root
-  was decided 2026-11-05, §15). Same guarded code as 2.5a (tune to 10 years first; the CA
-  generated only when `config/issuers` has no default):
-  - `pki_mesh/`, root `lab mesh root`, **no roles**: its only use is
-    `root/sign-intermediate` for the istiod CA (8.3a)
-  - `pki_app/`, root `lab app root`, two roles, 30 days each, no IP, URI, wildcard or
-    localhost SANs: `backend-gw` (`api.backend.lab.test` only, server auth only) and
-    `frontend-client` (`frontend.app.lab.test` only, client auth only)
-  - neither root goes into any trust store: mesh workloads get `pki_mesh` as
-    `root-cert.pem` (8.3a); the backend gateway and fe-1's frontend get `pki_app` as a
-    file (8.7d, 8.7g)
-  Exit: both CAs are 10-year and a re-run adds no second issuer; `pki_mesh` lists no
-  roles; `pki_app/issue/frontend-client` refuses `api.backend.lab.test` and an IP SAN,
-  and its certificate's extended key usage is client auth only; neither root is in
-  `/etc/ssl/certs`.
-
-  ⤷ **Needs** 2.4b · **Recalls** `vault.addr`, `path.vault-init`, `decision.mesh-root` ·
-  **Produces** the two mounts in `platform.py` · **Records** `vault.mount.pki_mesh`,
-  `vault.mount.pki_app`, `vault.pki_app.roles` · **Check** Exit
+- **2.5f Removed 2026-11-11.** Its two roots moved: `lab app root` is a cfssl root
+  (2.5a), and the mesh uses istiod's built-in root instead of `pki_mesh` (8.3a).
 - **2.5d Policies.** Policies `lab-bootstrap` and `lab-pipeline`, from `lab/policies/`.
   `lab-bootstrap` is the operator's automation identity, so it is broad by
   necessity. It still enumerates paths instead of using `*`: `kv/lab/*`, `kv/app/*`;
-  `transit/keys/*` and `transit/encrypt|decrypt|rewrap/*`; `pki/issue/*`,
-  `pki/sign/*`, `pki_app/sign/*`, `pki_mesh/root/sign-intermediate`, and
-  `sys/mounts/{pki,pki_mesh,pki_app}/tune`; `sys/auth/k3s` (with `sudo`) and
-  `auth/k3s/*`; `sys/auth/userpass` (with `sudo`) and `auth/userpass/users/operator`
+  `transit/keys/*` and `transit/encrypt|decrypt|rewrap/*`; `sys/auth/k3s` (with `sudo`) and
+  `auth/k3s/*`; `sys/auth/userpass` (with `sudo`) and `auth/userpass/users/labadmin`
   (3.5c); `auth/approle/role/*`; the named policies under `sys/policies/acl/*`;
   `sys/storage/raft/snapshot`; `sys/mounts/k3s-creds` and `k3s-creds/creds/*` (8.2c;
   `kv/lab/*` already covers the break-glass kubeconfig, and `kv/app/*` the Alloy write
   credential that the platform phase creates and renders, 2.7b).
   The **bodies** of the workload policies `api`, `vso-db` and `vso-monitoring` (read
   `kv/data/app/alloy-write` only) and of the console policy
-  `operator-ui` are written here,
+  `lab-admin` are written here,
   by bootstrap (the root token now, `lab-bootstrap` from 2.5e on), from `lab/policies/` (a change to them is a bootstrap-side
   change, applied by `up` or `update` (the platform phase or the renewal), never by a
   pipeline job).
   `lab-pipeline` is narrower, so the pipeline can configure what it deploys but
-  cannot widen any policy, and cannot mint a certificate for a control-plane name:
+  cannot widen any policy (there is no PKI mount to mint from; the certificates it
+  installs come from `kv/lab/pipeline/tls/*`, §6):
     - no write to `sys/policies/*` at all
     - Kubernetes auth only at `sys/auth/k3s` (with `sudo`), `auth/k3s/config`, and roles
       `auth/k3s/role/api`, `auth/k3s/role/vso-db` and `auth/k3s/role/vso-monitoring`, with `allowed_parameters` so each
@@ -1232,21 +1253,6 @@ runbook (14.4): a subshell with `VAULT_TOKEN` from a `lab-bootstrap` AppRole log
       `denied_parameters` on the legacy `policies` alias
     - `transit/keys/customers` and `transit/keys/verify-*`, and the Transit
       encrypt/decrypt/rewrap paths for them
-    - PKI: `pki/sign/app-edge` (never `host-svc`; it sets
-      `allow_ip_sans=false`); `pki_app/sign/backend-gw` and
-      `pki_app/sign/frontend-client` (sign only: keys are generated where they are
-      used); never `pki/root/sign-intermediate`; `pki_mesh/root/sign-intermediate` with
-      `allowed_parameters` listing every parameter the `mesh` job sends, each with its only
-      allowed value: `csr` (any), `common_name=["istiod CA"]`,
-      `permitted_dns_domains=["cluster.local"]`, `max_path_length=["0"]`,
-      `ttl=["8760h"]` (ACL parameters match exact values, not ranges), plus
-      `permitted_ip_ranges`/`permitted_uri_domains` pinned empty if the pinned Vault
-      version accepts them; if it does not, an IP-SAN-capable sub-CA is an accepted gap,
-      named in §15 (the istiod CA, 8.3a). No `"*"` key: `"*" = []` would
-      also admit `use_csr_values=true`, which takes the subject from the CSR and bypasses
-      the `common_name` pin. Vault ignores parameters it does not know without an error,
-      so whether a constraint took effect is read from the issued certificate
-      (`openssl x509 -text`), never inferred from the write succeeding
     - `kv/lab/pipeline/*`, `kv/app/*`; never `kv/lab/bootstrap/*`
     - the k3s identities (8.2c): `sys/mounts/k3s-creds` (create, read, update: the one
       mount it may enable), `k3s-creds/config`, `k3s-creds/roles/{lab-ci,lab-dbops,lab-operator}`
@@ -1256,16 +1262,11 @@ runbook (14.4): a subshell with `VAULT_TOKEN` from a `lab-bootstrap` AppRole log
     - `sys/storage/raft/snapshot`
     - never `auth/approle/*`, `sys/mounts/*`, or any other policy name
   Exit: a token holding only policy `lab-pipeline` (made with the root token) is denied
-  `pki/issue/host-svc`, `pki/root/sign-intermediate`, `kv/lab/bootstrap/cloudstack`
-  and a read of `kv/lab/breakglass/k3s-admin`, and gets 403 from `pki_mesh/root/sign-intermediate` with `common_name="Evil CA"` or
-  with `use_csr_values=true`; a CA it gets signed with the allowed values shows the name
-  constraints in `openssl x509 -text` and chains to `lab mesh root`, not `lab.test CA`.
+  `kv/lab/bootstrap/cloudstack`, a write to `sys/policies/acl/lab-pipeline` and a read
+  of `kv/lab/breakglass/k3s-admin`, and can read `kv/lab/pipeline/tls/app-edge`.
 
-  ⤷ **Needs** 2.5a, 2.5c, 2.5f · **Recalls** `vault.mount.*`, `vault.pki.roles`,
-  `vault.pki_app.roles`, `decision.mesh-root` · **Produces** `lab/policies/*.hcl` ·
-  **Records**
-  `vault.policy.*` (files), `vault.sign-intermediate` (path and pinned parameters, read
-  by 8.3a); whether the IP/URI constraints were accepted · **Check** Exit
+  ⤷ **Needs** 2.5c · **Recalls** `vault.mount.*` · **Produces** `lab/policies/*.hcl` ·
+  **Records** `vault.policy.*` (files) · **Check** Exit
 - **2.5e Bootstrap AppRole and root revocation.** AppRole `lab-bootstrap` (policy
   `lab-bootstrap`) written to `/var/lib/lab/approle.json`; every `up` and `update`
   re-issues its secret_id when under 7 days remain (§6). Then **revoke the root
@@ -1274,7 +1275,7 @@ runbook (14.4): a subshell with `VAULT_TOKEN` from a `lab-bootstrap` AppRole log
   login with `approle.json` (the runbook's Vault shell, 14.4) gives a working token;
   the root token is rejected.
 
-  ⤷ **Needs** 2.5b, 2.5d · **Recalls** `path.vault-init`, `vault.kv.ssh` · **Produces**
+  ⤷ **Needs** 2.5d · **Recalls** `path.vault-init`, `vault.kv.ssh` · **Produces**
   AppRole login in `lib/vault.py` · **Records**
   `vault.approle.lab-bootstrap` (file), `vault.root-token` (revoked, date) · **Check**
   Exit
@@ -1737,32 +1738,32 @@ switching**.
   ⤷ **Needs** 3.5a, 3.3b · **Recalls** `ci.workflows`, `gitea.url`,
   `vault.approle.lab-pipeline`, `host.memory` · **Produces** dispatch + follow in
   `__main__.py`/`platform.py` · **Records** `ci.dispatch`; how `up` follows the run · **Check** Exit
-- **3.5c Platform consoles** (R7; run by the platform phase). Read-only logins, each
-  generated once into Vault (rule 18), for the five host consoles in §5:
-  - Vault: `auth/userpass`, user `operator`, policy `operator-ui` (read and list on
-    `sys/mounts`, `sys/auth`, `sys/policies/acl/*`, `kv/metadata/*`, `transit/keys/*`,
-    the PKI roles and CA certificates; no `kv/data/*`, no encrypt or decrypt), token TTL
-    8 h
-  - MinIO: user `operator` with the built-in `readonly` policy
-  - CloudStack: account `operator` with the built-in *Read-Only Admin* role
-  - Gitea: the existing `operator` (2.8)
-  - Grafana: user `operator`, role *Viewer*, created through Grafana's API with the
-    admin (2.7b), password at `kv/lab/bootstrap/grafana-operator`
-  - no command prints them: reading a login from Vault is a manual procedure in the
-    runbook (14.4)
+- **3.5c Platform consoles** (R7; run by the platform phase). One **admin** login,
+  `labadmin`, per console (decided 2026-11-11, replacing read-only `operator` logins:
+  whoever runs `bootstrap.sh` is root on the host). Passwords are random, one per
+  console, kept in `state/credentials` (root `0600`):
+  - Vault: `auth/userpass`, user `labadmin`, policy `lab-admin` (every path, as the root
+    token had before 2.5e revoked it), token TTL 8 h
+  - MinIO: the root user is `labadmin` (`MINIO_ROOT_USER`)
+  - CloudStack: account `labadmin`, root admin; the default `admin` gets a random
+    password as well, so `admin`/`password` never works
+  - Gitea: `labadmin`, site admin (`gitea admin user create --admin`)
+  - Grafana: the server admin is `labadmin` (`GF_SECURITY_ADMIN_USER`)
+  - every `up` sets each console's password to the stored one, so a reset by hand is
+    undone; if `state/credentials` is missing, `up` generates new passwords and applies
+    them, so deleting it never locks anyone out
+  - `up` ends by printing the five URLs and `sudo cat state/credentials`; no password is
+    ever logged
   Exit: from the host, each of the five URLs returns its login page with `curl --fail`
-  and no `-k`, and each login, read from Vault with the `lab-bootstrap` AppRole, works
-  (the Vault one is denied `kv/data/app/db`, the CloudStack one is denied `createVPC`,
-  the Grafana one gets 403 saving a dashboard); from a `LAN_CIDR` source
+  and no `-k`, and `labadmin` with its password from `state/credentials` logs in to each;
+  `admin`/`password` fails on CloudStack; after deleting `state/credentials` and running
+  `up`, the new passwords work and the old ones fail; from a `LAN_CIDR` source
   (`cmd.netns-test`) 443 and 8200 time out.
 
   ⤷ **Needs** 3.2a, 2.7, 2.7b, 2.8, 2.5e · **Recalls** `vault.addr`, `gw.hosts`, `minio.url`,
-  `mon.backends`, `gitea.users`, `cs.api`, `vault.kv.cs-admin`, `vault.approle.lab-bootstrap`,
-  `cmd.netns-test` · **Produces** `consoles.py` (run by the platform phase), the four
-  logins · **Records** `console.urls`, `vault.kv.grafana-operator` · **Check**
-  Exit; C1 (five consoles)
-
-### Phase 4 — Golden image
+  `mon.backends`, `gitea.users`, `cs.api`, `cmd.netns-test` · **Produces** `consoles.py`
+  (run by the platform phase), the five logins, `state/credentials` · **Records**
+  `console.urls`, `path.credentials` · **Check** Exit; C1 (five consoles)
 
 - **4.1a Build through the proxy.** Packer `qemu` on user-mode networking. The build VM
   reaches the internet only through Squid, like every other VM: the autoinstall seed sets
@@ -2155,7 +2156,7 @@ run by the learner with the break-glass kubeconfig (runbook), and the API audit 
 
     | Identity | Grants | Used by |
     |---|---|---|
-    | `lab-ci` | ClusterRole `view` (it has no Secrets, exec or port-forward) and `lab-flux-read` (get, list, watch on GitRepositories, Kustomizations, HelmRepositories, HelmReleases, and CNPG `clusters`, since `view` may not aggregate CRDs); `get`, `update`, `patch` by `resourceNames` on the Secrets it owns: `flux-system/{gitea-auth,lab-ca}`, `istio-system/cacerts`, `ingress/backend-tls`, `db/vault-ca`, `app/vault-ca`, `monitoring/vault-ca`, and ConfigMap `flux-system/app-images`; `create` on Secrets or ConfigMaps in those namespaces only (RBAC cannot limit `create` by name); `create` on `pods/portforward` in `istio-system` only (`istioctl`'s ztunnel views); in `probe` and `probe-plain`: pods `create`, `delete`, `get`, `list`, `watch` and `pods/log` `get` | every `deliver` job and `verify` |
+    | `lab-ci` | ClusterRole `view` (it has no Secrets, exec or port-forward) and `lab-flux-read` (get, list, watch on GitRepositories, Kustomizations, HelmRepositories, HelmReleases, and CNPG `clusters`, since `view` may not aggregate CRDs); `get`, `update`, `patch` by `resourceNames` on the Secrets it owns: `flux-system/{gitea-auth,lab-ca}`, `ingress/backend-tls`, `db/vault-ca`, `app/vault-ca`, `monitoring/vault-ca`, and ConfigMap `flux-system/app-images`; `create` on Secrets or ConfigMaps in those namespaces only (RBAC cannot limit `create` by name); `create` on `pods/portforward` in `istio-system` only (`istioctl`'s ztunnel views); in `probe` and `probe-plain`: pods `create`, `delete`, `get`, `list`, `watch` and `pods/log` `get` | every `deliver` job and `verify` |
     | `lab-dbops` | `view`; in `db`: `get` and `create` on `pods/exec` with `resourceNames: [postgres-1]` (WebSocket exec is authorized as `get` by older API servers, `create` by newer); `get`, `delete` on CNPG `clusters` named `postgres` | `backup`, `restore-drill`, the canary cleanup of the DR drill in `up`'s local stage; E1, E3, S3 and S4's settings half in `verify` |
     | `lab-operator` | `view` and `lab-flux-read` | read-only hand checks by the operator at a terminal |
     | `vault-token-issuer` | in `lab-access`: `create` on `serviceaccounts/token`, `resourceNames: [lab-ci, lab-dbops, lab-operator]` | Vault only |
@@ -2186,7 +2187,7 @@ run by the learner with the break-glass kubeconfig (runbook), and the API audit 
   Exit: `kubectl auth can-i` with each identity's token: `lab-operator` may `list pods
   -A` but not `get secrets -n db`, `create pods --subresource=exec -n db`, `create pods
   --subresource=portforward -n db`, `create pods -n app` or `patch
-  authorizationpolicies -n app`; `lab-ci` may `update secret/cacerts -n istio-system` but
+  authorizationpolicies -n app`; `lab-ci` may `update secret/backend-tls -n ingress` but
   not `get secret/app-db -n db`, exec or port-forward in `db` or `app`, `create pods -n
   app`, `patch kustomizations -n flux-system` or `create rolebindings -n app`;
   `lab-dbops` may exec into `pods/postgres-1` in `db` and nowhere else (K1); a
@@ -2241,32 +2242,23 @@ run by the learner with the break-glass kubeconfig (runbook), and the API audit 
   `vm.be-1` · **Produces** `ansible/roles/k3s/files/audit-policy.yaml`, the audit flags in
   the `k3s` role, the audit-log reader in `lib/kube.py` · **Records** `k8s.audit` (policy
   file, log path, rotation, reader) · **Check** Exit; A1
-- **8.3a The istiod CA from Vault.** (Ambient mode: no sidecars; a per-node proxy,
-  **ztunnel**, carries every meshed pod's traffic as mTLS over **HBONE**, an HTTP
-  CONNECT tunnel on port 15008, with each workload's **SPIFFE** identity
-  `spiffe://cluster.local/ns/<ns>/sa/<sa>` in its certificate.) The CA chains to the
-  separate `pki_mesh` root (§6, decided 2026-11-05).
-  1. The `mesh` job generates the istiod CA key and CSR in memory.
-  2. Vault signs it via `pki_mesh/root/sign-intermediate` (CA:TRUE, path length 0,
-     `permitted_dns_domains=cluster.local`, 1-year TTL).
-  3. The `mesh` job writes Secret `istio-system/cacerts` (`ca-cert.pem`, `ca-key.pem`,
-     `root-cert.pem` = `lab mesh root`, `cert-chain.pem`) **before** istiod starts.
-     istiod reads it only at startup (then watches the files): if it is missing at
-     install, istiod silently creates its own self-signed root in Secret
-     `istio-ca-secret`, unconnected to Vault. The order is enforced by Flux, not by
-     timing: Kustomization `gate-mesh` health-checks Secret `cacerts`, and `mesh` (the
-     Istio HelmReleases, 8.3b) `dependsOn` it.
+- **8.3a The istiod CA: Istio's built-in** (decided 2026-11-11, replacing the Vault
+  `pki_mesh` design). (Ambient mode: no sidecars; a per-node proxy, **ztunnel**,
+  carries every meshed pod's traffic as mTLS over **HBONE**, an HTTP CONNECT tunnel on
+  port 15008, with each workload's **SPIFFE** identity
+  `spiffe://cluster.local/ns/<ns>/sa/<sa>` in its certificate.) istiod creates its own
+  self-signed root at first start (Secret `istio-system/istio-ca-secret`) and issues
+  workload certificates (24 hours, renewed automatically). No job writes a CA and no gate
+  Kustomization is needed. Upgrade path if time allows: a cfssl mesh root and an istiod
+  intermediate in Secret `cacerts`, written before istiod starts (§15).
 
-  Exit: `cacerts` holds all four keys; `openssl x509 -text` on `ca-cert.pem` shows
-  CA:TRUE, pathlen 0, the `cluster.local` name constraint and a 1-year expiry;
-  `openssl verify` chains it to `lab mesh root` and fails against `lab.test CA`;
-  `gate-mesh` turns Ready once the Secret exists; a re-run with a valid CA does not
-  re-sign.
+  Exit: `istio-ca-secret` exists; its root does **not** verify against `lab.test CA` and
+  is in no host or VM trust store; a re-run of the `mesh` job leaves it unchanged (same
+  serial).
 
-  ⤷ **Needs** 8.1b, 2.5d, 8.2d · **Recalls** `decision.mesh-root`, `vault.sign-intermediate`,
-  `cmd.kubeconfig`, `flux.kustomizations` · **Produces** `mesh.py` (CA signing),
-  `clusters/backend/gates/mesh/`, Kustomizations `gate-mesh` and `mesh` · **Records**
-  `mesh.ca` (CN, root it chains to, expiry date) · **Check** Exit
+  ⤷ **Needs** 8.1b, 8.2d · **Recalls** `cmd.kubeconfig`, `flux.kustomizations` ·
+  **Produces** Kustomization `mesh` · **Records** `mesh.ca` (root CN, serial, expiry) ·
+  **Check** Exit
 - **8.3b Install Istio ambient through Flux.**
   Where to look when it fails: `flux get helmreleases -A`, `kubectl -n istio-system logs
   ds/istio-cni-node` (CNI path mistakes show here first) and `ds/ztunnel`, and
@@ -2281,9 +2273,8 @@ run by the learner with the break-glass kubeconfig (runbook), and the API audit 
 
   Exit: every HelmRelease in `istio-system` is Ready at its pinned version; a smoke
   namespace labelled `istio.io/dataplane-mode=ambient` shows `HBONE` for its pods in
-  `istioctl ztunnel-config workloads`; their certificate chains to `lab mesh root`;
-  istiod's log shows it loaded the plugged-in CA from `/etc/cacerts` and no Secret
-  `istio-system/istio-ca-secret` exists.
+  `istioctl ztunnel-config workloads`; their certificate chains to istiod's root in
+  `istio-system/istio-ca-secret`.
 
   ⤷ **Needs** 8.3a, 8.1c · **Recalls** `mesh.ca`, `flux.charts`, `cmd.flux-wait`,
   `cmd.kubeconfig` · **Produces** `clusters/backend/mesh/` HelmReleases, the `mesh` job ·
@@ -2489,16 +2480,17 @@ run by the learner with the break-glass kubeconfig (runbook), and the API audit 
     Istio's auto-deployed gateway pod does not meet `restricted`; a Gateway API
     `Gateway` named `backend` (class `istio`) with one **HTTPS** listener on 8000 for
     `api.backend.lab.test`, `tls.mode: Terminate` with Secret `ingress/backend-tls`, and
-    **client certificates required** from the `pki_app` root (Gateway API frontend
+    **client certificates required** from `lab app root` (Gateway API frontend
     validation, or Istio's listener option `gateway.istio.io/tls-terminate-mode: MUTUAL`
     reading `ca.crt` from the Secret: whichever the pinned Istio supports); an
     `HTTPRoute` to `api.app:8000`. ServiceLB exposes 8000 (and the status port 15021) on
     every node address by DNAT; be-1's forward chain admits only 8000, only on `wg1`,
     only from `10.99.0.2` (6.1b).
-  - **Server certificate:** the `app` job generates the key in memory, has the CSR
-    signed through `pki_app/sign/backend-gw`, and writes Secret `ingress/backend-tls`
-    (`tls.crt`, `tls.key`, `ca.crt` = `lab app root`) on stdin (`gate-app`); it
-    re-issues only when the certificate is missing or has under 10 days left.
+  - **Server certificate:** issued on the host by `up`/`update` with cfssl (`lab app
+    root`, profile `backend-gw`) into `kv/lab/pipeline/tls/backend-gw`; the `app` job
+    reads it and writes Secret `ingress/backend-tls` (`tls.crt`, `tls.key`, `ca.crt` =
+    `lab app root`) on stdin (`gate-app`), only when the Secret is missing or differs
+    from KV.
 
   Exit: from fe-1, `openssl s_client -connect 10.99.1.2:8000 -servername
   api.backend.lab.test -CAfile <lab app root>` verifies the server certificate, and
@@ -2507,26 +2499,27 @@ run by the learner with the break-glass kubeconfig (runbook), and the API audit 
   and 15021 time out; `istioctl ztunnel-config workloads` lists the gateway pod as TCP
   and the api and postgres pods as HBONE.
 
-  ⤷ **Needs** 8.7c, 6.2b · **Recalls** `net.overlay`, `fw.vm`, `vault.pki_app.roles`,
-  `cmd.flux-wait` · **Produces** `apps/ingress/`, backend-tls issuance in `app.py` ·
+  ⤷ **Needs** 8.7c, 6.2b · **Recalls** `net.overlay`, `fw.vm`, `path.pki`,
+  `cmd.flux-wait` · **Produces** `apps/ingress/`, the backend-tls copy in `app.py` ·
   **Records** `k8s.gateway` (namespace, Gateway, SA, TLS Secret, SNI name, how mutual
   TLS is set) · **Check** Exit; P5 (server half)
-- **8.7g The frontend's client certificate: end-to-end mTLS.** fe-1 generates its
-  client key and a CSR for `frontend.app.lab.test` (the `frontend` role, created here);
-  the `app` job signs the CSR through `pki_app/sign/frontend-client` and installs the
-  certificate and `lab app root` in `/etc/frontend/tls/` (key `0600`, owned by the
-  frontend container's UID). Re-signed only when missing or under 10 days left.
+- **8.7g The frontend's client certificate: end-to-end mTLS.** The certificate for
+  `frontend.app.lab.test` is issued on the host by `up`/`update` with cfssl (`lab app
+  root`, profile `frontend-client`) into `kv/lab/pipeline/tls/frontend-client`; the
+  `app` job installs it and `lab app root` in `/etc/frontend/tls/` on fe-1 (the
+  `frontend` role, created here; key `0600`, owned by the frontend container's UID),
+  only when missing or different from KV.
 
   Exit: from fe-1, `curl --cert … --key … --cacert <lab app root> --resolve
   api.backend.lab.test:8000:10.99.1.2 https://api.backend.lab.test:8000/healthz`
-  answers (N2, real backend); the same with a throwaway certificate signed by
-  `lab.test CA` (`pki/sign/app-edge`) fails the handshake (P5); during a request,
+  answers (N2, real backend); the same with fe-1's `app-edge` certificate
+  (signed by `lab.test CA`) fails the handshake (P5); during a request,
   `tcpdump -i wg0 -nn -X 'tcp port 8000'` on tun-1 shows TLS records only, no `HTTP/1.1`
   (T3).
 
-  ⤷ **Needs** 8.7d · **Recalls** `k8s.gateway`, `vault.pki_app.roles`,
+  ⤷ **Needs** 8.7d · **Recalls** `k8s.gateway`, `path.pki`,
   `ansible.inventory`, `net.overlay` · **Produces** `ansible/roles/frontend/` (client
-  key and CSR), CSR signing in `app.py` · **Records** `fe.client-cert` (paths, SAN,
+  certificate install), the KV-to-fe-1 copy in `app.py` · **Records** `fe.client-cert` (paths, SAN,
   owner, re-sign rule) · **Check** Exit; N2 (real backend), P5, T3
 - **8.7h Default deny and the ALLOW policies.**
   - Mesh-wide `AuthorizationPolicy` `allow-nothing` in `istio-system` (the root
@@ -2565,20 +2558,20 @@ run by the learner with the break-glass kubeconfig (runbook), and the API audit 
   `ansible.inventory`, `fe.client-cert` · **Produces** `ansible/roles/frontend/`
   (quadlets), `app/frontend/` (HTML, Caddyfile, quadlets) · **Records** `fe.units`
   (quadlet files, image pins) · **Check** Exit
-- **8.7f Edge TLS for `app.lab.test`.** fe-1 generates its key and a CSR for
-  `app.lab.test`; the `app` job signs the CSR through `pki/sign/app-edge`, installs the
-  certificate, then runs `podman exec caddy caddy reload --force --config
+- **8.7f Edge TLS for `app.lab.test`.** The certificate is issued on the host by
+  `up`/`update` with cfssl (`lab.test CA`, profile `app-edge`) into
+  `kv/lab/pipeline/tls/app-edge`; the `app` job installs it on fe-1, then runs `podman exec caddy caddy reload --force --config
   /etc/caddy/Caddyfile` (without `--force` Caddy ignores a reload whose Caddyfile is
-  unchanged). An `app` run re-signs only when the certificate is missing, is the
-  placeholder, or has under 10 days left.
+  unchanged). An `app` run installs it only when it is missing, is the placeholder,
+  or differs from KV.
 
   Exit: from a LAN machine (DNS `HOST_IP`, trusting `lab.test CA`),
   `curl https://app.lab.test/` succeeds without `-k`. Adding a customer shows
   `**** 4242`, and `psql` in the postgres pod shows `vault:v<n>:…`; a second `app` run
-  does not re-sign.
+  does not reinstall it.
 
-  ⤷ **Needs** 8.7e, 5.4b · **Recalls** `fe.units`, `net.public-ip`, `vault.pki.roles` ·
-  **Produces** CSR/sign/reload in `app.py` · **Records** —; key path and expiry ·
+  ⤷ **Needs** 8.7e, 5.4b · **Recalls** `fe.units`, `net.public-ip`, `path.pki` ·
+  **Produces** install/reload in `app.py` · **Records** —; key path and expiry ·
   **Check** Exit; E1 end to end
 - **8.8a k8s-monitoring through Flux** (decided 2026-11-09, `decision.observability`).
   HelmRelease `k8s-monitoring` (from `lab-charts`, pinned with SHA-256; `install` and
@@ -2618,8 +2611,8 @@ run by the learner with the break-glass kubeconfig (runbook), and the API audit 
     {createClusterRoles: false}, podSecurityContext: {seccompProfile: {type:
     RuntimeDefault}}}`: by default its ClusterRole may write Secrets, workloads and RBAC
     in every namespace, with `bind` and `escalate`. The collector sets `alloy.rbac.create:
-    false`: its default rules read every Secret and ConfigMap, `istio-system/cacerts`
-    included. Instead, plain manifests in `monitoring/`: a read-only ClusterRole on
+    false`: its default rules read every Secret and ConfigMap, istiod's CA key in
+    `istio-system/istio-ca-secret` included. Instead, plain manifests in `monitoring/`: a read-only ClusterRole on
     pods, `pods/log`, namespaces, nodes, `nodes/metrics`, services, endpointslices,
     events and the nonResourceURL `/metrics` (no Secrets, no ConfigMaps, no
     `nodes/proxy`), bound to `sa/alloy`; a Role in `monitoring` with `get` on Secrets,
@@ -2691,7 +2684,7 @@ run by the learner with the break-glass kubeconfig (runbook), and the API audit 
     bytes by source and destination SPIFFE principal; denied connections), **api**
     (request rate, errors, latency, the pod's memory) and **Logs** (Loki panels:
     ztunnel denies, `{job="k3s-audit"}` exec and port-forward events, Kubernetes
-    events), so the Viewer login sees logs without Explore, which Viewer cannot use.
+    events), so logs are one click away without Explore.
   Exit: every annotation, CoreDNS and VSO target is `up` (O1); `count by (job,
   instance) (up) > 1` is empty; every mixin panel showing "No data" is listed and
   either its metric is added to `includeMetrics` or its absence is explained; after a
@@ -2974,7 +2967,7 @@ G4's hand edit by 12.1f.
 ### Phase 14 — Documentation
 
 - **14.4 Runbook and evidence.** `docs/runbook.md`: short manual procedures for reading
-  a console login from Vault (3.5c), a Vault shell with the `lab-bootstrap` AppRole, the
+  `state/credentials` (3.5c), a Vault shell with the `lab-bootstrap` AppRole, the
   break-glass k3s kubeconfig in a `0600` temp file deleted after use, and keeping the
   unseal key offline (9.1a); then links to one green `deliver` run ending in `verify`
   and one `up` local-stage output (B2, B3). Once the final `destroy` runs (13.1a), those
@@ -3055,7 +3048,7 @@ cluster first.*
     (`*_FILE`). A Secret placeholder in a manifest template is quoted (`"${PASSWORD}"`), so
     YAML keeps the value a string.
 18. **Create-once values: only NotFound means "create".** Anything read once and kept
-    (Vault's init file, `kv/app/db`, the Grafana admin password, the CA on a PKI mount)
+    (Vault's init file, `kv/app/db`, the Grafana admin password)
     is checked with a call that tells NotFound apart from every other error; any other
     error stops the run. A check that falls through to "create" on a timeout or a 403
     silently replaces a live secret.
@@ -3127,16 +3120,15 @@ cluster first.*
 | A shared-network NIC on a VM inside a VPC may be refused by CloudStack | 3.3b, 5.4a | proven by the 3.3b spike, run as soon as 3.3a closes, before Terraform depends on it. The cheap fallback is deploy-time multi-network (`deployVirtualMachine` with `networkids` and `iptonetworklist`, documented in 4.22), done by the `setup` job because `cloudstack_instance` takes one network (5.4a) **[verify]**. Only if that fails too, stop before Phase 5; the candidate redesign is then a VPC **private gateway** onto `cloudbr1`, so the host reaches the tiers through the VPC router under ACLs instead of through a second NIC |
 | Same-node HBONE capture point for T1 | 8.3c, T1 | settled in 8.3c's smoke test before the application depends on it |
 | Istio ambient on k3s (CNI paths) | 8.3b | k3s-specific install values; smoke namespace before any workload; fallback is sidecar mode |
-| Flux applies a manifest before its run-time Secret exists | 8.1b, 8.3a, 8.4a, 8.8a | a gate Kustomization per job health-checks the job's objects and dependents `dependsOn` it; P2 also asserts no `istio-ca-secret` (istiod never started without `cacerts`) |
+| Flux applies a manifest before its run-time Secret exists | 8.1b, 8.4a, 8.8a | a gate Kustomization per job health-checks the job's objects and dependents `dependsOn` it (the mesh needs none: istiod makes its own CA, 8.3a) |
 | Gateway API mutual TLS in the pinned Istio | 8.7d | the Exit proves a certless client is refused; if neither frontend validation nor the `tls-terminate-mode` option works, Istio's own `Gateway` resource with `mode: MUTUAL` replaces the listener |
 | The default deny cuts off a needed flow | 8.7h, 8.8a, 8.8b, 8.8d | every flow has a named ALLOW and a test; the gateway gets an explicit allow; ztunnel's deny log names the flow |
 | CNPG in an ambient STRICT mesh | 8.4a, 8.4c | the operator is outside the mesh and polls port 8000: that port alone is PERMISSIVE and allowed only from the pod CIDR; 5432 stays STRICT and api-only. Fallback: mesh `cnpg-system` too, with its webhook port excluded |
 | Telemetry to the host | 2.7b, 8.8a, 8.8b, 8.8d | Alloy buffers in its WAL, an `emptyDir` with an `ephemeral-storage` limit, so an outage longer than the WAL, or the host and the pod restarting together, leaves a gap (accepted); every meshed target needs an ALLOW, so O1 names each job |
 | The Alloy Operator and Alloy's default RBAC | 8.8a | by default the operator may write Secrets, workloads and RBAC everywhere (with `bind` and `escalate`), and Alloy and kube-state-metrics may read every Secret, the mesh CA key included; the operator is confined to `monitoring` without ClusterRoles, Alloy's ClusterRole is a read-only Flux manifest with no Secrets or ConfigMaps, kube-state-metrics drops its `secrets` and `configmaps` collectors; K1 proves Alloy cannot read `istio-system` Secrets |
 | Privileged `node-agents` | 8.8d | node-exporter (hostNetwork, hostPID, read-only host paths) and alloy-audit (UID 0, no capabilities, one read-only directory) are the only host-access pods: own namespace, no credential, no token in alloy-audit, node-exporter bound to `10.0.3.10` behind kube-rbac-proxy and dropped on eth0 (6.1b), Flux their only applier |
-| Pod logs hold whatever pods print | 8.8a | Loki is as sensitive as pod stdout; the api logs no card data (S1); Grafana's console login is a Viewer; gitleaks-style `secretFilter` is available but off to save memory |
+| Pod logs hold whatever pods print | 8.8a | Loki is as sensitive as pod stdout; the api logs no card data (S1); Grafana's console login is an admin (3.5c), so anyone with it reads every log; gitleaks-style `secretFilter` is available but off to save memory |
 | The Alloy write credential leaks | 2.7b | it only appends metrics and logs, and only from `10.250.0.112` (the allowlist runs before the password check); rotated by a new KV version with versioned usernames, so no batch is refused during the switch |
-| istiod `cacerts` key names | 8.3a | write all four Istio file names; Exit checks the workload chain, not just the Secret |
 | Egress allow-list too tight | 2.9, 4.1a, 6.1a, 8.x | denials are logged by Squid; grow the list from the log, never by opening the ACL |
 | Host memory (32 GB ceiling) | all | §5 budget with a 4 GB reserve, measured per phase; `up` refuses a phase that would breach the reserve; §5 cut order if it overruns |
 | Vault sealed after a host reboot | everything | pipeline jobs fail fast with "Vault sealed"; the operator runs `sudo ./bootstrap.sh up` (or `update`), which unseals first (the runner cannot read the unseal key, by design); production answer is KMS auto-unseal |
@@ -3148,7 +3140,8 @@ cluster first.*
 | PR code runs on the host with the pipeline identity | 2.10 | accepted for one operator (§15); `main` is protected, so nothing reaches `deliver` without a merge; with no `docker` group and rootless builds, it runs with `lab-runner`'s rights, not root's |
 | Podman comes from Ubuntu's universe component, paired with an older netavark (4.9.3 with 1.4.0) | 2.1b, 2.1c, 2.2 | security fixes come from the community or Ubuntu Pro, not a vendor repo; versions are pinned (`config/versions.toml`) and logged by `up`; no container port faces the LAN except through the firewall. Netavark features after 1.4 (the nftables driver, `isolate=strict`) are absent, so 2.1c proves the driver, the DNAT path and DNS before 2.2 depends on them. If it fails: Podman 5.x with netavark ≥ 1.10 (nftables driver) from a pinned third-party repository (2.1c names it); Docker is the last resort |
 | aardvark-dns and CoreDNS both want port 53 | 2.1b, 2.3a | aardvark-dns moves to `dns_bind_port` 1053; the lab's own nat rule redirects containers' TCP and UDP port 53 queries to it on every network, since netavark 1.4 does it for UDP only and never on internal networks (2.1c, 2.2) |
-| A mesh CA forging names other clients trust | 2.5f, 8.3a | decided 2026-11-05: the istiod CA is under its own root, `pki_mesh`, which no host or VM trusts (§6); P2 proves the chain ends there and not at `lab.test CA` |
+| A mesh CA forging names other clients trust | 8.3a | the mesh CA is istiod's own self-signed root (Istio's built-in CA, 2026-11-11), which no host or VM trusts (§6); P2 proves the chain ends there and not at `lab.test CA` |
+| A cfssl root key is stolen from the host | 2.5a | root `0600` in `state/pki/`, never in a container or Vault; whoever is root on the host already controls every service; 1-year roots, 30-day leaves; `destroy` deletes them |
 | One compromised ztunnel impersonates every workload on its node | 8.3b | ambient keeps keys out of pods but in ztunnel; with one node that is every identity (§6). Accepted for the lab; production spreads workloads over hardened nodes |
 | Deleting the CNPG `Cluster` (or its PVC) erases the database | 8.4a, 9.2, 14 | `local-path` reclaims with `Delete`; only 9.2 (after a fresh backup), `teardown` and `destroy` delete it; production uses a `Retain` StorageClass and CNPG's own backups |
 | A k3s credential walks past the mesh: exec, port-forward, Secret reads, policy edits, a pod borrowing `sa/api` | 8.2c, 8.2d, 8.4a | split by role: Flux applies, `lab-ci` writes only its named run-time objects, `lab-dbops` may exec into `postgres-1` only, people get `view`; cluster-admin only through the break-glass kubeconfig (runbook); `pg_hba` rejects `postgres` from every address; K1, A1 and S4 prove it. Admission policy against borrowed identities is not built (§15) |
@@ -3186,7 +3179,7 @@ V1–V5 run in `destroy` after its reboot.
 | **Z1** | identity authorization | the frontend cannot reach Postgres: from fe-1 the hub drops it (N6); in the cluster, a pod with any ServiceAccount other than `sa/api` is refused by postgres's `AuthorizationPolicy`, a meshed pod no ALLOW names is refused by the api too (mesh-wide `allow-nothing`), and ztunnel logs each deny |
 | **Z2** | STRICT mTLS | a pod in an unlabelled namespace cannot reach `api.app:8000` (reset by ztunnel: curl exit 56) |
 | **P1** | edge PKI | the gateway certificate chains to `lab.test CA` and carries every gateway name |
-| **P2** | mesh PKI | a workload certificate chains through the istiod CA to `lab mesh root` (`pki_mesh`) and does **not** verify against `lab.test CA`; no Secret `istio-system/istio-ca-secret` exists (istiod did not fall back to its own root) |
+| **P2** | mesh PKI | a workload certificate chains to istiod's built-in root (`istio-system/istio-ca-secret`) and does **not** verify against `lab.test CA` |
 | **P3** | Vault speaks only TLS | `http://vault.lab.test:8200` fails; `https://` succeeds |
 | **P4** | TLS to every entry point | on the host, fe-1 and be-1, every TCP port in §5's tables completes a verified TLS handshake or is a named §6 exception (be-1's node-exporter 9100: HTTPS behind kube-rbac-proxy, on-node only); no gateway backend port answers from a VM |
 | **P5** | frontend ↔ api mutual TLS | the backend gateway's certificate chains to `lab app root` with SAN `api.backend.lab.test`; from fe-1 a client with no certificate, or with one from `lab.test CA`, fails the handshake; the frontend's certificate succeeds |
@@ -3206,7 +3199,7 @@ V1–V5 run in `destroy` after its reboot.
 | **O3** | denials visible | the Z1 probe shows on the denials panel in Grafana on the host within 2 minutes (the metric recorded in `spike.denial-metric`) |
 | **O4** | logs collected | Loki holds recent lines from every namespace that runs pods, and within 2 minutes this run's ztunnel deny line for the Z1 probe, a Kubernetes event and the A1 audit events (`{job="k3s-audit"}`); the *Logs* dashboard shows them to the Viewer login |
 | **O5** | the write paths admit only be-1's Alloy | from the host, and from fe-1, a POST to `prometheus.lab.test/api/v1/write` or `loki.lab.test/loki/api/v1/push` gets 403; from be-1 without credentials, 401; a GET of either name's query API gets 404; from a `LAN_CIDR` source nothing answers |
-| **C1** | consoles | on the host, each of the five §5 console URLs (Grafana's `https://grafana.lab.test/`, Viewer) returns its login page over TLS verified against `lab.test CA` (no `-k`) and its login, read from Vault (runbook), works (3.5c's Exit; `verify` checks the pages, since the runner never reads `kv/lab/bootstrap/*`); from a `LAN_CIDR` source none answers |
+| **C1** | consoles | on the host, each of the five §5 console URLs returns its login page over TLS verified against `lab.test CA` (no `-k`) and `labadmin` from `state/credentials` logs in (3.5c's Exit; `verify` checks the pages, since the runner cannot read `state/credentials`); from a `LAN_CIDR` source none answers |
 | **V1** | packages and sources | no package in the `PACKAGES` table is installed; `systemd-timesyncd` is back; no apt source or key named by rule 26 |
 | **V2** | network | `/etc/netplan` byte-identical to `netplan.orig/`; no lab bridges (`cloudbr0`, `cloudbr1`, `cloud0`, `virbr0`, `podman*`); `/etc/resolv.conf` links where the baseline says; no `inet lab` table; the host reaches `LAN_GATEWAY` on `HOST_IP` |
 | **V3** | services | no `lab-*` units, no containers, no resolved drop-in named by rule 26 |
@@ -3253,7 +3246,7 @@ step depends on something already deleted. Every row tolerates "already gone".
 | −1 | pipeline | Gitea | disables `schedules.yml` and cancels running runs, so no job races the teardown; *destroy only:* stops the runner service |
 | 0 | `monitoring` | the break-glass kubeconfig (`kv/lab/breakglass/k3s-admin`, read by `lab-bootstrap`; rows 0–3 are its one routine use, since `flux uninstall` and suspending Flux need cluster-admin) | **suspends Flux's root Kustomization first**, so nothing deleted below comes back; then Kustomizations `monitoring` and `gate-monitoring`, deleted with pruning (Flux uninstalls k8s-monitoring, whose Alloy Operator pre-delete hook removes the Alloy instances first, and the `node-agents` objects); Secret `monitoring/vault-ca`; Vault `auth/k3s/role/vso-monitoring` (`kv/app/alloy-write` goes with row 1's `kv/app/*`) |
 | 1 | `app` | break-glass kubeconfig, inventory | the CNPG `Cluster` first, waiting until CNPG has removed its pod and PVC (its finalizer needs the operator still running); then Kustomizations `apps` and `gate-app` with pruning (VSO objects, api, `backend` gateway, ALLOWs), then `operators` (CNPG and VSO, after everything carrying their finalizers is gone); the run-time objects (§6); Vault `auth/k3s/role/{api,vso-db}`, `kv/app/*`, `transit/keys/customers` (deletion allowed first) |
-| 2 | `mesh` | break-glass kubeconfig | Kustomizations `mesh` and `gate-mesh` with pruning (Flux uninstalls the Istio HelmReleases), Secret `cacerts` |
+| 2 | `mesh` | break-glass kubeconfig | Kustomization `mesh` with pruning (Flux uninstalls the Istio HelmReleases), Secret `istio-system/istio-ca-secret` (made by istiod, so Flux does not prune it) |
 | 3 | `cluster` | break-glass kubeconfig | the root Kustomization, `platform` (Gateway API CRDs, namespaces, `access/`), `flux uninstall`; Vault `auth/k3s` and the `k3s-creds/` mount; then deletes `kv/lab/breakglass/k3s-admin` (read last, by this row) and `kv/lab/pipeline/gitea-flux` |
 | 5 | `tunnel`, `base` | inventory | nothing to undo on VMs that are about to be destroyed; WireGuard public keys in Vault (`kv/lab/pipeline/wg/*`) |
 | 6 | `setup` | Vault (`iac`, the `tfstate` MinIO user) | `terraform destroy` (run directly, not through the policy gate, which forbids destroying the public IP); then the state object; the `app.lab.test` and `k3s.lab.test` records |
@@ -3279,8 +3272,8 @@ it by hand once the unseal key and snapshots are no longer needed.
 |---|---|---|
 | IaC engine | Terraform | OpenTofu: drop-in and openly licensed; a one-line swap via `TF_BIN` |
 | Secrets/KMS | Vault | OpenBao: its advantage (free namespaces) is unused by a single tenant |
-| PKI | three roots in Vault (`lab.test CA`, `pki_mesh`, `pki_app`), one trust domain each, + the istiod sub-CA | two-tier root/intermediate: without an offline root it adds shape, not safety |
-| Mesh trust root | **decided 2026-11-05: a separate root `pki_mesh`** that signs only the istiod CA (built in the precursor, issue_197 A1), so host trust and mesh trust never overlap. Chosen by the security-first rule (§2): it costs one mount and P2 chaining to it | the istiod sub-CA under `lab.test CA`, DNS-constrained to `cluster.local`: one root fewer, but it could still mint any `*.svc.cluster.local` certificate, and IP SANs if the IP constraint is unavailable, that every host client accepts (§6) |
+| PKI | **decided 2026-11-11:** cfssl on the host for `lab.test CA` and `lab app root`, Istio's built-in CA for the mesh; three roots, one trust domain each, no intermediates | Vault PKI (the earlier design: mounts `pki`, `pki_mesh`, `pki_app`, roles, sign-intermediate parameter pins, and a bootstrap certificate Vault re-issues for itself): VM keys generated where used and the pipeline signing CSRs through scoped policies, but days of work for the build window. cfssl's costs: the CA keys sit on the host, and VM keys are made on the host and handed over through Vault KV. A two-tier root/intermediate: without an offline root it adds shape, not safety |
+| Mesh trust root | a root separate from host trust (decided 2026-11-05), since 2026-11-11 **Istio's built-in self-signed root** instead of a Vault `pki_mesh` root: no host or VM trusts it, so a mesh certificate is never accepted outside the mesh | the istiod sub-CA under `lab.test CA`, DNS-constrained to `cluster.local`: it could still mint any `*.svc.cluster.local` certificate that every host client accepts (§6); a cfssl mesh root plugged in through `cacerts`: the upgrade path if time allows, a root the lab controls |
 | k3s Secrets at rest | `--secrets-encryption` (key on the node); RBAC limits who reads Secrets (8.2c) | a KMS provider plugin, so the key is off the node: the production answer; here it protects `state.db` copies, not the node (§6) |
 | k3s API access | **built:** scoped ServiceAccounts with namespaced Roles, tokens issued per command by Vault's Kubernetes secrets engine, people read-only (`view`), cluster-admin as an audited break-glass kubeconfig in Vault, the API audit log, `pg_hba` without `trust` (8.2c, 8.2d, 8.4a) | admission policy (a `ValidatingAdmissionPolicy` or Kyverno rule) refusing pods in `app`/`db` that use `sa/api` unless created by its Deployment, and refusing exec into `db`: the stronger guard against a borrowed identity, but one more policy layer to debug with the mesh; OIDC logins for people and just-in-time admin (Teleport, an access broker) instead of a static break-glass certificate; rotating k3s's client CA to retire the admin certificate: all production answers, out of scope |
 | API audit log destination | on be-1, rotated (7 days, A1's record, read by `verify` over SSH), plus a copy in Loki (30 days) through node-agents' alloy-audit (8.8d) | a SIEM with alerts on exec, port-forward and `system:admin`: needs alert routing nobody would receive in the build window |
@@ -3297,18 +3290,18 @@ it by hand once the unseal key and snapshots are no longer needed.
 | GitOps | Flux CD, installed from committed `flux install --export` output, pulling `main` from Gitea with a read-only token; charts mirrored into Gitea's OCI registry | Argo CD: a UI and an app-of-apps model, heavier for one cluster; `flux bootstrap`: pushes to `main`, which is protected; jobs running `kubectl apply`: no drift repair and no single source of truth |
 | Image delivery to k3s | digests in ConfigMap `app-images`, written by the `app` job, substituted by Flux | Flux image automation committing the digest to git: auditable in history, but it needs an identity allowed past `main`'s protection |
 | Mesh authorization | mesh-wide `allow-nothing`, one ALLOW per flow | ALLOW policies only on the sensitive workloads: anything unlisted would be open to every meshed pod |
-| Web front door | Caddy on fe-1, Vault-signed certificate, key generated on the VM | a managed load balancer with TLS offload: what a cloud would give; one VM needs no balancer |
+| Web front door | Caddy on fe-1, `lab.test CA` certificate issued on the host with cfssl | a managed load balancer with TLS offload: what a cloud would give; one VM needs no balancer |
 | DB credentials | static, in Vault KV, synced by VSO to CNPG's managed role | Vault database engine: short-lived users per pod; costs refresh logic in the api and a Vault → Postgres path through STRICT mTLS |
 | App delivery | images built, scanned, pinned | code in ConfigMaps + pip at start: unpinned, unscanned, needs internet from the tier |
 | Directory login | not built | a Samba AD DC on its own tier, VMs joined with realmd/SSSD: AD users log in, `sudo` by AD group, one disable revokes access everywhere. Adds a VM, an ACL set and a join role; R1–R7 do not need it |
-| Observability | **decided 2026-11-09 (Option B):** k8s-monitoring (Grafana Alloy) in k3s by Flux, collecting metrics from everything in the cluster, in and out of the mesh, plus pod logs, events and the API audit log; it writes to Prometheus (7 days, 2 GB cap) and Loki (7 days, the audit log 30 days) on the host, behind the gateway with basic auth from be-1 only (`decision.telemetry-auth`: a client certificate from a separate root is the upgrade path); Grafana a fifth host console, Viewer login, the mixin and three lab dashboards; Alertmanager off | in-cluster kube-prometheus-stack (the earlier design): a second gateway and a mgmt-NIC listener on be-1, metrics lost on a restart, no logs; alerts on tunnel handshakes, hub drops, mesh denials and unexpected Vault decrypts: alert routing nobody would receive in the build window; Mimir and long retention: the production answer for many clusters |
+| Observability | **decided 2026-11-09 (Option B):** k8s-monitoring (Grafana Alloy) in k3s by Flux, collecting metrics from everything in the cluster, in and out of the mesh, plus pod logs, events and the API audit log; it writes to Prometheus (7 days, 2 GB cap) and Loki (7 days, the audit log 30 days) on the host, behind the gateway with basic auth from be-1 only (`decision.telemetry-auth`: a client certificate from a separate root is the upgrade path); Grafana a fifth host console, `labadmin` login (3.5c), the mixin and three lab dashboards; Alertmanager off | in-cluster kube-prometheus-stack (the earlier design): a second gateway and a mgmt-NIC listener on be-1, metrics lost on a restart, no logs; alerts on tunnel handshakes, hub drops, mesh denials and unexpected Vault decrypts: alert routing nobody would receive in the build window; Mimir and long retention: the production answer for many clusters |
 | Telemetry: traces (OpenTelemetry) | **highly recommended option, not in the core build** (added 2026-11-09; slot after 8.8d): OpenTelemetry auto-instrumentation in the api (Flask, `psycopg`, and `requests`, which carries `hvac`'s Vault calls; packages pinned with `--require-hashes` like the rest), exporting OTLP/HTTP to Alloy's receiver `alloy.monitoring:4318` (`applicationObservability` on; ALLOW Alloy ← `sa/api` on 4318; Alloy's ClusterRole gains `replicasets`); Alloy forwards it through an `otlp` destination to Tempo on the host through the gateway (`tempo.lab.test`, one more SAN, `Path(/v1/traces)`, the same allowlist and basic auth), Tempo's data in a MinIO bucket `tempo`, Tempo added to Grafana. About a day of work, ~0.4 GB on the host and ~0.1 GB more for Alloy; no firewall or waypoint change, since pod egress to `10.250.0.1:443` is already allowed. Proof: one `POST /customers` shows the api, Vault-login, Transit and Postgres spans in one trace | frontend and gateway spans for an end-to-end trace from fe-1 (fe-1 → host OTLP is a new mgmt flow); Istio waypoints for per-hop L7 spans (an Envoy per namespace: memory on be-1) |
 | Longevity and hardening | 30-day host certificates, no renewal timer; nothing that only matters after the build window | renewal timers and hot-reload checks, CRLs and revocation, istiod CA rotation, CIS hardening and an image scan/SBOM, `tfstate` versioning, Gitea and state backups, teardown and reboot drills, ADRs and a full runbook (beyond 14.4's few procedures): worth having for a long-lived estate, not for a 3-week build proven by a green pipeline run and `up`'s local stage (§13) |
-| Frontend → api encryption | **built:** mutual TLS from the frontend to the backend gateway, end to end inside the WireGuard tunnels (`pki_app`, both keys generated where used), so tun-1 forwards ciphertext only | server-auth TLS only: simpler, but anything that reached the overlay could call the api; the client certificate reuses fe-1's CSR flow (8.7f). TLS straight to the api pod: the gateway would pass it through and the api would carry TLS code the mesh already provides |
+| Frontend → api encryption | **built:** mutual TLS from the frontend to the backend gateway, end to end inside the WireGuard tunnels (`lab app root`, both certificates issued on the host with cfssl), so tun-1 forwards ciphertext only | server-auth TLS only: simpler, but anything that reached the overlay could call the api; the client certificate uses the same KV hand-over as fe-1's edge certificate (8.7f). TLS straight to the api pod: the gateway would pass it through and the api would carry TLS code the mesh already provides |
 | Third-party image mirror | **option, not in the core build** (added 2026-11-09; slot after 8.1c): the `cluster` job copies each pinned public image (Istio, CloudNativePG, the Vault Secrets Operator, the k8s-monitoring images, Caddy) by digest from its registry to `gitea.lab.test/lab/mirror/` with `skopeo copy`, on the host, after a Trivy scan, the way 8.1c mirrors charts; a digest already there is skipped. be-1's `registries.yaml` and fe-1's `registries.conf` point `docker.io`, `quay.io`, `ghcr.io` and `registry.k8s.io` at that mirror (**[verify]** k3s's `rewrite` and Podman's `location` with a path prefix at the pinned versions), and the registries leave Squid's allow-list, so VMs fetch only apt packages and the k3s binary through Squid. About one M session and a few GB in Gitea; no new service and no firewall change, since VMs already reach the gateway. Proof: with the registries off the allow-list, a rebuilt be-1 starts every pod and Squid's log shows no registry request | Harbor or Nexus as a pull-through cache: the enterprise answer, but ~2 GB on the host and another console; Zot with on-demand sync: lighter, still one more service; air-gap bundles carried in by hand: the answer for networks with no egress at all |
 | Egress control | proxy allow-list | ACL allow-list by CIDR: registries and mirrors sit behind CDNs, so CIDR lists rot |
-| Console exposure | host only, each tool's own login, read-only identities everywhere | consoles on the LAN behind SSO (OIDC from a directory): the enterprise answer; needs the directory (above) |
-| Grafana access | a host console behind the gateway, on the one gateway certificate, Viewer login | on be-1 behind its own Istio gateway on the mgmt NIC (the earlier design): a second gateway, a DNAT rule and a `pki/sign/grafana` role; `kubectl port-forward`: plain HTTP on the host's loopback and a helper process to keep alive |
+| Console exposure | host only, each tool's own login, one admin `labadmin` per tool (decided 2026-11-11) | read-only identities (the earlier design): they protect nothing from whoever runs `bootstrap.sh`, who is root on the host. Consoles on the LAN behind SSO (OIDC from a directory): the enterprise answer; needs the directory (above) |
+| Grafana access | a host console behind the gateway, on the one gateway certificate, `labadmin` login (3.5c) | on be-1 behind its own Istio gateway on the mgmt NIC (the earlier design): a second gateway, a DNAT rule and a `pki/sign/grafana` role; `kubectl port-forward`: plain HTTP on the host's loopback and a helper process to keep alive |
 | CI runner | one runner on the host as `lab-runner` (in `kvm` only; images built with rootless Podman), one label, every job; `main` protected by a required `pr.yml` check with 0 approvals | separate untrusted runners for pull requests (no host access, no deploy credentials), a deploy runner only `main` can reach, a remote BuildKit service, and a required second reviewer: the enterprise answer once more than one person pushes. With one operator, every PR is the operator's own code, so a PR running with host access and the pipeline identity is an accepted, stated risk |
 | Control-plane runtime | **decided 2026-11-09: Podman over Docker; 2026-11-10: Compose over quadlets.** Rootful Podman from the Ubuntu 24.04 archive, the host services in one `compose.yaml` run by a pinned `docker-compose` v2 against Podman's socket, started by `lab-platform.service` after the firewall; TLS at a gateway, Vault direct; rootless Podman for the runner's image builds | Docker Compose (the earlier design): a root daemon, a third-party apt repo and key, and the `docker` group, which made the runner root-equivalent; Docker also set FORWARD to drop and loaded `br_netfilter`, which the lab had to undo (§10 rule 13). Podman has no daemon and the runner needs no privileged group. Quadlets (one systemd unit per container, the native way on a Podman production host) were the first choice; Compose replaced them because the operator already knows it, one file shows the whole control plane, and Podman 4.9's quadlets lack `AddHost=` and `Notify=healthy`. Compose's costs: rootful Podman's API socket is on (root-only), services are not separate systemd units (`podman logs`, `docker-compose restart`), and the firewall dependency is on the whole stack. Its costs: netavark adds no forward filtering, so the lab's table is the default deny (2.2), and aardvark-dns moves off port 53 (2.1c). If the 2.1c spike fails, the named fallback is Podman 5.x with netavark ≥ 1.10 (nftables driver) from a pinned third-party apt repository, today OBS `home:alvistack` **[verify]**, removed by `destroy`; returning to Docker is the last resort. A host k3s cluster with a mesh: the mesh's CA would be Vault running inside it, CloudStack and `/dev/kvm` builds cannot move in, and k3s needs bridge netfilter on, which breaks bridged VM traffic (§10 rule 13). Enterprises keep foundation services (DNS, PKI, SCM, artifact store) outside the platforms they bootstrap |
 | Supply-chain admission | images scanned and pinned by digest; Pod Security Admission `restricted` | cosign signing at push with a Kyverno/policy-controller verify rule at admission: the production answer for "only our images run"; here digest pinning in reviewed manifests gives the same guarantee for a single registry and operator |
@@ -3316,7 +3309,7 @@ it by hand once the unseal key and snapshots are no longer needed.
 | Golden-image transport | SSVM copy over plain HTTP from the gateway's `images/` route, checksum verified | direct-download templates over HTTPS with `lab.test CA` uploaded to the KVM host: TLS on that hop, but an extra trust upload and an admin-only registration path |
 | Behind the gateway | plain HTTP on an internal Podman network and loopback | re-encrypting to every backend: needed when the network behind the gateway is shared or untrusted; here it never leaves the host |
 | SSH host trust | per-job `known_hosts` with `accept-new` | Vault's SSH CA signing host and user certificates, so host keys are verified and no static key exists: the production answer, out of scope |
-| istiod CA name constraints | DNS constrained to `cluster.local`; IP/URI constraints only if the pinned Vault accepts them (2.5d) | an offline-root PKI where the intermediate is constrained by the signing ceremony itself: out of scope; the pipeline identity that could request it already runs with host access (2.10) |
+| istiod CA name constraints | none: Istio's built-in root is self-signed and trusted only inside the mesh (8.3a) | a `cluster.local`-constrained istiod intermediate under a lab-controlled mesh root: defence in depth for the upgrade path |
 | Management network isolation | in-guest nftables on a shared host-only bridge | private VLANs or per-VM L2 isolation, so a VM's root cannot reach another VM's mgmt NIC: needs Open vSwitch PVLAN support in CloudStack |
 | Privileged access | SSH to the host as Ubuntu ships it, from `LAN_CIDR` only (2.2); CloudStack adds the KVM host as root with a key limited by `from=` to the host's own address (3.1c) | key-only SSH hardening (the option below); AD logins (above), Teleport/Boundary with an SSH CA and session recording: the production answer, out of scope |
 | Host SSH hardening | **option, not in the core build** (moved out of 2.2 on 2026-11-10; about one M session, folds into 2.2): config key `OPERATOR_LOGIN`, which preflight requires to be a local non-root user with a usable key in the file `sshd -T -C user=<login>` names (owned by the user, not group- or world-writable); a drop-in `/etc/ssh/sshd_config.d/00-lab.conf` (sorts before cloud-init's `50-cloud-init.conf`; sshd keeps the first value) with `PasswordAuthentication no`, `KbdInteractiveAuthentication no`, `PermitRootLogin prohibit-password`, `AllowUsers <OPERATOR_LOGIN> root@<HOST_IP>` (the second for 3.1c; `user@host` avoids a `Match` block), `X11Forwarding no`, `AllowAgentForwarding no`, `PermitTunnel no`, `AllowStreamLocalForwarding no`, `AllowTcpForwarding local` (`ssh -D`, `-L`, `-J` work; `-R` does not); a per-source nftables meter on new tcp 22 connections (`limit rate over 10/minute burst 10 packets`); lockout guards: the key check re-runs, `install -d -m 0755 /run/sshd` then `sshd -t` (a failure removes the file), then `systemctl try-reload-or-restart ssh`, the applying session kept open. Check H1: `ssh -o PreferredAuthentications=none` as `OPERATOR_LOGIN`, root and an unknown user lists only `publickey`; root and a temporary keyed user from the LAN are refused. `destroy` removes the drop-in (rule 26 names it) and reloads. Further tightenings: refuse stray `AllowUsers`/`AllowGroups`/`Match` lines elsewhere in the sshd config (sshd adds up `AllowUsers` from every file); a timed undo (`systemd-run --on-active=5min` removes the drop-in unless confirmed from a new session) | the core build keeps Ubuntu's SSH defaults to stay on the core functions; the risk accepted is password logins from `LAN_CIDR` if the host allows them |
@@ -3358,7 +3351,7 @@ it by hand once the unseal key and snapshots are no longer needed.
 | `min_decryption_version` | Transit key setting: ciphertext older than this key version can no longer be decrypted |
 | netavark | Podman's network tool: creates bridges and veths and writes the NAT and published-port rules (with its iptables driver at 1.4, through iptables-nft) |
 | `netplan try` / SIGUSR1 | apply a network change that reverts itself unless confirmed; SIGUSR1 is the confirmation |
-| mutual TLS (mTLS) | TLS in which the client also presents a certificate the server verifies; here frontend ↔ backend gateway (`pki_app`), and every meshed hop (HBONE) |
+| mutual TLS (mTLS) | TLS in which the client also presents a certificate the server verifies; here frontend ↔ backend gateway (`lab app root`), and every meshed hop (HBONE) |
 | `node-agents` | the namespace holding the only host-access pods (node-exporter, alloy-audit), PSA `privileged`, kept apart from `monitoring` |
 | PSA | Pod Security Admission: per-namespace labels that reject pods breaking a security profile |
 | RBAC | Kubernetes role-based access control: `Role`/`ClusterRole` list verbs on resources (optionally by name), bindings give them to users or ServiceAccounts; it guards the API, as the mesh guards the network (rule 25) |
@@ -3401,7 +3394,7 @@ place), and the story in the log.
 | Network | `net.` | addresses, CIDRs and ports as built | `net.host`, `net.vpc`, `net.public-ip` |
 | Host | `host.`, `path.` | host facts, file paths | `host.memory`, `path.vault-init`, `path.bridge-nf` |
 | Control plane | `podman.`, `fw.`, `dns.`, `ntp.`, `gw.`, `minio.`, `gitea.`, `git.`, `proxy.`, `runner.` | how each service is reached and configured | `gw.hosts`, `runner.user` |
-| Vault | `vault.` | mounts, roles, policies, AppRoles, KV paths | `vault.mount.pki`, `vault.kv.app-db` |
+| Vault | `vault.` | mounts, roles, policies, AppRoles, KV paths | `vault.mount.kv`, `vault.kv.app-db` |
 | CloudStack | `cs.` | object names and ids | `cs.network.mgmt`, `cs.account.iac` |
 | Image and Terraform | `img.`, `cfg.`, `tf.`, `policy.` | image versions, state location, gate files | `img.template`, `tf.backend` |
 | VMs | `vm.`, `ssh.`, `ansible.`, `wg.` | per-VM addresses, access, roles, tunnel | `vm.be-1`, `wg.keys` |
@@ -3420,7 +3413,8 @@ words. A contract may name a family: `vault.policy.*`, `vm.<name>`.
 
 ```
 - `vault.kv.app-db` = `kv/app/db`, field `password`, create-once — lab/app.py · 8.4b, 2027-01-12
-- `decision.mesh-root` = `pki_mesh` (separate root for the istiod CA) — §15 "Mesh trust root", decided 2026-11-05
+- `decision.mesh-root` = istiod's built-in root (was `pki_mesh`) — §15 "Mesh trust root", decided 2026-11-05, changed 2026-11-11
+- `decision.pki` = cfssl on the host (`lab.test CA`, `lab app root`), no Vault PKI — §15 "PKI", decided 2026-11-11
 - `decision.observability` = Option B: Alloy (k8s-monitoring) in k3s → Prometheus, Loki, Grafana on the host — §15 "Observability", decided 2026-11-09
 - `gotcha.sudo-kubeconfig` = sudo drops KUBECONFIG → localhost:8080; pass --kubeconfig (rule 21) · 8.1, 2027-01-05
 ```
@@ -3437,7 +3431,7 @@ words. A contract may name a family: `vault.policy.*`, `vm.<name>`.
 - Never a secret value: its path only (§6).
 - `decision.*` is written when the learner decides, in any session. `OPEN` means a step
   that recalls it stops and asks. The registry starts with `decision.mesh-root =
-  pki_mesh` (decided 2026-11-05), `decision.observability = Option B` and
+  istiod built-in` (2026-11-05, changed 2026-11-11), `decision.pki = cfssl` (2026-11-11), `decision.observability = Option B` and
   `decision.telemetry-auth` = Traefik basic auth from be-1 only, credential in Vault KV
   synced by VSO (§15 "Observability", 2.7b), and `decision.runtime` = Podman, host services
   by Compose (§15 "Control-plane runtime"), all three decided 2026-11-09 (Compose
@@ -3507,12 +3501,12 @@ loop. Import one bead per row.
 | 2.3b | NTP | 2.2 | 2 | S |
 | 2.4a | Vault server | 2.3a | 2 | M |
 | 2.4b | Init and unseal | 2.4a | 2 | M |
-| 2.5a | PKI: the CA and its roles | 2.4b | 2 | M |
-| 2.5b | Vault's own certificate, host trust and renewal | 2.5a | 2 | S |
+| 2.5a | PKI with cfssl: the roots and the issuing code | 2.4a | 2 | S |
+| 2.5b | Host trust and the renewal | 2.5a | 2 | S |
 | 2.5c | KV and Transit | 2.4b | 2 | S |
-| 2.5f | Separate roots: `pki_mesh` and `pki_app` | 2.4b | 2 | S |
-| 2.5d | Policies | 2.5a, 2.5c, 2.5f | 2 | M |
-| 2.5e | Bootstrap AppRole and root revocation | 2.5b, 2.5d | 2 | S |
+| 2.5f | removed 2026-11-11 (cfssl roots in 2.5a, istiod's own root in 8.3a) | — | — | — |
+| 2.5d | Policies | 2.5c | 2 | M |
+| 2.5e | Bootstrap AppRole and root revocation | 2.5d | 2 | S |
 | 2.6 | Gateway (Traefik) | 2.5e, 2.1b | 2 | M |
 | 2.7 | MinIO | 2.6 | 2 | M |
 | 2.7b | Telemetry stores and Grafana | 2.7, 2.6, 2.5c | 2 | M |
@@ -3548,7 +3542,7 @@ loop. Import one bead per row.
 | 8.2a | Vault's Kubernetes auth | 8.1b, 2.5d | 8 | M |
 | 8.2c | Least-privilege k3s identities | 8.2a | 8 | M |
 | 8.2d | The k3s API audit log | 8.2c | 8 | S |
-| 8.3a | The istiod CA from Vault | 8.1b, 2.5d, 8.2d | 8 | M |
+| 8.3a | The istiod CA: Istio's built-in | 8.1b, 8.2d | 8 | S |
 | 8.3b | Install Istio ambient through Flux | 8.3a, 8.1c | 8 | M |
 | 8.3c | STRICT mTLS and the capture point | 8.3b | 8 | M |
 | 8.4a | The database: CloudNativePG | 8.3c, 8.1c | 8 | M |
@@ -3598,7 +3592,7 @@ green `deliver.yml` run plus `up`'s local stage (§13).
 | 0.2 | 0.2a; 0.2b folded into 1.3, 0.2c removed (2026-11-10) |
 | 1.2 | 1.2a; 1.2b removed (nested-host checks: by hand, §5) |
 | 2.1, 2.3, 2.4 | 2.1a–2.1b, 2.3a–2.3b, 2.4a–2.4b; new 2.1c (spike: netavark's firewall driver) |
-| 2.5 | 2.5a–2.5e; new 2.5f (separate roots `pki_mesh`, `pki_app`) |
+| 2.5 | 2.5a–2.5e; new 2.5f (separate roots `pki_mesh`, `pki_app`); on 2026-11-11 Vault PKI was replaced by cfssl: 2.5a and 2.5b rewritten, 2.5f removed |
 | 2.7 | 2.7 kept; new 2.7b (telemetry stores and Grafana on the host) |
 | 3.1c | 3.1c, 3.1d |
 | 3.2 | 3.2a; 3.2b removed |

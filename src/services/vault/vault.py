@@ -54,8 +54,6 @@ def bootstrap_cert() -> bool:
     os.chown(TLS_DIR / "vault-key.pem", VAULT_UID, VAULT_GID)  # the container's vault user
 
     (TLS_DIR / "vault.pem").write_text(leaf["cert"])
-    # Nothing else is ever signed by this CA, so its key goes now.
-    (TLS_DIR / "ca-key.pem").unlink()
 
     log.info("bootstrap CA and Vault cert created in %s", TLS_DIR)
     return True

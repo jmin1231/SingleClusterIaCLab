@@ -5,22 +5,19 @@ services:
     image: docker.io/hashicorp/vault:2.2.1@sha256:962a92876e168d68eaaa24b0b8b49bbce1cb63024060a67bba95cd158a366fc2
     container_name: vault
     restart: unless-stopped
-    command: ["server"]                     # the image defaults to `server -dev`
+    command: ["server"]
     ports:
-      - "10.250.0.1:8200:8200"              # cloudbr1 only; 8201 (cluster) stays unpublished
+      - "10.250.0.1:8200:8200"
     networks: [vault]
     environment:
-      VAULT_ADDR: https://127.0.0.1:8200    # for `podman exec vault vault ...` and the healthcheck
+      VAULT_ADDR: https://127.0.0.1:8200
       VAULT_CACERT: /vault/tls/ca.pem
     volumes:
       - ./vault.hcl:/vault/config/vault.hcl:ro
       - ../../../state/vault/tls:/vault/tls:ro
       - vault-data:/vault/file
-    cap_drop: [ALL]                         # runs as uid 100 on port 8200: needs no capabilities
-    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
     healthcheck:
-      # `vault status` exits 0 if unsealed, 2 if sealed, 1 if unreachable.
-      # Sealed counts as healthy: unsealing is bootstrap.sh's job (2.4b).
       test: ["CMD-SHELL", "vault status >/dev/null; [ $$? -ne 1 ]"]
       interval: 10s
       timeout: 5s
@@ -28,7 +25,7 @@ services:
 
 networks:
   vault:
-    name: lab-vault                         # Vault's own bridge; no other container joins it
+    name: lab-vault
 
 volumes:
   vault-data: {}

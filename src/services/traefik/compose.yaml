@@ -1,0 +1,33 @@
+name: lab-traefik
+
+services:
+  traefik:
+    image: docker.io/library/traefik:v3.7.18@sha256:9c437ac4f09ce6f4980a8544902d3475fdf70a1a7c578729581d2535dfa7d635
+    container_name: traefik
+    restart: unless-stopped
+    command:
+      - --entrypoints.websecure.address=:8443
+      - --entrypoints.websecure.http.tls=true
+      - --providers.file.directory=/etc/traefik/dynamic
+      - --log.level=INFO
+      - --accesslog=true
+    ports:
+      - "10.250.0.1:443:8443"
+    networks: [backend]
+    volumes:
+      - ./dynamic:/etc/traefik/dynamic:ro
+      - ../../../state/pki/gateway.pem:/etc/traefik/tls/gateway.pem:ro
+      - ../../../state/pki/gateway-key.pem:/etc/traefik/tls/gateway-key.pem:ro
+    cap_drop: [ALL]
+
+  whoami:
+    image: docker.io/traefik/whoami:v1.12.0@sha256:c4717a8d1f0134a7444e24f881160e033991f23027c6c5a9a3f8fd22e70d1d44
+    container_name: whoami
+    command: ["--port", "8080"]  # above 1024: no capability needed
+    restart: unless-stopped
+    networks: [backend]
+    cap_drop: [ALL]
+
+networks:
+  backend:
+    name: lab-backend

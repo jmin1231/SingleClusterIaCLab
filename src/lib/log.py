@@ -5,7 +5,7 @@ import sys
 from datetime import datetime
 from typing import override
 
-from src.lib.config import BASE_DIR
+from src.lib.config import STATE_DIR
 
 PREFIX: dict[int, str] = {
     logging.INFO: "[+]",
@@ -13,7 +13,7 @@ PREFIX: dict[int, str] = {
     logging.ERROR: "[x]",
 }
 
-LOG_FILE = BASE_DIR / "state" / "bootstrap.log"
+LOG_FILE = STATE_DIR / "bootstrap.log"
 
 
 class ConsoleFormatter(logging.Formatter):
@@ -25,14 +25,13 @@ class ConsoleFormatter(logging.Formatter):
         return f"{prefix} {record.getMessage()}"
 
 
-class FileFormatter(logging.Formatter):
+class FileFormatter(ConsoleFormatter):
     """Format a record as '<ISO timestamp> <prefix> message'."""
 
     @override
     def format(self, record: logging.LogRecord) -> str:
-        prefix = PREFIX.get(record.levelno, "[?]")
         when = datetime.fromtimestamp(record.created).astimezone()
-        return f"{when.isoformat(timespec='seconds')} {prefix} {record.getMessage()}"
+        return f"{when.isoformat(timespec='seconds')} {super().format(record)}"
 
 
 def setup_logging() -> None:

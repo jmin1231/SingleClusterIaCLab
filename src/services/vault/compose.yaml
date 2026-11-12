@@ -14,9 +14,13 @@ services:
       VAULT_CACERT: /vault/tls/ca.pem
     volumes:
       - ./vault.hcl:/vault/config/vault.hcl:ro
-      - ../../../state/vault/tls:/vault/tls:ro
+      # Three files, not state/pki/: the CA keys must never be inside a container.
+      - ../../../state/pki/vault.pem:/vault/tls/vault.pem:ro
+      - ../../../state/pki/vault-key.pem:/vault/tls/vault-key.pem:ro
+      - ../../../state/pki/ca.pem:/vault/tls/ca.pem:ro
       - vault-data:/vault/file
     cap_drop: [ALL]
+    # no no-new-privileges: with Ubuntu's AppArmor it makes socket() fail (permission denied)
     healthcheck:
       test: ["CMD-SHELL", "vault status >/dev/null; [ $$? -ne 1 ]"]
       interval: 10s

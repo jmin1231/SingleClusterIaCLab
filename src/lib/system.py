@@ -1,11 +1,14 @@
 """Helpers for running host commands, shared by more than one module."""
 
 import json
+import logging
 import os
 import subprocess
 from pathlib import Path
 
 from src.lib.config import APT_ENV, COMPOSE, DOCKER_HOST, SERVICES_DIR
+
+log = logging.getLogger(__name__)
 
 
 def ip_json(*args: str) -> list[dict]:
@@ -25,17 +28,27 @@ def missing_packages(packages: list[str]) -> list[str]:
     return missing
 
 
-def apt_install(packages: list[str]) -> None:
-    """Refresh the package lists and install `packages`, without prompts."""
+def apt_install(packages: list[str]) -> bool:
+    """Install whichever of `packages` are missing, without prompts. Returns True if any were."""
+    missing = missing_packages(packages)
+    if not missing:
+        return False
+    log.info("installing %s", ", ".join(missing))
     subprocess.run(["apt-get", "-qq", "update"], check=True, env=APT_ENV)
-    subprocess.run(["apt-get", "install", "-y", "-qq", "-o", "DPkg::Lock::Timeout=120", *packages],
+    subprocess.run(["apt-get", "install", "-y", "-qq", "-o", "DPkg::Lock::Timeout=120", *missing],
                    check=True, env=APT_ENV)
+    return True
 
 
 def apt_purge(packages: list[str]) -> None:
     """Purge `packages` (their files and config), without prompts."""
     subprocess.run(["apt-get", "purge", "-y", "-qq", "-o", "DPkg::Lock::Timeout=120", *packages],
                    check=True, env=APT_ENV)
+
+
+def systemctl_ok(verb: str, unit: str) -> bool:
+    """`systemctl <verb> --quiet <unit>` succeeds, e.g. systemctl_ok("is-active", "chrony")."""
+    return subprocess.run(["systemctl", verb, "--quiet", unit]).returncode == 0
 
 
 def install_file(src: Path, dst: Path, mode: int) -> bool:

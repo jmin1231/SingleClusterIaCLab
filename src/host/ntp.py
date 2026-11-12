@@ -5,7 +5,7 @@ import subprocess
 from pathlib import Path
 
 from src.lib.config import VMNET
-from src.lib.system import apt_install, apt_purge, install_file, missing_packages
+from src.lib.system import apt_install, apt_purge, install_file, systemctl_ok
 
 log = logging.getLogger(__name__)
 
@@ -16,32 +16,19 @@ CONF_SRC = Path(__file__).parent / "files" / CONFIG
 CONF_DEST = Path("/etc/chrony/conf.d") / CONFIG
 
 
-def service_active() -> bool:
-    """chrony's systemd unit is running."""
-    return subprocess.run(["systemctl", "is-active", "--quiet", SERVICE]).returncode == 0
-
-
 def up() -> None:
     """Install chrony and the lab's config, and make sure it's serving; a re-run changes nothing."""
-    missing = missing_packages(PACKAGES)
-    if missing:
-        log.info("installing %s (replaces systemd-timesyncd)", ", ".join(missing))
-        apt_install(missing)
+    apt_install(PACKAGES)  # chrony replaces systemd-timesyncd
 
     if install_file(CONF_SRC, CONF_DEST, 0o644):
         # allow and bindaddress are read only at startup, and the unit has no reload
         subprocess.run(["systemctl", "restart", SERVICE], check=True)
         log.info("chrony serving time to %s on %s", VMNET.network, VMNET.ip)
-    elif not service_active():
+    elif not systemctl_ok("is-active", SERVICE):
         subprocess.run(["systemctl", "enable", "--now", SERVICE], check=True)
         log.info("chrony was stopped; started it, serving time on %s", VMNET.ip)
     else:
         log.info("chrony is already serving time on %s", VMNET.ip)
-
-
-def check() -> bool:
-    """chrony is installed, has the lab's config, and is running."""
-    return not missing_packages(PACKAGES) and CONF_DEST.exists() and service_active()
 
 
 def down() -> None:

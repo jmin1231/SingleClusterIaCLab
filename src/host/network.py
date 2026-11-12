@@ -4,7 +4,6 @@ The host also asks CoreDNS (on cloudbr1) for lab.test names, and nothing else.
 """
 
 import ipaddress
-import json
 import logging
 import subprocess
 import sys
@@ -12,7 +11,7 @@ import time
 from pathlib import Path
 
 from src.lib.config import BRIDGE, VMNET
-from src.lib.system import ip_json
+from src.lib.system import install_file, ip_json
 
 log = logging.getLogger(__name__)
 
@@ -35,28 +34,21 @@ def vmnet_conflicts() -> list[str]:
 
 def check() -> bool:
     """cloudbr1 exists and holds the host's VM-network address."""
-    result = subprocess.run(["ip", "-j", "-4", "addr", "show", "dev", BRIDGE],
-                            capture_output=True, text=True)
-    if result.returncode != 0:
-        return False
     return any(addr["local"] == str(VMNET.ip)
-               for link in json.loads(result.stdout) for addr in link["addr_info"])
+               for link in ip_json("-4", "addr", "show") if link["ifname"] == BRIDGE
+               for addr in link["addr_info"])
 
 
 def up() -> None:
     """Install the lab's netplan file and create cloudbr1; a re-run changes nothing."""
-    netplan = NETPLAN_SRC.read_bytes()
-    if NETPLAN_FILE.exists() and NETPLAN_FILE.read_bytes() == netplan and check():
-        log.info("%s is already up with %s", BRIDGE, VMNET)
-        return
-
-    conflicts = vmnet_conflicts()
+    conflicts = vmnet_conflicts()  # ignores cloudbr1's own route, so a re-run passes
     if conflicts:
         log.error("%s is already in use: %s", VMNET.network, ", ".join(conflicts))
         sys.exit(1)
 
-    NETPLAN_FILE.write_bytes(netplan)
-    NETPLAN_FILE.chmod(0o600)
+    if not install_file(NETPLAN_SRC, NETPLAN_FILE, 0o600) and check():
+        log.info("%s is already up with %s", BRIDGE, VMNET)
+        return
     subprocess.run(["netplan", "apply"], check=True)
 
     # netplan apply returns once NetworkManager restarts; the address appears a moment later

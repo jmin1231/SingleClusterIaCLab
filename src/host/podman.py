@@ -4,7 +4,7 @@ import logging
 import shutil
 import subprocess
 
-from src.lib.system import apt_install, apt_purge, missing_packages
+from src.lib.system import apt_install, apt_purge, missing_packages, systemctl_ok
 
 log = logging.getLogger(__name__)
 
@@ -13,9 +13,7 @@ SOCKET = "podman.socket"
 
 
 def socket_ready() -> bool:
-    enabled = subprocess.run(["systemctl", "is-enabled", "--quiet", SOCKET]).returncode == 0
-    active = subprocess.run(["systemctl", "is-active", "--quiet", SOCKET]).returncode == 0
-    return enabled and active
+    return systemctl_ok("is-enabled", SOCKET) and systemctl_ok("is-active", SOCKET)
 
 
 def check() -> bool:
@@ -24,11 +22,7 @@ def check() -> bool:
 
 def up() -> None:
     """Install what is missing and enable the socket; a re-run changes nothing."""
-    missing = missing_packages(PACKAGES)
-    if missing:
-        log.info("installing %s", ", ".join(missing))
-        apt_install(missing)
-    else:
+    if not apt_install(PACKAGES):
         log.info("Podman and Compose are already installed")
 
     if socket_ready():

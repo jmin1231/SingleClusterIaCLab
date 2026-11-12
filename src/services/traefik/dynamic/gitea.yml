@@ -1,0 +1,12 @@
+http:
+  routers:
+    gitea:
+      rule: "Host(`gitea.lab.test`)"
+      entryPoints: [websecure]
+      service: gitea
+
+  services:
+    gitea:
+      loadBalancer:
+        servers:
+          - url: "http://whoami:8080"

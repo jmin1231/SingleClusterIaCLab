@@ -1,8 +1,0 @@
-{
-  "signing": {
-    "default": {
-      "expiry": "168h",
-      "usages": ["digital signature", "server auth"]
-    }
-  }
-}

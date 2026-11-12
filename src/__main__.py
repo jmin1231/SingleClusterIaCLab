@@ -7,14 +7,16 @@ import sys
 from collections.abc import Callable
 
 from src.host import network, ntp, podman, preflight
-from src.lib.config import BASE_DIR
+from src.lib import pki
+from src.lib.config import STATE_DIR
 from src.lib.log import setup_logging
 from src.services.coredns import dns
+from src.services.traefik import traefik
 from src.services.vault import vault
 
 log = logging.getLogger(__name__)
 
-LOCK_FILE = BASE_DIR / "state" / "run.lock"
+LOCK_FILE = STATE_DIR / "run.lock"
 
 
 def cmd_up() -> None:
@@ -23,7 +25,9 @@ def cmd_up() -> None:
     ntp.up()
     podman.up()
     dns.up()
-    vault.up()
+    certs_changed = pki.up()
+    vault.up(certs_changed)
+    traefik.up(certs_changed)
 
 
 def cmd_update() -> None:
@@ -36,7 +40,9 @@ def cmd_teardown() -> None:
 
 def cmd_destroy() -> None:
     # Reverse of up: services before the Podman they run on, chrony and CoreDNS before cloudbr1
+    traefik.down()
     vault.down()
+    pki.down()
     dns.down()
     podman.down()
     ntp.down()

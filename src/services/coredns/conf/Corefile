@@ -2,10 +2,11 @@
 lab.test:53 {
     bind 10.250.0.1 {$HOST_IP}
     hosts {
-        10.250.0.1 cloudstack.lab.test gitea.lab.test vault.lab.test
+        10.250.0.1 cloudstack.lab.test gitea.lab.test vault.lab.test minio.lab.test minio-console.lab.test
     }
     errors
     log
+    reload
 }
 
 # everything else: forwarded to systemd-resolved, which sends it to the host's upstream DNS.

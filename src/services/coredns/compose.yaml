@@ -5,10 +5,9 @@ services:
     image: docker.io/coredns/coredns:1.12.1@sha256:e8c262566636e6bc340ece6473b0eed193cad045384401529721ddbe6463d31c
     container_name: coredns
     restart: unless-stopped
-    network_mode: host    # answers on the host's own IPs and forwards to resolved at 127.0.0.53;
-                          # a bridge network would have neither (see Corefile)
+    network_mode: host
     environment:
       HOST_IP: ${HOST_IP}
     volumes:
-      - ./Corefile:/etc/coredns/Corefile:ro
+      - ./conf:/etc/coredns:ro
     command: ["-conf", "/etc/coredns/Corefile"]

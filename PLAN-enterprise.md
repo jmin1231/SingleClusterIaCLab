@@ -44,8 +44,15 @@ working scope:
    **Working on now (2026-11-13): 3.1c** (zone, networks, host). 3.1a and 3.1b are done
    (3.1b: all three `bridge-nf-call-*` read 0 after `up`; files under `/etc/sysctl.d` and
    `/etc/udev/rules.d`). Code moved to `src/services/{podman,cloudstack}/` the same day.
-   Then 3.1d before the
-   cutoff (item 3).
+   **3.1c left off here:** the user writes it (API code is theirs, to learn the API) in
+   `src/services/cloudstack/zone/zone.py`. Done: `cs_api(keys, command, **params)`, signed
+   GET to `127.0.0.1:8080` (signature self-check and the 401 error path tested; the live
+   `listZones` → `{}` test needs root, not yet run). Next: `wait_job(keys, jobid)` (poll
+   `queryAsyncJobResult`: 0 running, 1 done, 2 failed; with a deadline), then the calls in
+   order: zone → 2 physical networks + traffic types → providers → pod → public range →
+   cluster → authorized_keys → addHost → `host.reserved.mem.mb`. Proposed ranges (not yet
+   decided): pod `.80–.89`, public `.90–.109`, below VMware's DHCP `.128–.254`.
+   Then 3.1d before the cutoff (item 3).
    **Done (2026-11-12 to 2026-11-13): 3.1a** in `src/services/cloudstack/cloudstack.py`, five parts: (1) repo + packages
    ✅ (4.22.1.1 installed); (2) MySQL ✅ tested, `nfs()` ✅ tested (one `/export` line to the LAN
    subnet, plus a `write_file()` helper in `src/lib/system.py`); (3) `cloudbr0` ✅ tested
@@ -1551,7 +1558,10 @@ the registry as `gotcha.*` keys (§17.1) as it happens.
 
 Every Phase 3 call is adopt-before-create: it looks the object up by name and creates
 it only on a definite NotFound (rule 18), so a re-run of `up` converges instead of
-duplicating or skipping. The calls are hand-written `cmk`. Provider
+duplicating or skipping. The calls are signed Python requests (`cs_api` in
+`src/services/cloudstack/zone/zone.py`; decided 2026-11-13 instead of hand-written `cmk`,
+because `cmk` takes the keys from a config file or argv, and rule 17 forbids argv; `cmk`
+stays for troubleshooting by hand). Provider
 `cloudstack/cloudstack` 0.7.0 (2026-09-21) also has resources for zone, physical
 network, traffic type, pod, cluster, host, storage, IP ranges, offerings, roles,
 accounts and global configuration, so 3.1c–3.3a could be declared in Terraform
@@ -1774,7 +1784,13 @@ switching**.
   KVM agent creates for talking to system VMs. The host is added by key, not password:
   the management server's public key (`/var/lib/cloudstack/management/.ssh/id_rsa.pub`)
   goes into root's `authorized_keys` with `from="<HOST_IP>"`, and `addHost` is called
-  with no password **[verify at 4.22.1.1]**. Ubuntu's default `PermitRootLogin
+  with no password **[verify at 4.22.1.1]** (the 4.22 guide's "Adding a KVM Host" offers
+  "System SSH Key" instead of a password). Set `host.reserved.mem.mb` (≈ 8908, §5's host
+  OS + CloudStack + control-plane rows) in `agent.properties` **after** `addHost`, then
+  restart `cloudstack-agent`: `cloudstack-setup-agent`'s `configFileOps.save()` matches
+  `^\ *host.*` to set `host=`, which also overwrites a `host.reserved.mem.mb=` line.
+  Ranges stay below `.128` on a VMware NAT LAN (its DHCP pool is `.128–.254`); the §5
+  examples `.180–.209` would collide. Ubuntu's default `PermitRootLogin
   prohibit-password` admits a key, and `from=` keeps that key usable from the host only.
   Exit: `cmk list hosts` shows the KVM host Up in a Disabled Advanced zone with both
   physical networks and their tags; host services from Phase 2 still reachable on

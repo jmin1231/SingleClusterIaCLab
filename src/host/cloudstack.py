@@ -12,13 +12,16 @@ import urllib.request
 from pathlib import Path
 
 from src.host.preflight import detect_network
-from src.lib.system import apt_install, install_file, ip_json, systemctl_ok, write_file
+from src.lib.system import (
+    apt_install, install_file, ip_json, missing_packages, systemctl_ok, write_file,
+)
 from src.services.vault import vault
 
 log = logging.getLogger(__name__)
 
 FILES = Path(__file__).parent / "files"
 PACKAGES = ["mysql-server", "nfs-kernel-server", "cloudstack-management", "cloudstack-agent"]
+CS_VERSION = "4.22.1.1"  # must match files/lab-cloudstack.pref
 
 KEY_URL = "https://download.cloudstack.org/release.asc"
 KEYRING = Path("/etc/apt/keyrings/cloudstack.asc")  # .asc: apt reads it as is, no gpg --dearmor
@@ -62,10 +65,24 @@ def repo() -> bool:
     return changed
 
 
+def check_version() -> None:
+    """Stop unless the installed CloudStack is exactly the pinned version."""
+    version = subprocess.run(["dpkg-query", "-W", "-f=${Version}", "cloudstack-management"],
+                             capture_output=True, text=True, check=True).stdout
+    if version != CS_VERSION:
+        log.error("cloudstack-management %s is installed, but the lab pins %s; "
+                  "run destroy, then up", version, CS_VERSION)
+        sys.exit(1)
+
+
 def mysql() -> None:
     """MySQL settings for CloudStack; restart MySQL only if they changed."""
     if install_file(FILES / "cloudstack-mysql.conf", MYSQL_CNF, 0o644):
-        subprocess.run(["systemctl", "restart", "mysql"], check=True)
+        try:
+            subprocess.run(["systemctl", "restart", "mysql"], check=True)
+        except BaseException:
+            MYSQL_CNF.unlink(missing_ok=True)
+            raise
         log.info("MySQL configured for CloudStack and restarted")
     else:
         log.info("MySQL is already configured for CloudStack")
@@ -82,7 +99,11 @@ def nfs() -> None:
 
     line = f"{EXPORT_ROOT} {subnet}({EXPORT_OPTIONS})\n"
     if write_file(line.encode(), EXPORTS, 0o644):
-        subprocess.run(["exportfs", "-ra"], check=True)  # -r also drops lines no longer there
+        try:
+            subprocess.run(["exportfs", "-ra"], check=True)  # -r also drops lines no longer there
+        except BaseException:
+            EXPORTS.unlink(missing_ok=True)
+            raise
         log.info("NFS: %s exported to %s", EXPORT_ROOT, subnet)
     else:
         log.info("NFS: %s is already exported to %s", EXPORT_ROOT, subnet)
@@ -102,18 +123,19 @@ def lan_card(net: dict) -> str:
     sys.exit(1)
 
 
-def netplan_yaml(net: dict, card: str, mac: str) -> str:
-    """Fill in the cloudbr0 netplan template that matches how the host gets its address."""
-    if net["dhcp"]:
-        template, dns = FILES / "cloudbr0-dhcp.yaml.tmpl", ""
-    else:
-        out = subprocess.run(["nmcli", "-g", "IP4.DNS", "device", "show", net["card"]],
-                             capture_output=True, text=True, check=True).stdout
-        template, dns = FILES / "cloudbr0-static.yaml.tmpl", ", ".join(out.replace("|", " ").split())
+def netplan_yaml(card: str, mac: str) -> str:
+    """Fill in the cloudbr0 netplan template for a DHCP host."""
+    template = FILES / "cloudbr0-dhcp.yaml.tmpl"
+    return string.Template(template.read_text()).substitute(card=card, mac=mac)
 
-    return string.Template(template.read_text()).substitute(
-        card=card, mac=mac, host_ip=net["host_ip"], prefix=net["prefix"],
-        gateway=net["gateway"], dns=dns)
+
+def restore_netplan(previous: bytes | None) -> None:
+    """Put LAN_NETPLAN back as it was before this run (absent if it was absent) and apply it."""
+    if previous is None:
+        LAN_NETPLAN.unlink(missing_ok=True)
+    else:
+        write_file(previous, LAN_NETPLAN, 0o600)
+    subprocess.run(["netplan", "apply"], check=True)
 
 
 def bridge_ready(host_ip: str, gateway: str) -> bool:
@@ -142,22 +164,32 @@ def bridge() -> None:
         log.error("%s is managed by NetworkManager profile %r, not netplan-%s: "
                   "not bridging it", card, profile, card)
         sys.exit(1)
+    if not net["dhcp"]:
+        log.error("%s has a static address: the lab bridges DHCP hosts only (a later netplan "
+                  "file cannot remove the card's own address); not bridging it", card)
+        sys.exit(1)
 
-    changed = write_file(netplan_yaml(net, card, mac).encode(), LAN_NETPLAN, 0o600)
+    previous = LAN_NETPLAN.read_bytes() if LAN_NETPLAN.exists() else None
+    changed = write_file(netplan_yaml(card, mac).encode(), LAN_NETPLAN, 0o600)
     if not changed and bridge_ready(host_ip, gateway):
         log.info("%s is already up with %s", LAN_BRIDGE, host_ip)
         return
 
-    subprocess.run(["netplan", "apply"], check=True)
-    deadline = time.monotonic() + BRIDGE_TIMEOUT
-    while not bridge_ready(host_ip, gateway):
-        if time.monotonic() > deadline:
-            LAN_NETPLAN.unlink()
-            subprocess.run(["netplan", "apply"], check=True)
-            log.error("%s did not get %s and reach %s within %ds; rolled back to %s",
-                      LAN_BRIDGE, host_ip, gateway, BRIDGE_TIMEOUT, card)
+    try:
+        subprocess.run(["netplan", "apply"], check=True)
+        deadline = time.monotonic() + BRIDGE_TIMEOUT
+        while not bridge_ready(host_ip, gateway):
+            if time.monotonic() > deadline:
+                raise TimeoutError(f"no {host_ip} on {LAN_BRIDGE} or no answer from {gateway} "
+                                   f"within {BRIDGE_TIMEOUT}s")
+            time.sleep(1)
+    except BaseException as err:
+        restore_netplan(previous)
+        log.error("%s did not come up (%s); rolled back %s", LAN_BRIDGE, err or "interrupted",
+                  LAN_NETPLAN)
+        if isinstance(err, Exception):
             sys.exit(1)
-        time.sleep(1)
+        raise
     log.info("%s is up with %s (port %s)", LAN_BRIDGE, host_ip, card)
 
 
@@ -180,11 +212,8 @@ def cs_credentials(token: str, create: bool) -> dict | None:
     return creds
 
 
-def databases(token: str) -> bool:
-    """Create CloudStack's databases (cloud, cloud_usage) once.
-
-    Returns True if it just created them, False if they already existed.
-    """
+def databases(token: str) -> None:
+    """Create CloudStack's databases (cloud, cloud_usage) once; refuse a broken or foreign deploy."""
     out = subprocess.run(
         ["mysql", "-N", "-B", "-e",
          "SELECT SCHEMA_NAME FROM information_schema.SCHEMATA "
@@ -193,12 +222,19 @@ def databases(token: str) -> bool:
     existing = set(out.split())
 
     if existing == set(CS_DATABASES):
+        version = subprocess.run(
+            ["mysql", "-N", "-B", "-e", "SELECT version FROM cloud.version ORDER BY id DESC LIMIT 1"],
+            capture_output=True, text=True).stdout.strip()
+        if version != CS_VERSION:
+            log.error("the cloud database is at version %s, not %s: a failed or foreign deploy; "
+                      "run destroy, then up", version or "(none)", CS_VERSION)
+            sys.exit(1)
         if cs_credentials(token, create=False) is None:
             log.error("CloudStack databases exist but Vault has no credentials for them; "
                       "run destroy, then up")
             sys.exit(1)
         log.info("CloudStack databases are already deployed")
-        return False
+        return
 
     if existing:
         log.error("only %s exists: a half-finished CloudStack database deploy; "
@@ -224,7 +260,6 @@ def databases(token: str) -> bool:
         sys.exit(1)
 
     log.info("CloudStack databases deployed (management server %s)", host_ip)
-    return True
 
 
 def mgmt_ready() -> bool:
@@ -236,13 +271,19 @@ def mgmt_ready() -> bool:
         return False
 
 
-def management(databases_created: bool) -> None:
-    """Start the management server and wait until it answers.
+def setup_done() -> bool:
+    """Tell whether cloudstack-setup-management has run: it appends LIMITS_LINES to limits.conf."""
+    lines = LIMITS.read_text().splitlines() if LIMITS.exists() else []
+    return all(line in lines for line in LIMITS_LINES)
 
-    `databases_created` is databases()'s result: True when this run just created the
-    databases, so the one-time cloudstack-setup-management runs first.
+
+def management() -> None:
+    """Run cloudstack-setup-management until it has completed once, start the server, wait for it.
+
+    The setup tool is safe to re-run (it skips lines already in limits.conf), so an interrupted
+    setup is simply run again on the next up.
     """
-    if databases_created:
+    if not setup_done():
         subprocess.run(["cloudstack-setup-management"], check=True)
     elif not systemctl_ok("is-active", "cloudstack-management"):
         subprocess.run(["systemctl", "start", "cloudstack-management"], check=True)
@@ -270,13 +311,15 @@ def down() -> None:
     """
     subprocess.run(["systemctl", "disable", "--now", "cloudstack-management"], capture_output=True)
 
-    if systemctl_ok("is-active", "mysql"):
+    if missing_packages(["mysql-server"]):
+        log.info("MySQL is not installed; no CloudStack databases to remove")
+    else:
+        if not systemctl_ok("is-active", "mysql"):
+            subprocess.run(["systemctl", "start", "mysql"], check=True)
         subprocess.run(["mysql", "-e",
                         "DROP DATABASE IF EXISTS cloud; DROP DATABASE IF EXISTS cloud_usage; "
                         "DROP USER IF EXISTS 'cloud'@'localhost', 'cloud'@'%';"], check=True)
         log.info("CloudStack databases and MySQL user cloud removed")
-    else:
-        log.info("MySQL is not running; no CloudStack databases to remove")
 
     if LIMITS.exists():
         lines = LIMITS.read_text().splitlines(keepends=True)
@@ -293,7 +336,9 @@ def up() -> None:
     repo()
     if not apt_install(PACKAGES):
         log.info("CloudStack packages are already installed")
+    check_version()
     mysql()
     nfs()
     bridge()
-    management(databases(vault.login()))
+    databases(vault.login())
+    management()

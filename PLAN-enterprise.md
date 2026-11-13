@@ -1606,8 +1606,7 @@ switching**.
   | card | `detect_network()["card"]` (the default route's card); once that is `cloudbr0`, the member of `/sys/class/net/cloudbr0/brif/` that has `/sys/class/net/<name>/device` (only a physical card has it; bridges and VM ports do not) | `ens33` |
   | MAC | `/sys/class/net/<card>/address` | `00:0c:29:3d:c5:5f` |
   | address, prefix, gateway | `detect_network()` | `192.168.209.137/24`, `.2` |
-  | DHCP or static | `detect_network()["dhcp"]` (the address's `dynamic` flag) | DHCP |
-  | DNS servers (static only) | `nmcli -g IP4.DNS device show <card>` | `192.168.209.2` |
+  | DHCP or static | `detect_network()["dhcp"]` (the address's `dynamic` flag); static → stop (below) | DHCP |
   | who owns the card | `nmcli -g GENERAL.CONNECTION device show <card>` | `netplan-ens33` |
 
   *Stop before changing anything* when the card's NetworkManager profile is not
@@ -1620,9 +1619,8 @@ switching**.
   port of `cloudbr0` (verified 2026-11-13).
 
   *The file:* `/etc/netplan/60-lab-cloudbr0.yaml`, mode 0600, filled in from a template
-  in `src/host/files/` with Python's `string.Template` (`${card}`, `${mac}`, and for
-  static `${host_ip}`, `${prefix}`, `${gateway}`, `${dns}`): `cloudbr0-dhcp.yaml.tmpl` or
-  `cloudbr0-static.yaml.tmpl`, then written with `write_file` (host values, so not
+  in `src/host/files/` with Python's `string.Template` (`${card}`, `${mac}`):
+  `cloudbr0-dhcp.yaml.tmpl`, then written with `write_file` (host values, so not
   `install_file`). `substitute()` fails on a missing value, never writes a half-filled
   file. No `renderer:` line: the host's NetworkManager keeps managing it. DHCP host,
   filled in:
@@ -1644,9 +1642,12 @@ switching**.
           forward-delay: 0
   ```
 
-  Static host: in place of `dhcp4: true`, the current values copied over:
-  `addresses: [<ip>/<prefix>]`, `routes: [{to: default, via: <gateway>}]`,
-  `nameservers: {addresses: [<the host's DNS>]}` (keep `macaddress`).
+  *Static host: stop before changing anything* (decided 2026-11-13, after review). A later
+  netplan file cannot remove keys from an earlier one, so the card would keep its own
+  address beside the bridge's; netplan's parser confirms it and rejects the result
+  ("Conflicting default route declarations ... ens33 ... cloudbr0"). Supporting static
+  would mean editing the host's own netplan file, as `install.sh` does. DHCP is the
+  Ubuntu Desktop default.
 
   *Apply:*
   1. `write_file()` returns False and `cloudbr0` already holds `HOST_IP` → log "already
@@ -1654,9 +1655,11 @@ switching**.
   2. `netplan apply`.
   3. Wait up to 60 s until `cloudbr0` holds the **same** `HOST_IP` as before and
      `ping -c1 -W2 <gateway>` answers (the polling loop of `network.up()`).
-  4. Timeout → rollback: delete the file, `netplan apply` again, `sys.exit` naming what
-     failed. Run from the VMware console, not SSH: the console is the guide's "IPMI or
-     ILO" path if the rollback itself fails.
+  4. Any failure in 2–3 (timeout, a failed `netplan apply`, Ctrl-C) → rollback: put the
+     file back as it was before this run (deleted if it was absent), `netplan apply`
+     again, `sys.exit` naming what failed (Ctrl-C is re-raised). Run from the VMware
+     console, not SSH: the console is the guide's "IPMI or ILO" path if the rollback
+     itself fails.
 
   Unchanged by the move: `HOST_IP` (CoreDNS needs no recreate), the NFS subnet, MySQL
   on `127.0.0.1`.
@@ -1676,8 +1679,8 @@ switching**.
   | | `install.sh` | the lab |
   |---|---|---|
   | card | first interface that is up | the default route's card |
-  | address | always static: copies the current one, a DHCP lease included | DHCP stays DHCP (card's MAC); static is copied |
-  | DNS | hard-coded `8.8.8.8` | the host's own (static case) |
+  | address | always static: copies the current one, a DHCP lease included | DHCP stays DHCP (card's MAC); a static host is refused |
+  | DNS | hard-coded `8.8.8.8` | the host's own (unchanged, from DHCP) |
   | original config | `rm -f /etc/netplan/50-cloud-init.yaml` | left in place; our `60-` file overrides it |
   | backend | `renderer: networkd` | none set: the host's NetworkManager |
   | after apply | nothing (no check, no rollback on Ubuntu) | address + gateway check, own rollback |

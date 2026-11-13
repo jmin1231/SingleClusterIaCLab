@@ -85,6 +85,70 @@ If time allows, in this order: the host firewall (2.2), the gateway (2.6), Squid
 (2.9), WireGuard (6.2), k3s with Istio STRICT mTLS on the
 built-in CA (8.1–8.3), the app and database (8.4–8.7), backup and DR (phase 9), the rest.
 
+**Scope cut (decided 2026-11-13, by the user):** about 70 of the 90 steps were left with
+six days to the review. What was cut, and every earlier drop, is listed in one place:
+**Dropped and deferred**, next.
+
+---
+
+## Dropped and deferred
+
+Everything decided *not* to build, or not yet, in one list. Each row keeps the reason
+and what a reviewer hears instead. The full design of a dropped step stays in its phase
+section as the production answer. §15 is different: it compares tools and designs
+(Terraform vs OpenTofu, Podman vs Docker, ...); this section tracks scope.
+
+**Dropped from the build**
+
+| What | Step | Decided | Why | What the review gets instead |
+|---|---|---|---|---|
+| Host firewall (nftables, default-drop) | 2.2 | 2026-11-13 | time: ~70 steps left, six days to the review | §5's port table as the design. Until then NFS, CloudStack's `:8080` and the agent port `:8250` are reachable from the LAN: answer it, don't hide it (a private VMware NAT network, a lab that lives a day or two) |
+| NFS `statd`/`lockd` port pins | 3.1a | 2026-11-13 | only needed so 2.2 could allow them; dropped with it | — |
+| Backup, restore drill, DR drill, crypto-shredding | phase 9 (R3) | 2026-11-13 | time | a walkthrough: the Vault snapshot, the database backup, the restore order, and how destroying the Transit key makes every copy unreadable (crypto-shredding). **Check** that R3 ("show key loss destroys it") may be shown as design rather than a demo |
+| MinIO (object storage, S3 state) | 2.7 | 2026-11-12 | one host and one runner need no shared state; its IAM would repeat Vault's | local Terraform state (5.1), Loki on its own volume (2.7b), IAM shown with Vault (§15) |
+| Unit tests (pytest) | — | 2026-11-10 | time | §15 option |
+| `status` command | — | 2026-11-10 | time | §15 option |
+| Examiner walkthrough (`demo`) | 12.2, 12.3 | 2026-11-10 | about two sessions of work | §15 option; the review is walked by hand |
+| Packer golden image | 4.1a–4.3 | an option from the start | the stock cloud image + cloud-init is enough | §15 option |
+| Third-party image mirror | after 8.1c | an option since 2026-11-09 | the cluster pulls pinned public images directly | §15 option |
+
+**Dropped if it runs long**
+
+| What | Step | Decided | If dropped |
+|---|---|---|---|
+| Squid egress proxy | 2.9 | 2026-11-13 | VMs reach the internet through the VPC's source NAT; the runner pulls directly; 6.1a's `base` role sets no proxy |
+
+**Moved later**
+
+| What | Step | Decided | Where it goes |
+|---|---|---|---|
+| Monitoring and observability: Prometheus, Loki, Grafana, k8s-monitoring, dashboards | 2.7b, 8.8a–8.8d (R6) | 2026-11-13 | after everything else works |
+| Host trust (lab CA in the host store) | 2.5b | 2026-11-12 | when a person or host tool must reach a lab URL without `--cacert`; services get the CA file directly |
+
+**Dropped within a step** (smaller design choices)
+
+| What | Step | Decided | Why |
+|---|---|---|---|
+| Removing libvirt's `default` network (`virbr0`) | 3.1a | 2026-11-13 | CloudStack never uses it, and its dnsmasq binds only `192.168.122.1`, so it doesn't collide with CoreDNS (rule 15). The earlier reason was wrong |
+| Static-address hosts for `cloudbr0` | 3.1a | 2026-11-13 | a later netplan file can't remove the card's own address; the lab bridges DHCP hosts only and refuses static ones |
+| `netplan try` for applying `cloudbr0` | 3.1a | 2026-11-13 | netplan 1.1.2 refuses to revert because `cloudbr1` sets `stp: false`; the code applies and rolls back itself |
+| Hand-written `cmk` for phase 3 | 3.1c–3.3a | 2026-11-13 | `cmk` takes the keys from a file or argv (rule 17); signed Python requests instead, `cmk` kept for troubleshooting |
+| An Ansible role for the CloudStack install | 3.1a | 2026-11-12 | host setup stays imperative Python, like the rest of bootstrap |
+| Vault PKI for the lab certificates; separate `pki_mesh`/`pki_app` roots | 2.5a, 2.5f | 2026-11-11 | cfssl on the host makes every certificate once; Istio uses its built-in root |
+
+**Still owed** (deferred, not dropped)
+
+| What | Step | Why it waits |
+|---|---|---|
+| Traefik route for `cloudstack.lab.test` | 3.1a / 3.5c | the UI and Terraform in the runner need it; bootstrap uses `127.0.0.1:8080` |
+| The rest of `cloudstack.down()`: `cloudbr0`, NFS, MySQL config, repo, packages, the agent's `br_netfilter` line in `/etc/modules`, the `authorized_keys` line | 3.1a, 3.1c / 13.1b | `destroy` must remove everything the lab added (R4) |
+
+**Conditional**
+
+| What | Decided | Trigger |
+|---|---|---|
+| CloudStack itself → plain KVM + Terraform libvirt provider | 2026-11-13 | no running system VMs (SSVM, CPVM) by the end of 2026-11-14; the hand-built VPC then goes in this section as a cut for R1 |
+
 ---
 
 ## 1. Requirements and how each is proven

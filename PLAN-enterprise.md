@@ -40,7 +40,13 @@ them, with Grafana showing the result. Build in this order, each step at its sma
 working scope:
 
 1. Done: preflight, `cloudbr1`, chrony, Podman, CoreDNS, Vault (2.4a–2.5e, host trust
-   2.5b deferred), cfssl PKI (2.5a), Traefik (2.6).
+   2.5b deferred), cfssl PKI (2.5a), Traefik (2.6). MinIO (2.7) optional, skipped.
+   **In progress (2026-11-12): 3.1a** in `src/host/cloudstack.py`, five parts: (1) repo + packages
+   ✅ (4.22.1.1 installed); (2) MySQL ✅ written, untested, then `nfs()` (exports to the LAN
+   subnet, plus a `write_file()` helper in `src/lib/system.py`) next; (3) `cloudbr0`
+   (open: DHCP, keep the card's MAC (A) or static (B)); (4) databases (the package
+   starts `cloudstack-management` by itself: stop it before `cloudstack-setup-databases`);
+   (5) after start. `cloudstack.down()` not written yet.
 2. Vault 2.4b (init, unseal), 2.5a–2.5b (cfssl PKI, host trust), 2.5c–2.5e (KV,
    policies, AppRole): Vault holds the pipeline's secrets, read through AppRole.
 3. CloudStack, phase 3 (3.1a–3.2a, 3.3a): the longest and riskiest step, so first.

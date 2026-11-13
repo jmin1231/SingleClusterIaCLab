@@ -12,7 +12,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-from src.host import podman
+from src.services.podman import podman
 from src.lib.config import (
     APPROLES, LAB_CA_CERT, LAB_DIR,
     VAULT_ADDR, VAULT_APPROLE_FILE, VAULT_INIT_FILE, VAULT_POLICY_DIR,

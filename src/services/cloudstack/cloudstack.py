@@ -1,6 +1,7 @@
 """CloudStack 4.22 on this host, set up step by step from the official Installation Guide."""
 
 import ipaddress
+import json
 import logging
 import secrets
 import string
@@ -8,6 +9,7 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -15,32 +17,15 @@ from src.host.preflight import detect_network
 from src.lib.system import (
     apt_install, install_file, ip_json, missing_packages, systemctl_ok, write_file,
 )
+from src.services.cloudstack.config.cloudstack_config import (
+    FILES, PACKAGES, CS_VERSION, KEY_URL, KEYRING, SOURCE, PIN, MYSQL_CNF, EXPORT_ROOT, EXPORTS,
+    EXPORT_OPTIONS, LAN_BRIDGE, LAN_NETPLAN, BRIDGE_TIMEOUT, BRIDGE_NF_SYSCTL, BRIDGE_NF_UDEV,
+    BRIDGE_NF_KEYS, CS_SECRETS, CS_SECRET_NAMES, CS_DATABASES, MGMT_URL, MGMT_TIMEOUT, LIMITS,
+    LIMITS_LINES, CS_API, CS_ADMIN, CS_DEFAULT_PASSWORD, LOGIN_REFUSED,
+)
 from src.services.vault import vault
 
 log = logging.getLogger(__name__)
-
-FILES = Path(__file__).parent / "files"
-PACKAGES = ["mysql-server", "nfs-kernel-server", "cloudstack-management", "cloudstack-agent"]
-CS_VERSION = "4.22.1.1"  # must match files/lab-cloudstack.pref
-
-KEY_URL = "https://download.cloudstack.org/release.asc"
-KEYRING = Path("/etc/apt/keyrings/cloudstack.asc")  # .asc: apt reads it as is, no gpg --dearmor
-SOURCE = Path("/etc/apt/sources.list.d/lab-cloudstack.list")
-PIN = Path("/etc/apt/preferences.d/lab-cloudstack")
-MYSQL_CNF = Path("/etc/mysql/conf.d/cloudstack.cnf")
-EXPORT_ROOT = Path("/export")
-EXPORTS = Path("/etc/exports.d/lab-cloudstack.exports")  # our own file; never edit /etc/exports
-EXPORT_OPTIONS = "rw,async,no_root_squash,no_subtree_check"  # the guide's options, verbatim
-LAN_BRIDGE = "cloudbr0"  # the guide's name; config.BRIDGE is cloudbr1, the host-only one
-LAN_NETPLAN = Path("/etc/netplan/60-lab-cloudbr0.yaml")  # 60-: after 50-cloud-init.yaml, so it wins
-BRIDGE_TIMEOUT = 60  # seconds for cloudbr0 to hold HOST_IP and reach the gateway after apply
-CS_SECRETS = "kv/data/lab/bootstrap/cloudstack"  # Vault KV v2: kv/data/<path>
-CS_SECRET_NAMES = ("db_password", "management_key", "database_key")
-CS_DATABASES = ("cloud", "cloud_usage")
-MGMT_URL = "http://127.0.0.1:8080/client/"
-MGMT_TIMEOUT = 600  # seconds; the first start builds the database tables
-LIMITS = Path("/etc/security/limits.conf")
-LIMITS_LINES = ("cloud soft nproc -1", "cloud hard nproc -1")  # appended by cloudstack-setup-management
 
 
 def repo() -> bool:
@@ -193,6 +178,30 @@ def bridge() -> None:
     log.info("%s is up with %s (port %s)", LAN_BRIDGE, host_ip, card)
 
 
+def bridge_nf_on() -> list[str]:
+    """Return the bridge-nf-call-* keys that are on (none while br_netfilter is not loaded)."""
+    keys = [Path("/proc/sys/net/bridge", key) for key in BRIDGE_NF_KEYS]
+    return [key.name for key in keys if key.exists() and key.read_text().strip() != "0"]
+
+
+def bridge_netfilter() -> None:
+    """Keep bridge netfilter off, now and whenever br_netfilter loads."""
+    if install_file(FILES / "lab-bridge-nf.rules", BRIDGE_NF_UDEV, 0o644):
+        subprocess.run(["udevadm", "control", "--reload"], check=True)
+    install_file(FILES / "lab-bridge-nf.conf", BRIDGE_NF_SYSCTL, 0o644)
+
+    on = bridge_nf_on()
+    if not on:
+        log.info("bridge netfilter is already off")
+        return
+
+    subprocess.run(["/usr/lib/systemd/systemd-sysctl", "--prefix=/net/bridge"], check=True)
+    if bridge_nf_on():
+        log.error("bridge netfilter is still on (%s)", ", ".join(bridge_nf_on()))
+        sys.exit(1)
+    log.info("bridge netfilter turned off (%s were on)", ", ".join(on))
+
+
 def cs_credentials(token: str, create: bool) -> dict | None:
     """Return CloudStack's database password and encryption keys from Vault.
 
@@ -280,13 +289,14 @@ def setup_done() -> bool:
 def management() -> None:
     """Run cloudstack-setup-management until it has completed once, start the server, wait for it.
 
-    The setup tool is safe to re-run (it skips lines already in limits.conf), so an interrupted
-    setup is simply run again on the next up.
+    The limits lines are the setup tool's last change before it enables and starts the service,
+    so once they exist only enable --now can still be missing. The tool is safe to re-run (it
+    skips lines already in limits.conf), so an interrupted setup is simply run again.
     """
     if not setup_done():
         subprocess.run(["cloudstack-setup-management"], check=True)
-    elif not systemctl_ok("is-active", "cloudstack-management"):
-        subprocess.run(["systemctl", "start", "cloudstack-management"], check=True)
+    else:
+        subprocess.run(["systemctl", "enable", "--now", "cloudstack-management"], check=True)
 
     start = time.monotonic()
     next_note = start + 60
@@ -304,8 +314,85 @@ def management() -> None:
     log.info("CloudStack management server answering on %s", MGMT_URL)
 
 
+def cs_call(session: tuple, command: str, **params: str) -> dict:
+    """Run one CloudStack API command in a logged-in session and return its response object."""
+    opener, sessionkey = session
+    data = urllib.parse.urlencode(
+        {"command": command, "sessionkey": sessionkey, "response": "json", **params}).encode()
+    try:
+        with opener.open(CS_API, data, timeout=30) as resp:
+            return json.load(resp)[f"{command.lower()}response"]
+    except urllib.error.HTTPError as err:
+        text = err.read().decode(errors="replace")[:300]
+        log.error("CloudStack %s failed (HTTP %d): %s", command, err.code, text)
+        sys.exit(1)
+
+
+def cs_login(password: str) -> tuple[tuple, str] | None:
+    """Log in as admin; return the session and admin's user id, or None if the password is wrong."""
+    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor())
+    data = urllib.parse.urlencode({"command": "login", "username": "admin", "password": password,
+                                   "domain": "/", "response": "json"}).encode()
+    try:
+        with opener.open(CS_API, data, timeout=30) as resp:
+            body = json.load(resp)["loginresponse"]
+    except urllib.error.HTTPError as err:
+        if err.code == LOGIN_REFUSED:
+            return None
+        raise
+    return (opener, body["sessionkey"]), body["userid"]
+
+
+def admin(token: str) -> None:
+    """Replace admin's default password and create admin's API keys; all three live in Vault.
+
+    The new password is stored before it is set, so a crash in between never loses it.
+    A password Vault holds but CloudStack refuses (its database was reset) is set again.
+    """
+    resp = vault.api("GET", CS_ADMIN, token=token)
+    stored = resp["data"]["data"] if resp else {}
+    password = stored.get("password")
+    login = cs_login(password) if password else None
+
+    if login and "api_key" in stored and "secret_key" in stored:
+        cs_call(login[0], "logout")
+        log.info("CloudStack admin password and API keys are already in Vault")
+        return
+
+    if password is None:
+        password = secrets.token_urlsafe(32)
+        vault.api("POST", CS_ADMIN, {"data": {"password": password}}, token=token)
+
+    if login is None:
+        default = cs_login(CS_DEFAULT_PASSWORD)
+        if default is None:
+            log.error("CloudStack refused both admin's password from Vault and the default one")
+            sys.exit(1)
+        session, user_id = default
+        cs_call(session, "updateUser", id=user_id, password=password,
+                currentpassword=CS_DEFAULT_PASSWORD)
+        cs_call(session, "logout")
+        login = cs_login(password)
+        if login is None:
+            log.error("CloudStack refused the admin password it was just given")
+            sys.exit(1)
+        log.info("CloudStack admin password replaced")
+
+    session, user_id = login
+    keys = cs_call(session, "registerUserKeys", id=user_id)["userkeys"]
+    vault.api("POST", CS_ADMIN, {"data": {"password": password, "api_key": keys["apikey"],
+                                          "secret_key": keys["secretkey"]}}, token=token)
+    cs_call(session, "logout")
+
+    if cs_login(CS_DEFAULT_PASSWORD) is not None:
+        log.error("CloudStack still accepts admin's default password")
+        sys.exit(1)
+    log.info("CloudStack admin password and API keys stored in %s",
+             CS_ADMIN.replace("/data/", "/", 1))
+
+
 def down() -> None:
-    """Stop the management server and remove its databases, its MySQL user and its limits.
+    """Stop the management server; remove its databases, MySQL user, limits and bridge-nf files.
 
     First version: covers what part 4 creates, so part 4 can be reset and re-run.
     """
@@ -328,6 +415,9 @@ def down() -> None:
             LIMITS.write_text("".join(kept))
             log.info("removed the cloud user's lines from %s", LIMITS)
 
+    BRIDGE_NF_UDEV.unlink(missing_ok=True)
+    BRIDGE_NF_SYSCTL.unlink(missing_ok=True)
+
     log.info("CloudStack management server stopped and disabled")
 
 
@@ -340,5 +430,8 @@ def up() -> None:
     mysql()
     nfs()
     bridge()
-    databases(vault.login())
+    bridge_netfilter()
+    token = vault.login()
+    databases(token)
     management()
+    admin(token)

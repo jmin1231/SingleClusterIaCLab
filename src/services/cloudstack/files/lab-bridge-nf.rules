@@ -1,0 +1,2 @@
+# Apply lab-bridge-nf.conf whenever br_netfilter loads (sysctl.d(5), example 2).
+ACTION=="add", SUBSYSTEM=="module", KERNEL=="br_netfilter", RUN+="/usr/lib/systemd/systemd-sysctl --prefix=/net/bridge"

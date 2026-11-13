@@ -41,14 +41,20 @@ working scope:
 
 1. Done: preflight, `cloudbr1`, chrony, Podman, CoreDNS, Vault (2.4a–2.5e, host trust
    2.5b deferred), cfssl PKI (2.5a), Traefik (2.6). MinIO (2.7) optional, skipped.
-   **In progress (2026-11-12): 3.1a** in `src/host/cloudstack.py`, five parts: (1) repo + packages
+   **Working on now (2026-11-13): 3.1c** (zone, networks, host). 3.1a and 3.1b are done
+   (3.1b: all three `bridge-nf-call-*` read 0 after `up`; files under `/etc/sysctl.d` and
+   `/etc/udev/rules.d`). Code moved to `src/services/{podman,cloudstack}/` the same day.
+   Then 3.1d before the
+   cutoff (item 3).
+   **Done (2026-11-12 to 2026-11-13): 3.1a** in `src/services/cloudstack/cloudstack.py`, five parts: (1) repo + packages
    ✅ (4.22.1.1 installed); (2) MySQL ✅ tested, `nfs()` ✅ tested (one `/export` line to the LAN
    subnet, plus a `write_file()` helper in `src/lib/system.py`); (3) `cloudbr0` ✅ tested
    (decided 2026-11-13: stays on DHCP, the bridge takes the card's MAC so the lease
    keeps the same address; the lab lives a day or two); (4) databases ✅ tested (schema 4.22.1.1, `db.properties` password encrypted, :8080
-   answers 200, re-run changes nothing); (5) after start, next: admin password + API
-   keys into Vault (`kv/lab/bootstrap/cloudstack-admin`), libvirt `default` network
-   removed; NFS port pins deferred to the firewall (2.2), `host.reserved.mem.mb` to 3.1c. `cloudstack.down()`: first version (stop, drop databases and user,
+   answers 200, re-run changes nothing; review fixes applied 2026-11-13: version pin and schema checks,
+   retry-safe MySQL/NFS/setup, full bridge rollback, static hosts refused); (5) ✅ tested 2026-11-13 (the default `admin`/`password` login now gets HTTP 531): admin password + API
+   keys into Vault (`kv/lab/bootstrap/cloudstack-admin`; the password is stored before it is
+   set, so a crash never loses it); libvirt's `default` network is kept (decided 2026-11-13, see rule 15); NFS port pins deferred to the firewall (2.2), `host.reserved.mem.mb` to 3.1c. `cloudstack.down()`: first version (stop, drop databases and user,
    limits lines); not yet cloudbr0, NFS, MySQL config, repo, packages.
 2. Vault 2.4b (init, unseal), 2.5a–2.5b (cfssl PKI, host trust), 2.5c–2.5e (KV,
    policies, AppRole): Vault holds the pipeline's secrets, read through AppRole.
@@ -1555,8 +1561,8 @@ out of any Terraform state **[verify] those resources against 4.22.1.1 before
 switching**.
 
 - **3.1a Install.** CloudStack **4.22.1.1** (LTS, end of life 2027-12-01; Ubuntu
-  24.04, Java 17), all-in-one, installed by plain Python in `src/host/cloudstack.py`
-  (decided 2026-11-12: host setup stays imperative, like the rest of `src/host/`; no Ansible role):
+  24.04, Java 17), all-in-one, installed by plain Python in `src/services/cloudstack/cloudstack.py`
+  (decided 2026-11-12: host setup stays imperative Python, like `src/host/` and the other `src/services/` modules; no Ansible role):
   - the `download.cloudstack.org` noble `4.22` repository, its key downloaded on every
     run to `/etc/apt/keyrings/cloudstack.asc`, Docker style (decided 2026-11-12: the vendor's
     documented method; no fingerprint check), trusted for this repository only through
@@ -1589,7 +1595,7 @@ switching**.
     `ONLY_FULL_GROUP_BY`); the guide's `Defaults:cloud !requiretty` is already in the
     package's `/etc/sudoers.d/cloudstack`
 
-  **`cloudbr0` design** (decided 2026-11-13; `bridge()` in `src/host/cloudstack.py`).
+  **`cloudbr0` design** (decided 2026-11-13; `bridge()` in `src/services/cloudstack/cloudstack.py`).
   The lab runs on different Ubuntu 24.04 hosts, so nothing about the LAN is hard-coded:
   every value is read from the live host on every run.
 
@@ -1619,7 +1625,7 @@ switching**.
   port of `cloudbr0` (verified 2026-11-13).
 
   *The file:* `/etc/netplan/60-lab-cloudbr0.yaml`, mode 0600, filled in from a template
-  in `src/host/files/` with Python's `string.Template` (`${card}`, `${mac}`):
+  in `src/services/cloudstack/files/` with Python's `string.Template` (`${card}`, `${mac}`):
   `cloudbr0-dhcp.yaml.tmpl`, then written with `write_file` (host values, so not
   `install_file`). `substitute()` fails on a missing value, never writes a half-filled
   file. No `renderer:` line: the host's NetworkManager keeps managing it. DHCP host,
@@ -1725,8 +1731,8 @@ switching**.
   - change the default `admin` password (generated into Vault
     `kv/lab/bootstrap/cloudstack`), and generate the admin's API key pair into the
     same path; every later admin call uses those keys
-  - destroy and undefine libvirt's `default` network (`virbr0` runs dnsmasq on port
-    53, which collides with CoreDNS); V-checks confirm it stays gone
+  - libvirt's `default` network (`virbr0`) is left alone: CloudStack does not use it
+    and it does not collide with CoreDNS (rule 15)
   - NFS: pin `statd` and `lockd` ports in `/etc/nfs.conf` (§5), so the firewall can
     allow them
   - the KVM agent's `host.reserved.mem.mb` (§5)
@@ -1739,13 +1745,16 @@ switching**.
   naming both versions.
 
   ⤷ **Needs** 2.6, 2.5c · **Recalls** `gw.hosts`, `fw.host`, `net.host`,
-  `vault.mount.kv` · **Produces** `src/host/cloudstack.py` (install) · **Records** `cs.api`,
+  `vault.mount.kv` · **Produces** `src/services/cloudstack/cloudstack.py` (install) · **Records** `cs.api`,
   `cs.version`, `cs.repo`, `vault.kv.cs-admin`, `cs.nfs-ports`; the `cloudbr0` netplan
   file · **Check** Exit
 - **3.1b Bridge netfilter** (before the zone, so no system VM ever starts with its
   bridged traffic filtered). **Off**, so bridged VM traffic never meets the host's
   forward chains (the lab's has policy drop, 2.2). Podman's netavark does not load `br_netfilter` (2.1c), but anything
-  that does would switch bridge filtering on silently, and a sysctl.d file alone is
+  that does would switch bridge filtering on silently, and one does: `cloudstack-agent`'s
+  postinst runs `modprobe br_netfilter` and appends it to `/etc/modules` (found
+  2026-11-13: all three keys were 1 after the 3.1a install), so the step also applies the
+  file to the module already loaded. A sysctl.d file alone is
   applied only at boot. So the lab uses systemd's documented pair: a udev rule that runs
   `systemd-sysctl --prefix=/net/bridge` whenever `br_netfilter` loads, and a sysctl.d
   file setting the three `net.bridge.bridge-nf-call-*` values to 0.
@@ -3256,8 +3265,11 @@ G4's hand edit by 12.1f.
 14. **Keep VM management off the LAN.** A mgmt network on the LAN subnet gives VMs a
     second route to LAN clients (replies leave by the wrong NIC) and lets the LAN's
     DHCP server answer them. A host-only bridge removes both problems.
-15. **libvirt brings a network you did not ask for.** Its `default` network (`virbr0`,
-    dnsmasq on port 53) collides with CoreDNS; remove it right after install.
+15. **libvirt brings a network you did not ask for, and that is fine.** Its `default`
+    network (`virbr0`, 192.168.122.0/24) runs dnsmasq on port 53, but only on
+    192.168.122.1; CoreDNS binds 10.250.0.1 and `HOST_IP`, so both listen side by side
+    (checked with `ss` on 2026-11-13). CloudStack uses its own bridges, so the lab keeps
+    it rather than add a removal step; purging libvirt on destroy removes it.
 16. **Ubuntu's chrony and timesyncd conflict at the package level.** Installing one
     removes the other, so a revert has to reinstall, not just re-enable.
 

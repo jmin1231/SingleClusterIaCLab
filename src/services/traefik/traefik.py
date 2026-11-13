@@ -2,7 +2,7 @@
 
 import logging
 
-from src.host import podman
+from src.services.podman import podman
 from src.lib.config import VMNET
 from src.lib.system import compose
 

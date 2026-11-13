@@ -6,11 +6,13 @@ import logging
 import sys
 from collections.abc import Callable
 
-from src.host import cloudstack, network, ntp, podman, preflight
+from src.host import network, ntp, preflight
 from src.lib import pki
 from src.lib.config import STATE_DIR
 from src.lib.log import setup_logging
+from src.services.cloudstack import cloudstack
 from src.services.coredns import dns
+from src.services.podman import podman
 from src.services.traefik import traefik
 from src.services.vault import vault
 

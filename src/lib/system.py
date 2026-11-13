@@ -51,16 +51,20 @@ def systemctl_ok(verb: str, unit: str) -> bool:
     return subprocess.run(["systemctl", verb, "--quiet", unit]).returncode == 0
 
 
-def install_file(src: Path, dst: Path, mode: int) -> bool:
-    """Copy src to dst if dst is missing or different. Returns True if it changed."""
-    src_bytes = src.read_bytes()
-    if dst.exists() and dst.read_bytes() == src_bytes:
+def write_file(content: bytes, dst: Path, mode: int) -> bool:
+    """Write content to dst if dst is missing or different. Returns True if it changed."""
+    if dst.exists() and dst.read_bytes() == content:
         return False
 
     dst.touch()
-    dst.chmod(mode)
-    dst.write_bytes(src_bytes)
+    dst.chmod(mode)  # set the mode before the content goes in
+    dst.write_bytes(content)
     return True
+
+
+def install_file(src: Path, dst: Path, mode: int) -> bool:
+    """Copy src to dst if dst is missing or different. Returns True if it changed."""
+    return write_file(src.read_bytes(), dst, mode)
 
 
 def compose(service: str, *args: str, env: dict[str, str] | None = None) -> None:

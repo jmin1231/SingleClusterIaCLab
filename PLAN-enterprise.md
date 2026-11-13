@@ -42,14 +42,22 @@ working scope:
 1. Done: preflight, `cloudbr1`, chrony, Podman, CoreDNS, Vault (2.4a–2.5e, host trust
    2.5b deferred), cfssl PKI (2.5a), Traefik (2.6). MinIO (2.7) optional, skipped.
    **In progress (2026-11-12): 3.1a** in `src/host/cloudstack.py`, five parts: (1) repo + packages
-   ✅ (4.22.1.1 installed); (2) MySQL ✅ written, untested, then `nfs()` (exports to the LAN
-   subnet, plus a `write_file()` helper in `src/lib/system.py`) next; (3) `cloudbr0`
-   (open: DHCP, keep the card's MAC (A) or static (B)); (4) databases (the package
-   starts `cloudstack-management` by itself: stop it before `cloudstack-setup-databases`);
-   (5) after start. `cloudstack.down()` not written yet.
+   ✅ (4.22.1.1 installed); (2) MySQL ✅ tested, `nfs()` ✅ tested (one `/export` line to the LAN
+   subnet, plus a `write_file()` helper in `src/lib/system.py`); (3) `cloudbr0` ✅ tested
+   (decided 2026-11-13: stays on DHCP, the bridge takes the card's MAC so the lease
+   keeps the same address; the lab lives a day or two); (4) databases ✅ tested (schema 4.22.1.1, `db.properties` password encrypted, :8080
+   answers 200, re-run changes nothing); (5) after start, next: admin password + API
+   keys into Vault (`kv/lab/bootstrap/cloudstack-admin`), libvirt `default` network
+   removed; NFS port pins deferred to the firewall (2.2), `host.reserved.mem.mb` to 3.1c. `cloudstack.down()`: first version (stop, drop databases and user,
+   limits lines); not yet cloudbr0, NFS, MySQL config, repo, packages.
 2. Vault 2.4b (init, unseal), 2.5a–2.5b (cfssl PKI, host trust), 2.5c–2.5e (KV,
    policies, AppRole): Vault holds the pipeline's secrets, read through AppRole.
 3. CloudStack, phase 3 (3.1a–3.2a, 3.3a): the longest and riskiest step, so first.
+   **Cutoff (decided 2026-11-13):** if the system VMs (SSVM, CPVM) are not running by the
+   end of 2026-11-14, switch to plain KVM with the Terraform libvirt provider (pin the
+   version: v0.9.0 was a breaking rewrite). Everything else carries over; the hand-built
+   VPC (libvirt networks + host routing + nftables) then goes in §15 as a scope cut for R1.
+   OpenNebula was weighed and not chosen: another full platform, still no single VPC object.
 4. ~~MinIO (2.7)~~ **optional, skipped** (decided 2026-11-12): Terraform state is a local
    file (5.1) and Loki stores on its own volume (2.7b); IAM is shown with Vault (§15).
 5. Gitea and the runner (2.8, 2.10).
@@ -300,7 +308,7 @@ it, and each later step adds the keys it uses, with this section's default, to
 | Item | Value |
 |---|---|
 | `LAN_CIDR` | host LAN, read from the host (address + prefix), e.g. `192.168.50.0/24` |
-| `HOST_IP` | host LAN address, read from the host, **static** in netplan (preflight refuses DHCP: the address must not change when CloudStack moves it onto `cloudbr0`), e.g. `192.168.50.10` |
+| `HOST_IP` | host LAN address, read from the host. It must not change when CloudStack moves it onto `cloudbr0`: on a DHCP host (decided 2026-11-13) `cloudbr0` takes the card's MAC, so the DHCP server renews the same lease; acceptable because the lab lives a day or two (production: static, as the official guide shows), e.g. `192.168.50.10` |
 | `LAN_GATEWAY` / upstream DNS | read from the host (the default route) / from the LAN |
 | CloudStack pod (system VM) range | on the LAN, e.g. `.180–.189` |
 | CloudStack public range (VPC source NAT and public IPs) | on the LAN, e.g. `.190–.209` |
@@ -1559,14 +1567,122 @@ switching**.
     index was broken for months, which is why the previous build stayed on 4.21)
   - `cloudstack-management`, `cloudstack-agent` (configured when 3.1c adds the host),
     MySQL (bound to `127.0.0.1`, with the `my.cnf` settings the 4.22 install guide
-    lists) and the NFS server (`/export/primary` and `/export/secondary` exported to
-    `HOST_IP` and the §5 pod range only, never `*`)
+    lists) and the NFS server: `/export/primary` and `/export/secondary`, shared by one
+    line exporting the parent `/export` with `rw,async,no_root_squash,no_subtree_check`
+    (the guide's "Using the Management Server as the NFS Server") to the LAN subnet only,
+    never the guide's `*` (decided 2026-11-13). The line lives in its own
+    `/etc/exports.d/lab-cloudstack.exports`, never in the system's `/etc/exports`; the
+    subnet is read from the interface holding the default route (before and after
+    `cloudbr0` takes over the LAN address); `exportfs -ra` applies a change
   - the netplan file that creates `cloudbr0` and moves the LAN NIC and `HOST_IP` onto
-    it (1.1 backed up `/etc/netplan`), applied inside a `netplan try` window that is
-    confirmed only once `LAN_GATEWAY` answers
+    it (1.1 backed up `/etc/netplan`), applied with `netplan apply` and kept only once
+    `cloudbr0` holds `HOST_IP` and `LAN_GATEWAY` answers; otherwise the file is deleted
+    and `netplan apply` runs again (our own rollback). **Not `netplan try`** (found
+    2026-11-13, netplan.io 1.1.2): it exits without applying whenever any bridge in the
+    whole config has custom `parameters:`, and `cloudbr1` has `stp: false`
+    (`is_revertable()` in `try_command.py`). The same holds for every `netplan try` below
   - `cloudstack-setup-databases` (only as the database guard below allows), then
     `cloudstack-setup-management` while the `cloudstack-management` unit is not yet
-    enabled
+    enabled. Two guide/`install.sh` steps need nothing (checked 2026-11-13): MySQL's
+    global `sql_mode` stays as is, since CloudStack sets its own per connection in
+    `db.properties` (`sessionVariables=sql_mode='STRICT_TRANS_TABLES,...'`, no
+    `ONLY_FULL_GROUP_BY`); the guide's `Defaults:cloud !requiretty` is already in the
+    package's `/etc/sudoers.d/cloudstack`
+
+  **`cloudbr0` design** (decided 2026-11-13; `bridge()` in `src/host/cloudstack.py`).
+  The lab runs on different Ubuntu 24.04 hosts, so nothing about the LAN is hard-coded:
+  every value is read from the live host on every run.
+
+  *Why the bridge.* KVM plugs a VM's NIC into a Linux bridge, never into a card. System
+  VMs (pod IPs: reach the management server on 8250 and NFS) and VPC routers (public IP,
+  source NAT to the internet) must be on the LAN, so the card becomes a port of
+  `cloudbr0` and the host's address moves from the card to the bridge. `cloudbr1` cannot
+  do this job: it has no card and no way out, and the NFS export deliberately excludes it.
+
+  *Inputs, read from the host:*
+
+  | Value | Read from | This host |
+  |---|---|---|
+  | card | `detect_network()["card"]` (the default route's card); once that is `cloudbr0`, the member of `/sys/class/net/cloudbr0/brif/` that has `/sys/class/net/<name>/device` (only a physical card has it; bridges and VM ports do not) | `ens33` |
+  | MAC | `/sys/class/net/<card>/address` | `00:0c:29:3d:c5:5f` |
+  | address, prefix, gateway | `detect_network()` | `192.168.209.137/24`, `.2` |
+  | DHCP or static | `detect_network()["dhcp"]` (the address's `dynamic` flag) | DHCP |
+  | DNS servers (static only) | `nmcli -g IP4.DNS device show <card>` | `192.168.209.2` |
+  | who owns the card | `nmcli -g GENERAL.CONNECTION device show <card>` | `netplan-ens33` |
+
+  *Stop before changing anything* when the card's NetworkManager profile is not
+  `netplan-<card>`, naming the profile. Only then is the card defined in a netplan file
+  under its own name (here `50-cloud-init.yaml`, `ens33: dhcp4: true`), which our later
+  `60-` file can override (netplan merges files in name order, later wins). A profile
+  NetworkManager owns itself ("Wired connection 1", or `90-NM-<uuid>.yaml` from GNOME
+  Settings) is not overridden: two profiles would fight over the card. Check on
+  re-runs too: once bridged, the card's profile is still `netplan-<card>`, now as a
+  port of `cloudbr0` (verified 2026-11-13).
+
+  *The file:* `/etc/netplan/60-lab-cloudbr0.yaml`, mode 0600, filled in from a template
+  in `src/host/files/` with Python's `string.Template` (`${card}`, `${mac}`, and for
+  static `${host_ip}`, `${prefix}`, `${gateway}`, `${dns}`): `cloudbr0-dhcp.yaml.tmpl` or
+  `cloudbr0-static.yaml.tmpl`, then written with `write_file` (host values, so not
+  `install_file`). `substitute()` fails on a missing value, never writes a half-filled
+  file. No `renderer:` line: the host's NetworkManager keeps managing it. DHCP host,
+  filled in:
+
+  ```yaml
+  # Generated by bootstrap.sh up; destroy deletes it.
+  network:
+    version: 2
+    ethernets:
+      ens33:
+        dhcp4: false
+    bridges:
+      cloudbr0:
+        interfaces: [ens33]
+        macaddress: "00:0c:29:3d:c5:5f"   # the card's MAC: DHCP renews the same lease
+        dhcp4: true
+        parameters:                       # the guide: bridge_stp off, bridge_fd 0
+          stp: false                      # netplan's default is on: ~30 s before forwarding
+          forward-delay: 0
+  ```
+
+  Static host: in place of `dhcp4: true`, the current values copied over:
+  `addresses: [<ip>/<prefix>]`, `routes: [{to: default, via: <gateway>}]`,
+  `nameservers: {addresses: [<the host's DNS>]}` (keep `macaddress`).
+
+  *Apply:*
+  1. `write_file()` returns False and `cloudbr0` already holds `HOST_IP` → log "already
+     up", return.
+  2. `netplan apply`.
+  3. Wait up to 60 s until `cloudbr0` holds the **same** `HOST_IP` as before and
+     `ping -c1 -W2 <gateway>` answers (the polling loop of `network.up()`).
+  4. Timeout → rollback: delete the file, `netplan apply` again, `sys.exit` naming what
+     failed. Run from the VMware console, not SSH: the console is the guide's "IPMI or
+     ILO" path if the rollback itself fails.
+
+  Unchanged by the move: `HOST_IP` (CoreDNS needs no recreate), the NFS subnet, MySQL
+  on `127.0.0.1`.
+
+  *`down()`:* delete the file, `netplan apply`, `ip link delete cloudbr0` (as
+  `network.down()`); the untouched `50-cloud-init.yaml` puts the address back on the card.
+
+  *Check:* `ip -br addr show cloudbr0` shows `HOST_IP`; `ip -br addr show <card>` shows
+  none; `bridge link show` shows `<card> master cloudbr0`; `ip route show default` is
+  `via <gateway> dev cloudbr0`; a second `up` logs "already up".
+
+  *Against the sources.* The official KVM guide ("Configure Ubuntu for Basic Networks")
+  shows a static bridge in the outdated `/etc/network/interfaces` format with `bridge_stp
+  off`, `bridge_fd 0` and the IPMI/ILO warning. Apache's `install.sh`
+  (`configure_network()`) on Ubuntu:
+
+  | | `install.sh` | the lab |
+  |---|---|---|
+  | card | first interface that is up | the default route's card |
+  | address | always static: copies the current one, a DHCP lease included | DHCP stays DHCP (card's MAC); static is copied |
+  | DNS | hard-coded `8.8.8.8` | the host's own (static case) |
+  | original config | `rm -f /etc/netplan/50-cloud-init.yaml` | left in place; our `60-` file overrides it |
+  | backend | `renderer: networkd` | none set: the host's NetworkManager |
+  | after apply | nothing (no check, no rollback on Ubuntu) | address + gateway check, own rollback |
+  | card owned elsewhere | not checked | stop, naming the profile |
+  | re-run | skipped if `cloudbr0` exists (tracker file) | file regenerated and compared |
 
   **The lab installs CloudStack itself; it does not run the installer** (decided
   2026-11-10): the steps of the **official 4.22 Installation Guide** (reference, 2026-11-12:

@@ -1,0 +1,18 @@
+network:
+  version: 2
+  ethernets:
+    ${card}:
+      dhcp4: false
+  bridges:
+    cloudbr0:
+      interfaces: [${card}]
+      macaddress: "${mac}"
+      addresses: [${host_ip}/${prefix}]
+      routes:
+        - to: default
+          via: ${gateway}
+      nameservers:
+        addresses: [${dns}]
+      parameters:
+        stp: false
+        forward-delay: 0

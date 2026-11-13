@@ -41,6 +41,7 @@ def cmd_teardown() -> None:
 
 def cmd_destroy() -> None:
     # Reverse of up: services before the Podman they run on, chrony and CoreDNS before cloudbr1
+    cloudstack.down()
     traefik.down()
     vault.down()
     pki.down()
@@ -66,10 +67,15 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         description="Provision the entire infrastructure. See diagram/ for details.",
     )
 
-    sub = parser.add_subparsers(dest="command", required=True, metavar="<command>")
+    sub = parser.add_subparsers(dest="command", metavar="<command>")
     for name, (_, help_text) in COMMANDS.items():
         sub.add_parser(name, help=help_text)
-    return parser.parse_args(argv)
+
+    args = parser.parse_args(argv)
+    if args.command is None:
+        parser.print_help()
+        sys.exit(1)
+    return args
 
 
 def main(argv: list[str] | None = None) -> int:

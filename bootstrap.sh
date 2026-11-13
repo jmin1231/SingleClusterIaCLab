@@ -4,6 +4,7 @@ set -euo pipefail
 
 PYTHON_PKG=python3.12
 PYTHON=python3
+QUIET=0
 
 log() { printf '[+] %s\n' "$*"; }
 die() { printf '[x] %s\n' "$*" >&2; exit 1; }
@@ -20,7 +21,7 @@ check_python_version() {
 
 ensure_python() {
     if check_python_version; then
-        log "Python >= 3.12 found"
+        [[ "${QUIET}" -eq 1 ]] || log "Python >= 3.12 found"
         return
     fi
 
@@ -40,6 +41,9 @@ ensure_python() {
 
 main() {
     cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
+    if [[ $# -eq 0 || "$1" == "-h" || "$1" == "--help" ]]; then
+        QUIET=1
+    fi
     ensure_root
     ensure_python
     exec "${PYTHON}" -B -m src "$@"

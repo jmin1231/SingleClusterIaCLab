@@ -17,6 +17,7 @@ KEY_URL = "https://download.cloudstack.org/release.asc"
 KEYRING = Path("/etc/apt/keyrings/cloudstack.asc")  # .asc: apt reads it as is, no gpg --dearmor
 SOURCE = Path("/etc/apt/sources.list.d/lab-cloudstack.list")
 PIN = Path("/etc/apt/preferences.d/lab-cloudstack")
+MYSQL_CNF = Path("/etc/mysql/conf.d/cloudstack.cnf")
 
 
 def repo() -> bool:
@@ -41,8 +42,18 @@ def repo() -> bool:
     return changed
 
 
+def mysql() -> None:
+    """MySQL settings for CloudStack; restart MySQL only if they changed."""
+    if install_file(FILES / "cloudstack-mysql.conf", MYSQL_CNF, 0o644):
+        subprocess.run(["systemctl", "restart", "mysql"], check=True)
+        log.info("MySQL configured for CloudStack and restarted")
+    else:
+        log.info("MySQL is already configured for CloudStack")
+
+
 def up() -> None:
     """Install CloudStack 4.22.1.1 and its dependencies; a re-run changes nothing."""
     repo()
     if not apt_install(PACKAGES):
         log.info("CloudStack packages are already installed")
+    mysql()

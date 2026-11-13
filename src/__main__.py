@@ -6,7 +6,7 @@ import logging
 import sys
 from collections.abc import Callable
 
-from src.host import network, ntp, podman, preflight
+from src.host import cloudstack, network, ntp, podman, preflight
 from src.lib import pki
 from src.lib.config import STATE_DIR
 from src.lib.log import setup_logging
@@ -28,6 +28,7 @@ def cmd_up() -> None:
     certs_changed = pki.up()
     vault.up(certs_changed)
     traefik.up(certs_changed)
+    cloudstack.up()
 
 
 def cmd_update() -> None:

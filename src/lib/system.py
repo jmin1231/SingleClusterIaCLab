@@ -57,7 +57,6 @@ def install_file(src: Path, dst: Path, mode: int) -> bool:
     if dst.exists() and dst.read_bytes() == src_bytes:
         return False
 
-    # Mode first, contents second: the file is never readable with looser permissions.
     dst.touch()
     dst.chmod(mode)
     dst.write_bytes(src_bytes)

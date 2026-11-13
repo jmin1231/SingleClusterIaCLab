@@ -4,6 +4,9 @@ import ipaddress
 import os
 from pathlib import Path
 
+# --- Lab ---
+LAB_ADMIN = "labadmin"
+
 # --- Paths ---
 BASE_DIR = Path(__file__).resolve().parents[2]
 STATE_DIR = BASE_DIR / "state"
@@ -31,8 +34,7 @@ LAB_CA_CERT = PKI_DIR / f"{LAB_CA}.pem"
 CERTS: dict[str, tuple[str, str, list[str], tuple[int, int]]] = {
     # name:            (root,     profile,  hosts,                                            key owner (uid, gid))
     "vault":           (LAB_CA,   "server", ["vault.lab.test", str(VMNET.ip), "127.0.0.1"],  (100, 1000)),
-    "gateway":         (LAB_CA,   "server", ["gitea.lab.test", "minio.lab.test", "minio-console.lab.test",
-                                             "cloudstack.lab.test", "grafana.lab.test",
+    "gateway":         (LAB_CA,   "server", ["gitea.lab.test", "cloudstack.lab.test", "grafana.lab.test",
                                              "prometheus.lab.test", "loki.lab.test"],        (0, 0)),
     "app-edge":        (LAB_CA,   "server", ["app.lab.test"],                                 (0, 0)),
     "backend-gw":      (APP_ROOT, "server", ["api.backend.lab.test"],                         (0, 0)),

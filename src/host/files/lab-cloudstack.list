@@ -1,0 +1,1 @@
+deb [signed-by=/etc/apt/keyrings/cloudstack.asc] https://download.cloudstack.org/ubuntu noble 4.22

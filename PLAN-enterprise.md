@@ -35,17 +35,19 @@ This document is complete on its own: everything needed to build the lab is here
 **Review scope (decided 2026-11-11; review about 2026-11-19).** The full plan is
 larger than the time before the review. The minimum to show is **infrastructure deployed
 through CI/CD with Gitea and its runner**: a push to Gitea runs a runner job that has
-Terraform create the VPC and VMs in CloudStack (state in MinIO) and Ansible configure
+Terraform create the VPC and VMs in CloudStack (state in a local file on the host) and Ansible configure
 them, with Grafana showing the result. Build in this order, each step at its smallest
 working scope:
 
-1. Done: preflight, `cloudbr1`, chrony, Podman, CoreDNS, Vault server (2.4a).
+1. Done: preflight, `cloudbr1`, chrony, Podman, CoreDNS, Vault (2.4a–2.5e, host trust
+   2.5b deferred), cfssl PKI (2.5a), Traefik (2.6).
 2. Vault 2.4b (init, unseal), 2.5a–2.5b (cfssl PKI, host trust), 2.5c–2.5e (KV,
    policies, AppRole): Vault holds the pipeline's secrets, read through AppRole.
 3. CloudStack, phase 3 (3.1a–3.2a, 3.3a): the longest and riskiest step, so first.
-4. MinIO (2.7): the Terraform state bucket.
+4. ~~MinIO (2.7)~~ **optional, skipped** (decided 2026-11-12): Terraform state is a local
+   file (5.1) and Loki stores on its own volume (2.7b); IAM is shown with Vault (§15).
 5. Gitea and the runner (2.8, 2.10).
-6. Terraform through the pipeline (phase 5): VPC, tier, VM, state in MinIO. VMs boot the stock
+6. Terraform through the pipeline (phase 5): VPC, tier, VM, local state in `/var/lib/lab/tfstate/`. VMs boot the stock
    Ubuntu cloud image (4.0); until Squid (2.9) exists, the VPC's source NAT gives them egress.
 7. Ansible through the pipeline (6.1a's `base` role).
 8. Grafana with Prometheus (2.7b), node-exporter on the host and on the VMs, so a new
@@ -68,7 +70,7 @@ built-in CA (8.1–8.3), the app and database (8.4–8.7), backup and DR (phase 
 | **R4** | Reversible infrastructure: `destroy` removes the lab's packages, users and files and restores the network (each phase's list, rule 26) | Phase 13 | V1–V5 |
 | **R5** | Pipeline-driven: after bootstrap, every build and change is a CI run with gates; k3s converges to `main` through Flux | Phases 2.10, 3.5, 8.1b, 10 | G1–G4 |
 | **R6** | Observability: metrics, logs and dashboards for the cluster, the mesh and the api | 2.7b, 8.8a, 8.8b, 8.8d | O1–O5 |
-| **R7** | Operator consoles: CloudStack, Vault, Gitea, MinIO and Grafana, from the host only, over trusted TLS, each behind its own login | 3.5c, 2.7b | C1 |
+| **R7** | Operator consoles: CloudStack, Vault, Gitea and Grafana (MinIO only with optional 2.7), from the host only, over trusted TLS, each behind its own login | 3.5c, 2.7b | C1 |
 
 Every step in §9 is required for the full build: it builds or proves something R1–R7
 needs. The review minimum (above, decided 2026-11-11) is a subset built first. What was
@@ -170,7 +172,7 @@ left out, and why, is in §15.
 | Secrets manager + KMS | Vault: KV v2, **Transit** (encryption as a service), AppRole, Kubernetes auth |
 | Private CA | cfssl on the host (decided 2026-11-11, replacing Vault PKI), one root per trust domain: `lab.test CA` (everything hosts and people trust), `lab app CA` (the frontend ↔ backend-gateway mTLS pair); the mesh uses Istio's built-in CA, its own root |
 | Edge / API gateway | Traefik on the host terminates TLS for every control-plane web service (Grafana and the telemetry write paths included) and routes by hostname; Vault stays direct |
-| Remote Terraform state + locking | MinIO S3 backend, lockfile |
+| Remote Terraform state + locking | local backend in `/var/lib/lab/tfstate/` with its file lock (one host, one runner; decided 2026-11-12); MinIO S3 backend with `use_lockfile` only with optional 2.7 |
 | VM images | the stock Ubuntu 24.04 cloud image, pinned by URL and SHA-256, configured by cloud-init at first boot; a Packer golden-image factory is an option (§15) |
 | Container registry | Gitea registry; images scanned before push |
 | Policy-as-code | Conftest/OPA on `terraform plan -json`, before every apply |
@@ -332,7 +334,7 @@ publish **no** host ports: they are reached only through the gateway.
 | CoreDNS | 53 tcp/udp | LAN, VMs | — |
 | aardvark-dns (container name resolution; forwards other names to CoreDNS from the host) | 1053 tcp/udp | containers | — |
 | chrony (NTP server) | 123/udp | VMs | — |
-| **Gateway** (Traefik): Gitea web + registry, MinIO S3 + console, CloudStack UI/API, Grafana, Prometheus remote write (POST `/api/v1/write` only) and Loki push (POST `/loki/api/v1/push` only), both from be-1 only | 443 | VMs, containers, host (never the LAN) | `gitea`, `minio`, `minio-console`, `cloudstack`, `grafana`, `prometheus`, `loki` `.lab.test` → `10.250.0.1` |
+| **Gateway** (Traefik): Gitea web + registry, CloudStack UI/API, Grafana, Prometheus remote write (POST `/api/v1/write` only) and Loki push (POST `/loki/api/v1/push` only), both from be-1 only | 443 | VMs, containers, host (never the LAN) | `gitea`, `minio`, `minio-console`, `cloudstack`, `grafana`, `prometheus`, `loki` `.lab.test` → `10.250.0.1` |
 | Gateway, plain HTTP: `GET /images/*` only (MinIO's anonymous-read `images` bucket; Packer option only) | 80 | system-VM range | by address: `http://HOST_IP/images/…` (4.3) |
 | Vault (direct, its own TLS) | 8200 | VMs, containers, host | `vault.lab.test` → `10.250.0.1` |
 | Squid | 3128 | VMs, host | `proxy.lab.test` → `10.250.0.1` |
@@ -362,7 +364,7 @@ still originates on the host). Every URL serves a `lab.test CA` certificate; not
 answers from the LAN. Every console has one login, `labadmin`, an **admin** (decided
 2026-11-11: whoever runs `bootstrap.sh` is root on the host, and so effectively admin
 of everything). Each password is random and different per console, generated by `up`. The Vault
-login's password is in `state/credentials` (root `0600`); the other four are in Vault at
+login's password is in `state/credentials` (root `0600`); the other three are in Vault at
 `kv/lab/consoles/<console>` (`url`, `username`, `password`), so logging in to Vault's UI
 shows them all. `up` ends by printing the URLs and `sudo cat state/credentials`.
 
@@ -371,7 +373,7 @@ shows them all. `up` ends by printing the URLs and `sudo cat state/credentials`.
 | CloudStack | `https://cloudstack.lab.test/client/` | root admin; the default `admin`/`password` login gets a random password too |
 | Vault | `https://vault.lab.test:8200/ui/` | userpass, policy `lab-admin` |
 | Gitea | `https://gitea.lab.test/` | site admin (Gitea reserves the name `admin`) |
-| MinIO | `https://minio-console.lab.test/` | the root user |
+| MinIO (optional 2.7) | `https://minio-console.lab.test/` | the root user |
 | Grafana | `https://grafana.lab.test/` | the server admin |
 
 **Host capacity: 32 GB RAM is the ceiling, not a target.** The lab must fit
@@ -463,7 +465,7 @@ exist outside Vault, and each one is listed with its location and protection.
 | Grafana admin password | `kv/lab/bootstrap/grafana-admin`; rendered to `/var/lib/lab/platform/grafana.env` | generated once by the platform phase (rule 18); it is the `labadmin` console login (3.5c) and creates the verify service account (2.7b, 3.5c) |
 | Alloy write credential (username `alloy-v<N>`, password) | `kv/app/alloy-write`; its bcrypt hash in `/var/lib/lab/traefik/alloy.htpasswd`; Secret `monitoring/alloy-write` | created once by the platform phase (rule 18); synced by VSO (SA `monitoring/vso-monitoring`, role `vso-monitoring`); it can only append metrics and logs, and only from `10.250.0.112` (2.7b). Rotation: a new KV version with the next username; the users file keeps the current and the previous entry until VSO has re-synced, so no batch is refused |
 | Grafana verify token (a Viewer service account) | `kv/lab/pipeline/grafana-verify` | created by the platform phase through Grafana's API (2.7b); `verify` and the `monitoring` job query Prometheus and Loki with it through Grafana |
-| Console logins (`labadmin` on CloudStack, Vault, Gitea, MinIO, Grafana) | Vault's own: `state/credentials` on the host; the other four: Vault `kv/lab/consoles/<console>` | root `0600`; admins by decision (3.5c); random, one password per console; logging in to Vault's UI as `labadmin` shows the other four (decided 2026-11-12); written by `lab-bootstrap`, never readable by `lab-pipeline`; every `up` resets each console to the stored password, and a missing entry means a new password, applied by that `up`; `destroy` deletes both |
+| Console logins (`labadmin` on CloudStack, Vault, Gitea, Grafana) | Vault's own: `state/credentials` on the host; the other three: Vault `kv/lab/consoles/<console>` | root `0600`; admins by decision (3.5c); random, one password per console; logging in to Vault's UI as `labadmin` shows the other three (decided 2026-11-12); written by `lab-bootstrap`, never readable by `lab-pipeline`; every `up` resets each console to the stored password, and a missing entry means a new password, applied by that `up`; `destroy` deletes both |
 | Vault Secrets Operator's Vault token | the operator's memory | Kubernetes login as SA `db/vso-db` to role `vso-db`, which may read `kv/data/app/db` only, and as SA `monitoring/vso-monitoring` to role `vso-monitoring`, `kv/data/app/alloy-write` only; 1-hour TTL |
 | Vault token-reviewer JWT | k8s Secret for SA `vault-auth`, and Vault's `auth/k3s/config` | encrypted at rest; read on be-1 by the `k3s` role (from 8.2c); rotated by re-running the `cluster` job |
 | CloudStack DB password and database encryption keys | `/etc/cloudstack/management/db.properties` and `key`, MySQL, Vault `kv/lab/bootstrap/cloudstack` | root-only; generated per install by 3.1a (never `cloud:cloud` or the `password` key defaults); removed by `destroy` |
@@ -1195,8 +1197,7 @@ runbook (14.4): a subshell with `VAULT_TOKEN` from a `lab-bootstrap` AppRole log
     files moved from `state/vault/tls/` to `state/pki/`.
   - **Certificates:** one table in `lib/config.py`, `CERTS = {name: (root, profile, hosts,
     key owner)}`: `vault` (`vault.lab.test`, `10.250.0.1`, `127.0.0.1`; key owned by
-    the container's vault user), `gateway` (every gateway name in §5: `gitea`, `minio`,
-    `minio-console`, `cloudstack`, `grafana`, `prometheus`, `loki` `.lab.test`; no IP
+    the container's vault user), `gateway` (every gateway name in §5: `gitea`, `cloudstack`, `grafana`, `prometheus`, `loki` `.lab.test`; no IP
     SAN), `app-edge` (`app.lab.test`), `backend-gw` (`api.backend.lab.test`, from
     `lab app CA`), `frontend-client` (`frontend.app.lab.test`, `lab app CA`,
     profile `client`). The CN is the first host; no per-certificate CSR file
@@ -1305,13 +1306,12 @@ runbook (14.4): a subshell with `VAULT_TOKEN` from a `lab-bootstrap` AppRole log
 - **2.6 Gateway (Traefik).** Pinned by digest, in the `lab_edge` and `lab_backend` networks,
   publishing **only** 443 (and 80 for `images/`, only with the Packer option, 2.7). Static config: the HTTPS
   entrypoint, a file provider reading `/var/lib/lab/traefik/dynamic.yml`, the access log
-  to a file. `dynamic.yml` holds one router per hostname (`gitea`, `minio`,
-  `minio-console`, `cloudstack`; 2.7b adds `grafana` and the `prometheus` and `loki`
+  to a file. `dynamic.yml` holds one router per hostname (`gitea`, `cloudstack`; 2.7b adds `grafana` and the `prometheus` and `loki`
   write paths with their middlewares) and **one** certificate (profile `server`) carrying every
   gateway name (`gateway` in 2.5a's table, no IP SAN), made in 2.5a. Backends are plain HTTP: the platform containers by name on `lab_backend`
   (aardvark-dns), CloudStack at `10.250.0.1:8080` (the host's fixed `cloudbr1` address,
   reached through `lab_edge`'s gateway, so no extra host entry). Body size
-  unlimited and read timeouts of 10 minutes on the `gitea` and `minio` routers (registry
+  unlimited and read timeouts of 10 minutes on the `gitea` router (registry
   layers are large). Traefik mounts `state/pki/gateway.pem` and its key
   (Vault, DNS, Squid and SSH do not depend on the gateway).
   **As built (decided 2026-11-12):** `src/services/traefik/`: `compose.yaml` (static config as `command:`
@@ -1325,7 +1325,7 @@ runbook (14.4): a subshell with `VAULT_TOKEN` from a `lab-bootstrap` AppRole log
   port 8080, so it needs no capability) in the same compose file is `gitea.lab.test`'s
   backend until 2.8, which points `dynamic/gitea.yml` at `http://gitea:3000` and deletes whoami.
   Exit: `curl --cacert state/pki/ca.pem https://gitea.lab.test/` reaches whoami;
-  `openssl s_client -servername minio.lab.test` shows the gateway certificate, issued
+  `openssl s_client -servername cloudstack.lab.test` shows the gateway certificate, issued
   by `lab.test CA`, with every gateway name in its SANs; a name with no router
   (`vault.lab.test`) gets Traefik's self-signed default certificate, so `--cacert`
   fails, and `curl -k` returns 404; a second `up` leaves both containers running
@@ -1334,7 +1334,17 @@ runbook (14.4): a subshell with `VAULT_TOKEN` from a `lab-bootstrap` AppRole log
   ⤷ **Needs** 2.5e, 2.1b · **Recalls** `podman.networks`, `cmd.maintain`, `path.certs` ·
   **Produces** `platform/traefik/`, `dynamic.yml` · **Records** `gw.hosts` · **Check**
   Exit; P1
-- **2.7 MinIO.** Behind the gateway (`https://minio.lab.test`, path-style; console at
+- **2.7 MinIO** (**optional, skipped** 2026-11-12: one host and one runner need no shared
+  remote state, Loki runs on its filesystem, and Vault already demonstrates IAM. Built,
+  tested by hand through the gateway, then removed (never committed). To rebuild: image
+  `cgr.dev/chainguard/minio@sha256:786cb11d…` (upstream stopped publishing community images;
+  entrypoint `/usr/bin/minio`, uid 65532, no shell, ships `mc`), `command: ["server", "/data",
+  "--console-address", ":9001"]`, `MINIO_ROOT_USER: labadmin`, `MINIO_ROOT_PASSWORD:
+  ${MINIO_ROOT_PASSWORD:?…}` (unset would mean `minioadmin`), `MINIO_BROWSER_REDIRECT_URL`,
+  volume `minio-data:/data`, network `lab-backend` with `external: true`, `cap_drop: [ALL]`, no
+  ports; routers `minio` → `http://minio:9000` and `minio-console` → `http://minio:9001`; add
+  both names back to the gateway certificate and the Corefile; setup by `podman exec minio
+  mc ...` or a host-side Terraform config with local state). Behind the gateway (`https://minio.lab.test`, path-style; console at
   `minio-console.lab.test`); buckets `tfstate` and `loki` (Loki's store,
   2.7b; `tempo` too with §15's tracing option); one user and policy per
   bucket, credentials in Vault. **Packer option only:** a bucket `images` with anonymous **read**: images hold no
@@ -1367,11 +1377,12 @@ runbook (14.4): a subshell with `VAULT_TOKEN` from a `lab-bootstrap` AppRole log
     `grafana:3000`.
   - `loki`: single binary (`-target=all`), `auth_enabled: false` (one tenant; the
     gateway guards it), schema v13 TSDB, `allow_structured_metadata: true` (Alloy sends
-    structured metadata); chunks and index in MinIO bucket `loki` (`http://minio:9000`,
-    path-style, its own user, 2.7); WAL, index cache and compactor on volume `loki-data`;
+    structured metadata); chunks, index, WAL and compactor on volume `loki-data`
+    (`common.storage.filesystem`; decided 2026-11-12, since 2.7 is optional: with 2.7,
+    chunks and index go to MinIO bucket `loki`);
     `limits_config.retention_period: 168h`, `retention_stream: [{selector:
     '{job="k3s-audit"}', period: 720h}]`; `compactor.retention_enabled: true`,
-    `delete_request_store: s3`.
+    `delete_request_store: filesystem`.
   - `grafana` (OSS): admin from `/var/lib/lab/platform/grafana.env` (rendered from
     `kv/lab/bootstrap/grafana-admin`, created once, rule 18); anonymous access, sign-up,
     reporting, update checks and plugin preinstall off **[verify the key at the pin]**;
@@ -1416,7 +1427,7 @@ runbook (14.4): a subshell with `VAULT_TOKEN` from a `lab-bootstrap` AppRole log
   `10.250.0.111` gets 403; a GET of `/api/v1/query` or `/loki/api/v1/query_range` on
   those names gets 404; a re-run changes nothing.
 
-  ⤷ **Needs** 2.7, 2.6, 2.5c · **Recalls** `gw.hosts`, `minio.url`, `minio.users`,
+  ⤷ **Needs** 2.6, 2.5c · **Recalls** `gw.hosts`,
   `vault.mount.kv`, `podman.networks`, `cmd.maintain`, `cmd.netns-test`,
   `decision.observability`, `decision.telemetry-auth` · **Produces**
   `platform/{prometheus,loki,grafana}/`, the write routers and middlewares in
@@ -1471,7 +1482,7 @@ runbook (14.4): a subshell with `VAULT_TOKEN` from a `lab-bootstrap` AppRole log
   time**, so build memory never stacks and two jobs never share Terraform state.
   Workflows use only `run:` steps that call `git` and `python3 -B -m lab.<module>` (no
   JavaScript actions), so the host needs no Node.js.
-  `lab-runner` owns `/var/lib/lab/backups/`, the CoreDNS zone file that `setup`
+  `lab-runner` owns `/var/lib/lab/backups/`, `/var/lib/lab/tfstate/` (`0700`, Terraform's local state, 5.1), the CoreDNS zone file that `setup`
   updates and Grafana's dashboards directory that the `monitoring` job fills (2.7b). It builds container images with
   **rootless** Podman (`podman build`; no daemon, no socket, nothing root-owned) (and, with the
   Packer option, golden images on `/dev/kvm`), and reaches everything else over the network with
@@ -1530,10 +1541,12 @@ out of any Terraform state **[verify] those resources against 4.22.1.1 before
 switching**.
 
 - **3.1a Install.** CloudStack **4.22.1.1** (LTS, end of life 2027-12-01; Ubuntu
-  24.04, Java 17), all-in-one, installed by a short Ansible role
-  (`ansible/roles/cloudstack/`, run against the host by `provision.py`):
-  - the `download.cloudstack.org` noble `4.22` repository, its key fetched and checked
-    against the fingerprint in `config/versions.toml` (a `signed-by` keyring), and an apt pin
+  24.04, Java 17), all-in-one, installed by plain Python in `src/host/cloudstack.py`
+  (decided 2026-11-12: host setup stays imperative, like the rest of `src/host/`; no Ansible role):
+  - the `download.cloudstack.org` noble `4.22` repository, its key downloaded on every
+    run to `/etc/apt/keyrings/cloudstack.asc`, Docker style (decided 2026-11-12: the vendor's
+    documented method; no fingerprint check), trusted for this repository only through
+    `signed-by=`, not `trusted.gpg.d` as the guide shows, and an apt pin
     on the exact version, so an upgrade never moves the schema underneath. First,
     `apt-get update` must succeed and `apt-cache policy cloudstack-management` must
     offer the pinned version; otherwise stop, naming the repository (its noble 4.22
@@ -1550,8 +1563,9 @@ switching**.
     enabled
 
   **The lab installs CloudStack itself; it does not run the installer** (decided
-  2026-11-10): the same commands as `get.cloudstack.cloud/install.sh`, in its order
-  (read its install and zone functions as the reference), but pinned, without prompts,
+  2026-11-10): the steps of the **official 4.22 Installation Guide** (reference, 2026-11-12:
+  `docs.cloudstack.apache.org/en/4.22.0.0/installguide/` → `management-server/` and
+  `hypervisor/kvm.html`), in its order (`get.cloudstack.cloud/install.sh` only as a cross-check), but pinned, without prompts,
   re-runnable without a tracker file, and with a `destroy`. None of the upstream
   script's insecure defaults are carried
   over. No libvirt `auth_tcp="none"`: libvirt's TCP listener stays off, since one host
@@ -1595,13 +1609,12 @@ switching**.
   route from 2.6 now has a backend); `cmk` logs in with the admin API keys; the old
   default password is rejected; `virsh net-list --all` shows no `default`; `HOST_IP`
   is on `cloudbr0` and the Phase 2 services still answer on it; a second run changes
-  nothing (Ansible reports no changes, no database is deployed); with the newest
+  nothing (every part logs "already", no database is deployed); with the newest
   `cloud.version` row changed by hand (and changed back afterwards), 3.1a refuses,
   naming both versions.
 
-  ⤷ **Needs** 2.6, 2.10 · **Recalls** `gw.hosts`, `fw.host`, `net.host`,
-  `vault.mount.kv`, `path.toolchain` · **Produces** `provision.py` (install),
-  `ansible/roles/cloudstack/`, `lib/cloudstack.py` · **Records** `cs.api`,
+  ⤷ **Needs** 2.6, 2.5c · **Recalls** `gw.hosts`, `fw.host`, `net.host`,
+  `vault.mount.kv` · **Produces** `src/host/cloudstack.py` (install) · **Records** `cs.api`,
   `cs.version`, `cs.repo`, `vault.kv.cs-admin`, `cs.nfs-ports`; the `cloudbr0` netplan
   file · **Check** Exit
 - **3.1b Bridge netfilter** (before the zone, so no system VM ever starts with its
@@ -1777,14 +1790,14 @@ switching**.
   `labadmin`, per console (decided 2026-11-11, replacing read-only `operator` logins:
   whoever runs `bootstrap.sh` is root on the host). Passwords are random, one per
   console. Vault's own is kept in `state/credentials` (root `0600`), the one file a person
-  needs; the other four in Vault KV at `kv/lab/consoles/{cloudstack,gitea,minio,grafana}`
+  needs; the other three in Vault KV at `kv/lab/consoles/{cloudstack,gitea,grafana}`
   (fields `url`, `username`, `password`; written by `lab-bootstrap`, read by `lab-admin`,
   never by `lab-pipeline`), so after logging in to Vault's UI every other login is one
   click away (decided 2026-11-12). The platform env files render MinIO's and Grafana's
   admin passwords from these same entries:
   - Vault: `auth/userpass`, user `labadmin`, policy `lab-admin` (every path, as the root
     token had before 2.5e revoked it), token TTL 8 h
-  - MinIO: the root user is `labadmin` (`MINIO_ROOT_USER`)
+  - MinIO (only with optional 2.7): the root user is `labadmin` (`MINIO_ROOT_USER`)
   - CloudStack: account `labadmin`, root admin; the default `admin` gets a random
     password as well, so `admin`/`password` never works
   - Gitea: `labadmin`, site admin (`gitea admin user create --admin`)
@@ -1801,10 +1814,10 @@ switching**.
   `up`, the new passwords work and the old ones fail; from a `LAN_CIDR` source
   (`cmd.netns-test`) 443 and 8200 time out.
 
-  ⤷ **Needs** 3.2a, 2.7, 2.7b, 2.8, 2.5e · **Recalls** `vault.addr`, `gw.hosts`, `minio.url`,
+  ⤷ **Needs** 3.2a, 2.7b, 2.8, 2.5e · **Recalls** `vault.addr`, `gw.hosts`,
   `mon.backends`, `gitea.users`, `cs.api`, `cmd.netns-test` · **Produces** `consoles.py`
-  (run by the platform phase), the five logins, `state/credentials` · **Records**
-  `console.urls`, `path.credentials`, `vault.kv.consoles` · **Check** Exit; C1 (five consoles)
+  (run by the platform phase), the four logins, `state/credentials` · **Records**
+  `console.urls`, `path.credentials`, `vault.kv.consoles` · **Check** Exit; C1 (four consoles)
 
 ### Phase 4 — VM image
 
@@ -1904,18 +1917,22 @@ MinIO `images/` with the gateway's `:80` route, and `secstorage.allowed.internal
 - **5.1 Provider and remote state.** Pinned `cloudstack/cloudstack` provider (0.7.0) and
   `ansible/ansible` provider (for the inventory resources, rule 8), lock file
   committed; provider `api_url = https://cloudstack.lab.test/client/api` (through the
-  gateway). S3 backend on MinIO: `endpoints.s3 = https://minio.lab.test`,
-  `use_path_style`, `use_lockfile`, a dummy `region`, and the flags a non-AWS S3 needs
-  (`skip_credentials_validation`, `skip_region_validation`,
-  `skip_requesting_account_id`, `skip_metadata_api_check`, `skip_s3_checksum`). `iac`
-  keys and MinIO credentials are injected from Vault as environment variables at run
+  gateway). **Local backend** (decided 2026-11-12, 2.7 optional): `backend "local" { path =
+  "/var/lib/lab/tfstate/terraform.tfstate" }`, outside the job workspace so it survives
+  between jobs, owned by `lab-runner` (`0700` directory, `0600` file: the state holds
+  secrets); Terraform's own file lock is the locking, enough for one runner that runs one
+  job at a time; phase 9 backs the file up with the Vault snapshot. (With optional 2.7: an
+  S3 backend on MinIO, `endpoints.s3 = https://minio.lab.test`, `use_path_style`,
+  `use_lockfile`, a dummy `region`, and `skip_credentials_validation`,
+  `skip_region_validation`, `skip_requesting_account_id`, `skip_metadata_api_check`,
+  `skip_s3_checksum`.) `iac` keys are injected from Vault as environment variables at run
   time; data lookups for zone, offerings, template, mgmt network id.
   `pr.yml` plans with `-lock=false`: PR jobs only read state, and must never block a
   `deliver` run (the runner runs one job at a time, so they cannot overlap anyway).
-  Exit: `terraform init` + `validate` against the MinIO backend; `terraform state list`
-  is empty (the state object is first written by the first gated apply, 5.3b).
+  Exit: `terraform init` + `validate` with the local backend; `terraform state list`
+  is empty (the state file is first written by the first gated apply, 5.3b).
 
-  ⤷ **Needs** 4.0, 3.3a · **Recalls** `cs.api`, `vault.kv.iac`, `minio.users`,
+  ⤷ **Needs** 4.0, 3.3a · **Recalls** `cs.api`, `vault.kv.iac`,
   `cs.offering.*`, `cs.network.mgmt`, `img.template` · **Produces** `terraform/`
   provider + backend + data, `lib/terraform.py` · **Records** `tf.backend` (bucket,
   key), `tf.env` (how credentials arrive) · **Check** Exit
@@ -3330,7 +3347,7 @@ step depends on something already deleted. Every row tolerates "already gone".
 | 2 | `mesh` | break-glass kubeconfig | Kustomization `mesh` with pruning (Flux uninstalls the Istio HelmReleases), Secret `istio-system/istio-ca-secret` (made by istiod, so Flux does not prune it) |
 | 3 | `cluster` | break-glass kubeconfig | the root Kustomization, `platform` (Gateway API CRDs, namespaces, `access/`), `flux uninstall`; Vault `auth/k3s` and the `k3s-creds/` mount; then deletes `kv/lab/breakglass/k3s-admin` (read last, by this row) and `kv/lab/pipeline/gitea-flux` |
 | 5 | `tunnel`, `base` | inventory | nothing to undo on VMs that are about to be destroyed; WireGuard public keys in Vault (`kv/lab/pipeline/wg/*`) |
-| 6 | `setup` | Vault (`iac`, the `tfstate` MinIO user) | `terraform destroy` (run directly, not through the policy gate, which forbids destroying the public IP); then the state object; the `app.lab.test` and `k3s.lab.test` records |
+| 6 | `setup` | Vault (`iac`) | `terraform destroy` (run directly, not through the policy gate, which forbids destroying the public IP); then the state file; the `app.lab.test` and `k3s.lab.test` records |
 | 7 | `image` (*destroy only*) | Vault (admin) | the CloudStack template; MinIO `images/*` (Packer option) |
 | 8 | `provision` (*destroy only*) | — | CloudStack: services, system VMs, `cloud` and `cloud_usage` DBs, then **purges** `/var/lib/mysql` (an old `cloud` DB left there would poison a reinstall, rule 2), `/etc/cloudstack/` (the generated `key` file outlives a package purge), NFS exports and `/export/*`, `/etc/nfs.conf` pins, the management server's key line in root's `authorized_keys` (the file itself if the baseline had none), the bridge-netfilter udev rule and sysctl file, drop-ins, the CloudStack apt repository, key and version pin, `cmk` |
 | 9 | `platform` (*destroy only*) | — | unregisters the runner, removes its service; as `lab-runner`, `podman system reset --force` (its rootless images, owned by sub-UIDs); `loginctl disable-linger lab-runner`; `lab-runner`'s work directory; `docker-compose down --volumes` (gateway, Prometheus, Loki and Grafana included), then disables and removes `lab-platform.service` and runs `daemon-reload`, and disables `podman.socket`; removes any containers, the three networks and the volumes left (theirs included; Loki's bucket goes with MinIO's); the `/etc/containers/containers.conf.d/` lab file and `/var/lib/containers`; any netavark chains left in the `ip filter` and `ip nat` tables (V2) **[verify what netavark 1.4 leaves after its last network is removed]**; `lab-nftables.service`, the `inet lab` table and `/etc/lab/`; if `decision.podman-fw` chose the fallback, its apt repository and key (2.1c; V1); the systemd-resolved drop-in and the original `/etc/resolv.conf` link; the Squid logrotate rule; `/opt/lab/`; `/var/lib/lab/platform`, `/var/lib/lab/traefik` (dynamic routes, the users file) and `/var/lib/lab/grafana`; the lab CA from the host trust store |
@@ -3354,6 +3371,7 @@ kept (2.7).
 |---|---|---|
 | IaC engine | Terraform | OpenTofu: drop-in and openly licensed; a one-line swap via `TF_BIN` |
 | Secrets/KMS | Vault | OpenBao: its advantage (free namespaces) is unused by a single tenant |
+| Terraform state, object storage and IAM | **decided 2026-11-12:** local state file (5.1), Loki on its filesystem (2.7b); IAM is demonstrated with Vault: AppRole identities, HCL policies, least privilege (`lab-pipeline` denied `kv/lab/bootstrap/*` and the console logins), 1-hour tokens, root revoked | MinIO (2.7, optional): remote S3 state with locking, per-bucket users and policies; it earns its place with several runners or hosts sharing one state, not on one host, and its IAM would repeat Vault's. Production: S3/GCS or Terraform Cloud state, cloud IAM roles assumed through OIDC |
 | PKI | **decided 2026-11-11:** cfssl on the host for `lab.test CA` and `lab app CA`, Istio's built-in CA for the mesh; three roots, one trust domain each, no intermediates | Vault PKI (the earlier design: mounts `pki`, `pki_mesh`, `pki_app`, roles, sign-intermediate parameter pins, and a bootstrap certificate Vault re-issues for itself): VM keys generated where used and the pipeline signing CSRs through scoped policies, but days of work for the build window. cfssl's costs: the CA keys sit on the host, and VM keys are made on the host and handed over through Vault KV. A two-tier root/intermediate: without an offline root it adds shape, not safety |
 | Mesh trust root | a root separate from host trust (decided 2026-11-05), since 2026-11-11 **Istio's built-in self-signed root** instead of a Vault `pki_mesh` root: no host or VM trusts it, so a mesh certificate is never accepted outside the mesh | the istiod sub-CA under `lab.test CA`, DNS-constrained to `cluster.local`: it could still mint any `*.svc.cluster.local` certificate that every host client accepts (§6); a cfssl mesh root plugged in through `cacerts`: the upgrade path if time allows, a root the lab controls |
 | k3s Secrets at rest | `--secrets-encryption` (key on the node); RBAC limits who reads Secrets (8.2c) | a KMS provider plugin, so the key is off the node: the production answer; here it protects `state.db` copies, not the node (§6) |
@@ -3590,12 +3608,12 @@ loop. Import one bead per row.
 | 2.5d | Policies | 2.5c | 2 | M |
 | 2.5e | Bootstrap AppRole and root revocation | 2.5d | 2 | S |
 | 2.6 | Gateway (Traefik) | 2.5e, 2.1b | 2 | M |
-| 2.7 | MinIO | 2.6 | 2 | M |
-| 2.7b | Telemetry stores and Grafana | 2.7, 2.6, 2.5c | 2 | M |
+| 2.7 | MinIO (optional, skipped 2026-11-12) | 2.6 | 2 | M |
+| 2.7b | Telemetry stores and Grafana | 2.6, 2.5c | 2 | M |
 | 2.8 | Gitea and registry | 2.6 | 2 | M |
 | 2.9 | Squid egress proxy | 2.2, 2.3a | 2 | S |
-| 2.10 | Runner | 2.7, 2.7b, 2.8, 2.9 | 2 | M |
-| 3.1a | Install | 2.6, 2.10 | 3 | M |
+| 2.10 | Runner | 2.7b, 2.8, 2.9 | 2 | M |
+| 3.1a | Install | 2.6, 2.5c | 3 | M |
 | 3.1b | Bridge netfilter | 2.1b | 3 | S |
 | 3.1c | Zone, networks and host | 3.1a, 3.1b | 3 | M |
 | 3.1d | Storage, system VMs, enable | 3.1c | 3 | M |
@@ -3604,7 +3622,7 @@ loop. Import one bead per row.
 | 3.3b | Spike: a mgmt NIC on a VPC VM | 3.3a, 3.2a | 3 | M |
 | 3.5a | Seed, workflows and branch protection | 2.10 | 3 | M |
 | 3.5b | Hand-off: dispatch and follow | 3.5a, 3.3b | 3 | M |
-| 3.5c | Platform consoles | 3.2a, 2.7, 2.7b, 2.8, 2.5e | 3 | M |
+| 3.5c | Platform consoles | 3.2a, 2.7b, 2.8, 2.5e | 3 | M |
 | 4.0 | Cloud image template | 3.2a, 3.3b, 3.5b | 4 | S |
 | 4.1a | Build through the proxy (option) | 2.9, 1.3, 3.5b | 4 | M |
 | 4.1b | Image contents (option) | 4.1a, 2.5b | 4 | S |

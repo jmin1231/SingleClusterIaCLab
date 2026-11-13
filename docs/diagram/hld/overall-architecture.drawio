@@ -1,6 +1,6 @@
 <mxfile host="65bd71144e">
     <diagram id="hld" name="HLD">
-        <mxGraphModel dx="2446" dy="1658" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1700" pageHeight="1680" math="0" shadow="0">
+        <mxGraphModel dx="1850" dy="1077" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1700" pageHeight="1680" math="0" shadow="0">
             <root>
                 <mxCell id="0"/>
                 <mxCell id="1" parent="0"/>
@@ -56,11 +56,8 @@
                 <mxCell id="hld-17" parent="hld-16" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" value="&lt;b&gt;Gitea&lt;/b&gt;&lt;br&gt;git · registry" vertex="1">
                     <mxGeometry height="80" width="180" x="20" y="40" as="geometry"/>
                 </mxCell>
-                <mxCell id="hld-18" parent="hld-16" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" value="&lt;b&gt;MinIO&lt;/b&gt;&lt;br&gt;S3" vertex="1">
-                    <mxGeometry height="80" width="180" x="215" y="40" as="geometry"/>
-                </mxCell>
                 <mxCell id="hld-19" parent="hld-16" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" value="&lt;b&gt;Grafana&lt;/b&gt;&lt;br&gt;dashboards" vertex="1">
-                    <mxGeometry height="80" width="180" x="410" y="40" as="geometry"/>
+                    <mxGeometry height="80" width="180" x="215" y="40" as="geometry"/>
                 </mxCell>
                 <mxCell id="hld-20" parent="hld-16" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" value="&lt;b&gt;Prometheus&lt;/b&gt;&lt;br&gt;metrics" vertex="1">
                     <mxGeometry height="80" width="180" x="20" y="135" as="geometry"/>
@@ -284,7 +281,10 @@
                         <mxPoint x="1294" y="1584" as="targetPoint"/>
                     </mxGeometry>
                 </mxCell>
-            <mxCell id="hld-md" value="Each part explained in words: &lt;b&gt;overall-architecture.md&lt;/b&gt; (same folder)" style="text;html=1;align=left;verticalAlign=middle;whiteSpace=wrap;" vertex="1" parent="1"><mxGeometry x="40" y="1640" width="600" height="30" as="geometry"/></mxCell></root>
+                <mxCell id="hld-md" parent="1" style="text;html=1;align=left;verticalAlign=middle;whiteSpace=wrap;" value="Each part explained in words: &lt;b&gt;overall-architecture.md&lt;/b&gt; (same folder)" vertex="1">
+                    <mxGeometry height="30" width="600" x="40" y="1640" as="geometry"/>
+                </mxCell>
+            </root>
         </mxGraphModel>
     </diagram>
 </mxfile>

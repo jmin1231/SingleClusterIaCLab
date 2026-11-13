@@ -30,7 +30,6 @@ Containers run by Podman and started together by Compose, on the address pool
 |---|---|
 | Traefik | The front door on port 443. Routes by name (`*.lab.test` → `10.250.0.1`) to the services behind it. Port 80 serves only the VM template images, for CloudStack's SSVM to download. |
 | Gitea | Git hosting and the container registry. |
-| MinIO | S3 storage for VM images, Terraform state and logs, plus a web console. |
 | Grafana | Dashboards over the metrics and logs. |
 | Prometheus | Stores metrics. Alloy on the cluster pushes to it (remote write). |
 | Loki | Stores logs. Alloy pushes to it. |

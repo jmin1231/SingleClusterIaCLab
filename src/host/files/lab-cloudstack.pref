@@ -1,0 +1,3 @@
+Package: cloudstack-*
+Pin: version 4.22.1.1
+Pin-Priority: 1001

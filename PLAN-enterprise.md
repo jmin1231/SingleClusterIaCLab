@@ -41,18 +41,11 @@ working scope:
 
 1. Done: preflight, `cloudbr1`, chrony, Podman, CoreDNS, Vault (2.4a–2.5e, host trust
    2.5b deferred), cfssl PKI (2.5a), Traefik (2.6). MinIO (2.7) optional, skipped.
-   **Working on now (2026-11-13): 3.1c** (zone, networks, host). 3.1a and 3.1b are done
-   (3.1b: all three `bridge-nf-call-*` read 0 after `up`; files under `/etc/sysctl.d` and
-   `/etc/udev/rules.d`). Code moved to `src/services/{podman,cloudstack}/` the same day.
-   **3.1c left off here:** the user writes it (API code is theirs, to learn the API) in
-   `src/services/cloudstack/zone/zone.py`. Done: `cs_api(keys, command, **params)`, signed
-   GET to `127.0.0.1:8080` (signature self-check and the 401 error path tested; the live
-   `listZones` → `{}` test needs root, not yet run). Next: `wait_job(keys, jobid)` (poll
-   `queryAsyncJobResult`: 0 running, 1 done, 2 failed; with a deadline), then the calls in
-   order: zone → 2 physical networks + traffic types → providers → pod → public range →
-   cluster → authorized_keys → addHost → `host.reserved.mem.mb`. Proposed ranges (not yet
-   decided): pod `.80–.89`, public `.90–.109`, below VMware's DHCP `.128–.254`.
-   Then 3.1d before the cutoff (item 3).
+   **CloudStack dropped (decided 2026-11-14, by the user):** phase 3 is replaced by plain KVM
+   with the Terraform libvirt provider; the VPC is mimicked by three isolated libvirt networks
+   (see **Dropped and deferred**). 3.1c (zone build, `src/services/cloudstack/zone/zone.py`)
+   was written but never run. The code was moved out of the repo to `../cloudstack-archive/` (2026-11-14).
+   **Next:** remove CloudStack from the host, then item 5.
    **Done (2026-11-12 to 2026-11-13): 3.1a** in `src/services/cloudstack/cloudstack.py`, five parts: (1) repo + packages
    ✅ (4.22.1.1 installed); (2) MySQL ✅ tested, `nfs()` ✅ tested (one `/export` line to the LAN
    subnet, plus a `write_file()` helper in `src/lib/system.py`); (3) `cloudbr0` ✅ tested
@@ -65,8 +58,8 @@ working scope:
    limits lines); not yet cloudbr0, NFS, MySQL config, repo, packages.
 2. Vault 2.4b (init, unseal), 2.5a–2.5b (cfssl PKI, host trust), 2.5c–2.5e (KV,
    policies, AppRole): Vault holds the pipeline's secrets, read through AppRole.
-3. CloudStack, phase 3 (3.1a–3.2a, 3.3a): the longest and riskiest step, so first.
-   **Cutoff (decided 2026-11-13):** if the system VMs (SSVM, CPVM) are not running by the
+3. ~~CloudStack, phase 3~~ **replaced 2026-11-14 by plain KVM + Terraform libvirt** (the cutoff
+   below was taken: no system VMs by the end of 2026-11-14). **Cutoff (decided 2026-11-13):** if the system VMs (SSVM, CPVM) are not running by the
    end of 2026-11-14, switch to plain KVM with the Terraform libvirt provider (pin the
    version: v0.9.0 was a breaking rewrite). Everything else carries over; the hand-built
    VPC (libvirt networks + host routing + nftables) then goes in §15 as a scope cut for R1.
@@ -74,15 +67,18 @@ working scope:
 4. ~~MinIO (2.7)~~ **optional, skipped** (decided 2026-11-12): Terraform state is a local
    file (5.1) and Loki stores on its own volume (2.7b); IAM is shown with Vault (§15).
 5. Gitea and the runner (2.8, 2.10).
-6. Terraform through the pipeline (phase 5): VPC, tier, VM, local state in `/var/lib/lab/tfstate/`. VMs boot the stock
-   Ubuntu cloud image (4.0); until Squid (2.9) exists, the VPC's source NAT gives them egress.
+6. Terraform through the pipeline (phase 5, to be rewritten for the libvirt provider): three isolated networks, VMs, local state in `/var/lib/lab/tfstate/`. VMs boot the stock
+   Ubuntu cloud image (4.0); until Squid (2.9) exists, egress comes from the libvirt side (to be decided in phase 5).
 7. Ansible through the pipeline (6.1a's `base` role).
 8. Grafana with Prometheus (2.7b), node-exporter on the host and on the VMs, so a new
    VM appears on the dashboard.
 9. Consoles (3.5c, admin logins) and `teardown`/`destroy` for all of it (phase 13).
+10. **Security, back in scope** (decided 2026-11-14, by the user, with the time CloudStack
+    freed), built once items 5–7 work: host SSH hardening (the §15 option), Squid (2.9),
+    the host firewall (2.2, now without CloudStack's ports; it must fit Podman's and libvirt's
+    own nftables rules, see 2.1c).
 
-If time allows, in this order: the host firewall (2.2), the gateway (2.6), Squid
-(2.9), WireGuard (6.2), k3s with Istio STRICT mTLS on the
+If time allows, in this order: WireGuard (6.2), k3s with Istio STRICT mTLS on the
 built-in CA (8.1–8.3), the app and database (8.4–8.7), backup and DR (phase 9), the rest.
 
 **Scope cut (decided 2026-11-13, by the user):** about 70 of the 90 steps were left with
@@ -102,7 +98,8 @@ section as the production answer. §15 is different: it compares tools and desig
 
 | What | Step | Decided | Why | What the review gets instead |
 |---|---|---|---|---|
-| Host firewall (nftables, default-drop) | 2.2 | 2026-11-13 | time: ~70 steps left, six days to the review | §5's port table as the design. Until then NFS, CloudStack's `:8080` and the agent port `:8250` are reachable from the LAN: answer it, don't hide it (a private VMware NAT network, a lab that lives a day or two) |
+| CloudStack (zone, system VMs, built-in VPC, `cloudstack/cloudstack` provider) | phase 3, 5.1–5.2 | 2026-11-14 | the cutoff of 2026-11-13 was reached with no system VMs; the zone build was getting too long to own and explain; a vendored installer (as an earlier lab used) would conflict with 3.1a and rule 17 | plain KVM with the Terraform libvirt provider (`dmacvicar/libvirt`, version pinned: v0.9.0 was a breaking rewrite); R1's VPC is **mimicked** by three isolated libvirt networks (`tier-frontend`, `tier-tunnel`, `tier-backend`), with WireGuard unchanged. CloudStack's design stays in phase 3 as the production answer |
+| ~~Host firewall (nftables, default-drop)~~ **back in scope 2026-11-14 (build order item 10)** | 2.2 | 2026-11-13 | time: ~70 steps left, six days to the review | §5's port table as the design. Until then NFS, CloudStack's `:8080` and the agent port `:8250` are reachable from the LAN: answer it, don't hide it (a private VMware NAT network, a lab that lives a day or two) |
 | NFS `statd`/`lockd` port pins | 3.1a | 2026-11-13 | only needed so 2.2 could allow them; dropped with it | — |
 | Backup, restore drill, DR drill, crypto-shredding | phase 9 (R3) | 2026-11-13 | time | a walkthrough: the Vault snapshot, the database backup, the restore order, and how destroying the Transit key makes every copy unreadable (crypto-shredding). **Check** that R3 ("show key loss destroys it") may be shown as design rather than a demo |
 | MinIO (object storage, S3 state) | 2.7 | 2026-11-12 | one host and one runner need no shared state; its IAM would repeat Vault's | local Terraform state (5.1), Loki on its own volume (2.7b), IAM shown with Vault (§15) |
@@ -116,7 +113,7 @@ section as the production answer. §15 is different: it compares tools and desig
 
 | What | Step | Decided | If dropped |
 |---|---|---|---|
-| Squid egress proxy | 2.9 | 2026-11-13 | VMs reach the internet through the VPC's source NAT; the runner pulls directly; 6.1a's `base` role sets no proxy |
+| ~~Squid egress proxy~~ **back in scope 2026-11-14 (build order item 10)** | 2.9 | 2026-11-13 | VMs reach the internet through the VPC's source NAT; the runner pulls directly; 6.1a's `base` role sets no proxy |
 
 **Moved later**
 
@@ -140,14 +137,13 @@ section as the production answer. §15 is different: it compares tools and desig
 
 | What | Step | Why it waits |
 |---|---|---|
-| Traefik route for `cloudstack.lab.test` | 3.1a / 3.5c | the UI and Terraform in the runner need it; bootstrap uses `127.0.0.1:8080` |
-| The rest of `cloudstack.down()`: `cloudbr0`, NFS, MySQL config, repo, packages, the agent's `br_netfilter` line in `/etc/modules`, the `authorized_keys` line | 3.1a, 3.1c / 13.1b | `destroy` must remove everything the lab added (R4) |
+| The rest of `cloudstack.down()`: `cloudbr0`, NFS, MySQL config, repo, packages, the agent's `br_netfilter` line in `/etc/modules` | 3.1a / now (CloudStack dropped 2026-11-14) | the host must lose everything CloudStack added (R4); libvirt itself stays for the KVM path |
 
 **Conditional**
 
 | What | Decided | Trigger |
 |---|---|---|
-| CloudStack itself → plain KVM + Terraform libvirt provider | 2026-11-13 | no running system VMs (SSVM, CPVM) by the end of 2026-11-14; the hand-built VPC then goes in this section as a cut for R1 |
+| ~~CloudStack itself → plain KVM + Terraform libvirt provider~~ | 2026-11-13 | **triggered 2026-11-14**, now under **Dropped from the build** |
 
 ---
 
@@ -1560,7 +1556,10 @@ runbook (14.4): a subshell with `VAULT_TOKEN` from a `lab-bootstrap` AppRole log
   ⤷ **Needs** 2.2, 2.3a · **Recalls** `fw.host`, `cmd.netns-test` · **Produces**
   `platform/squid/` · **Records** `proxy.url`, `proxy.log`; `proxy.allowlist` · **Check**
   Exit
-- **2.10 Runner.** One `act_runner`, registered to repository `lab/lab` only, as a
+- **2.10 Runner.** (Checked 2026-11-14: `act_runner` was renamed **`gitea/runner`**, binary
+  `gitea-runner`; v6.0.0 of 2026-11-11 needs Gitea ≥ 1.26.2 and removed `builtin:checkout`,
+  neither of which affects this lab. "act_runner" below means this runner.)
+  One `act_runner`, registered to repository `lab/lab` only, as a
   systemd service (`lab-runner.service`; job logs in Gitea, the runner's own log in
   `journalctl -u lab-runner`) under a dedicated non-root user `lab-runner` with a
   **fixed UID/GID** (`runner.uid` in `config/lab.toml`, default 1990, so files kept in
@@ -1613,6 +1612,9 @@ runbook (14.4): a subshell with `VAULT_TOKEN` from a `lab-bootstrap` AppRole log
   (path), `runner.owned-paths` · **Check** Exit
 
 ### Phase 3 — CloudStack (part of the platform, run by bootstrap)
+
+**Dropped 2026-11-14** (see **Dropped and deferred**): replaced by plain KVM and the Terraform
+libvirt provider. Kept below as the production design; nothing in this phase is built.
 
 Where to look when it goes wrong, from the first step: the management server log
 (`/var/log/cloudstack/management/management-server.log`), the KVM agent log
@@ -1854,7 +1856,7 @@ switching**.
   restart `cloudstack-agent`: `cloudstack-setup-agent`'s `configFileOps.save()` matches
   `^\ *host.*` to set `host=`, which also overwrites a `host.reserved.mem.mb=` line.
   Ranges stay below `.128` on a VMware NAT LAN (its DHCP pool is `.128–.254`); the §5
-  examples `.180–.209` would collide. Ubuntu's default `PermitRootLogin
+  examples `.180–.209` would collide. Decided 2026-11-14: pod (system VMs' management NICs) `.80–.89`, public `.90–.109`, both as offsets in the host's LAN. Ubuntu's default `PermitRootLogin
   prohibit-password` admits a key, and `from=` keeps that key usable from the host only.
   Exit: `cmk list hosts` shows the KVM host Up in a Disabled Advanced zone with both
   physical networks and their tags; host services from Phase 2 still reachable on
@@ -2127,6 +2129,10 @@ MinIO `images/` with the gateway's `:80` route, and `secstorage.allowed.internal
   **Check** Exit
 
 ### Phase 5 — Terraform: VPC, tiers, VMs
+
+**To be rewritten for the libvirt provider** (decided 2026-11-14): three isolated libvirt
+networks in place of the VPC and its tiers, libvirt domains in place of CloudStack instances.
+The text below is still the CloudStack version.
 
 - **5.1 Provider and remote state.** Pinned `cloudstack/cloudstack` provider (0.7.0) and
   `ansible/ansible` provider (for the inventory resources, rule 8), lock file

@@ -1,0 +1,9 @@
+# Only the Podman stack comes from home:alvistack (the origin server: mirrors lag behind its index)
+Package: podman podman-netavark podman-aardvark-dns buildah skopeo conmon crun containers-common containers-storage catatonit containernetworking containernetworking-plugins passt
+Pin: origin downloadcontent.opensuse.org
+Pin-Priority: 990
+
+# Everything else in that repo: never
+Package: *
+Pin: origin downloadcontent.opensuse.org
+Pin-Priority: -1

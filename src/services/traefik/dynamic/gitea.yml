@@ -9,4 +9,4 @@ http:
     gitea:
       loadBalancer:
         servers:
-          - url: "http://whoami:8080"
+          - url: "http://gitea:3000"

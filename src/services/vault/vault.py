@@ -191,7 +191,7 @@ def up(certs_changed: bool) -> None:
     """
     # --wait returns once the healthcheck passes, which it does while sealed.
     compose("vault", "up", "-d", "--wait", "--wait-timeout", "60",
-            *(["--force-recreate"] if certs_changed else ["--no-recreate"]))
+            *(["--force-recreate"] if certs_changed else []))
     init()
     keys = json.loads(VAULT_INIT_FILE.read_text())
     unseal(keys["keys_base64"][0])

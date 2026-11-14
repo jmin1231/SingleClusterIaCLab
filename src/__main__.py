@@ -10,11 +10,11 @@ from src.host import network, ntp, preflight
 from src.lib import pki
 from src.lib.config import STATE_DIR
 from src.lib.log import setup_logging
-from src.services.cloudstack import cloudstack
 from src.services.coredns import dns
 from src.services.podman import podman
 from src.services.traefik import traefik
 from src.services.vault import vault
+from src.services.gitea import gitea
 
 log = logging.getLogger(__name__)
 
@@ -30,7 +30,7 @@ def cmd_up() -> None:
     certs_changed = pki.up()
     vault.up(certs_changed)
     traefik.up(certs_changed)
-    cloudstack.up()
+    gitea.up()
 
 
 def cmd_update() -> None:
@@ -43,7 +43,7 @@ def cmd_teardown() -> None:
 
 def cmd_destroy() -> None:
     # Reverse of up: services before the Podman they run on, chrony and CoreDNS before cloudbr1
-    cloudstack.down()
+    gitea.down()
     traefik.down()
     vault.down()
     pki.down()
@@ -95,7 +95,11 @@ def main(argv: list[str] | None = None) -> int:
             return 1
 
         func, _ = COMMANDS[args.command]
-        func()
+        try:
+            func()
+        except KeyboardInterrupt:
+            log.error("%s interrupted; run it again to continue", args.command)
+            return 130
 
     return 0
 

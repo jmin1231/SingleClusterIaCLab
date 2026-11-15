@@ -1,0 +1,17 @@
+version: 2
+ethernets:
+    eth0:
+        match:
+            macaddress: "${tier_mac}"
+        set-name: eth0
+        addresses: [${tier_ip}/24]
+        routes:
+            - to: default
+              via: ${gateway}
+    eth1:
+        match:
+            macaddress: "${mgmt_mac}"
+        set-name: eth1
+        addresses: [${mgmt_ip}/24]
+        nameservers:
+            addresses: [10.250.0.1]

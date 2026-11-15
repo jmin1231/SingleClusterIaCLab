@@ -1,0 +1,17 @@
+#cloud-config
+users:
+    - name: user
+      groups: [sudo]
+      shell: /bin/bash
+      sudo: "ALL=(ALL) NOPASSWD: ALL"
+      lock_passwd: true
+      ssh_authorized_keys:
+        - ${ssh_public_key}
+
+ssh_pwauth: false
+disable_root: true
+
+ca_certs:
+    trusted:
+        - |
+          ${indent(10, lab_ca_cert)}

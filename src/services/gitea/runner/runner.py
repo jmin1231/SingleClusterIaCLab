@@ -32,7 +32,7 @@ def ensure_user() -> None:
             check=True,
         )
         log.info("user %s created", USER)
-    # Every run: a crash after useradd must not leave the user without libvirt
+
     subprocess.run(["usermod", "-aG", "libvirt", USER], check=True)
 
 
@@ -95,14 +95,12 @@ def ensure_service(changed: bool) -> None:
         subprocess.run(["systemctl", "daemon-reload"], check=True)
         changed = True
 
-    if systemctl_ok("is-active", SERVICE) and not changed:
-        log.info("%s is already running", SERVICE)
-        return
-
-    subprocess.run(["systemctl", "enable", "--now", SERVICE], check=True)
-    if changed:
+    subprocess.run(["systemctl", "enable", SERVICE], check=True)
+    if changed or not systemctl_ok("is-active", SERVICE):
         subprocess.run(["systemctl", "restart", SERVICE], check=True)
-    log.info("%s enabled and running", SERVICE)
+        log.info("%s (re)started", SERVICE)
+    else:
+        log.info("%s is already running", SERVICE)
 
 
 def up() -> None:

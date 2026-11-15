@@ -6,7 +6,7 @@ import logging
 import sys
 from collections.abc import Callable
 
-from src.host import kvm, network, ntp, preflight
+from src.host import kvm, network, ntp, preflight, toolchain
 from src.lib import pki
 from src.lib.config import STATE_DIR
 from src.lib.log import setup_logging
@@ -28,6 +28,7 @@ def cmd_up() -> None:
     ntp.up()
     podman.up()
     kvm.up()
+    toolchain.up()
     dns.up()
     certs_changed = pki.up()
     vault.up(certs_changed)

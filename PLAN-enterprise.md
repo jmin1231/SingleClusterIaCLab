@@ -68,7 +68,7 @@ working scope:
    file (5.1) and Loki stores on its own volume (2.7b); IAM is shown with Vault (§15).
 5. Gitea and the runner (2.8, 2.10).
 6. Terraform through the pipeline (phase 5, to be rewritten for the libvirt provider): three isolated networks, VMs, local state in `/var/lib/lab/tfstate/`. VMs boot the stock
-   Ubuntu cloud image (4.0); until Squid (2.9) exists, egress comes from the libvirt side (to be decided in phase 5).
+   Ubuntu cloud image (4.0); phase 5 needs no egress, and Squid (2.9) is built before 6.1a (decided 2026-11-15). Host as VPC router, provider `dmacvicar/libvirt` 0.9.9 (phase 5).
 7. Ansible through the pipeline (6.1a's `base` role).
 8. Grafana with Prometheus (2.7b), node-exporter on the host and on the VMs, so a new
    VM appears on the dashboard.
@@ -120,6 +120,7 @@ section as the production answer. §15 is different: it compares tools and desig
 | What | Step | Decided | Where it goes |
 |---|---|---|---|
 | Monitoring and observability: Prometheus, Loki, Grafana, k8s-monitoring, dashboards | 2.7b, 8.8a–8.8d (R6) | 2026-11-13 | after everything else works |
+| Conftest policy gate (5.3a) and its use in `setup` (5.3b) and `pr.yml` (10.1) | 5.3a | 2026-11-15 | if time permits, after the core pipeline works: the lab already has many moving parts; until then `setup` runs checks → plan → apply and the plan is read in the pull request |
 | Host trust (lab CA in the host store) | 2.5b | 2026-11-12 | when a person or host tool must reach a lab URL without `--cacert`; services get the CA file directly |
 
 **Dropped within a step** (smaller design choices)
@@ -244,7 +245,9 @@ left out, and why, is in §15.
   pinned in `config/versions.toml`. Images are built, scanned and published once, then
   never patched in place. Nothing installs software at container start.
 - **Gates before change.** Terraform cannot apply
-  without passing the policy gate, on the local path and in CI alike.
+  without passing the policy gate, on the local path and in CI alike. (**Deferred
+  2026-11-15:** the conftest gate, 5.3a, waits until the core pipeline works; until then
+  the gates are branch protection and `setup`'s pre-checks.)
 - **Fresh host assumed, dirty host refused.** Preflight refuses a host showing
   leftovers from an earlier install rather than trying to work around them.
 
@@ -970,31 +973,33 @@ network).
   the memory reader, `LabError` (in `lab/__init__.py`, logged by `main()`, exit 1) ·
   **Records** `net.host` (card, `HOST_IP`, prefix, `LAN_GATEWAY`, as recorded in the
   baseline), `host.memory` · **Check** Exit
-- **1.3 Toolchain.** Creates `config/versions.toml` with this step's pins (data only:
-  values in TOML, code in `lab/`; later steps add theirs, §5) and `load_config()` in
-  `__main__.py`: it loads the TOML files with the stdlib `tomllib` and checks each key
-  in its key table is present with the right type (`type(v) is int`: TOML `true` is
-  not an int), refusing with the file and the key. It moves to its own module when the
-  first pipeline job needs it (Phase 4: jobs run `python3 -m lab.<module>` and never
-  pass through `__main__`). Pinned CLIs into `/opt/lab/bin`, each verified against a
-  SHA-256 in `config/versions.toml`: terraform, packer (option), ansible (venv in `/opt/lab/ansible`,
-  with the `cloud.terraform` collection), conftest, trivy, cmk (CloudMonkey, CloudStack's
-  CLI), docker-compose (v2, run against Podman's socket, 2.1b), kubectl, istioctl, flux, helm, vault, mc, kubeconform. Host packages, from the Ubuntu
-  archive at pinned versions: `dnsutils` (`dig`); `qemu-system-x86` and `qemu-utils`
-  only with the Packer option. Every package the lab adds is removed by
-  `destroy`, so V1 holds. An archive is never extracted whole: the one named member is read
-  and written to a fixed path (no `extractall`, so no path traversal from the archive),
-  and "already installed" means an exact word match on the version (`1.31.30` is not
-  `1.31.3`).
-  Exit: `up` logs every tool and its version, and each tool's own version command
-  (e.g. `/opt/lab/bin/terraform version`) matches `config/versions.toml`; a corrupted download
-  is rejected; a pin with a missing key or a wrong type is refused naming the file and
-  the key.
+- **1.3 Toolchain** (rewritten 2026-11-15 to match the code: pins live in
+  `src/host/config/config.py` (one config for every host step, decided 2026-11-15), not in `config/versions.toml`; no
+  `load_config()`). `src/host/toolchain.py` installs only the tools the next steps need (conftest
+  0.71.1 comes back with 5.3a, deferred 2026-11-15), and
+  each later phase adds its own (kubectl, flux, helm, istioctl, kubeconform, trivy when
+  their phase comes). Now, for phase 5 and 6.1a:
 
-  ⤷ **Needs** 1.2a · **Recalls** — · **Produces** `config/versions.toml`,
-  `load_config()`, `toolchain.py`, `/opt/lab/bin/*` · **Records** `code.config`,
-  `code.versions`, `path.toolchain` ·
-  **Check** Exit
+  | Tool | Pin | From | Installed as |
+  |---|---|---|---|
+  | terraform | 1.17.2 | `releases.hashicorp.com` zip, SHA-256 `e6f16b2f…6605b` | `/usr/local/bin/terraform` |
+  | ansible-core | 2.21.6 (2.22 needs Python 3.13; the host has 3.12) | PyPI, into a venv at `/opt/lab/ansible` (`python3-venv` from apt) | `ansible`, `ansible-playbook`, `ansible-inventory`, `ansible-galaxy` symlinked into `/usr/local/bin` |
+  | cloud.terraform | 4.0.0 | Galaxy | `/usr/share/ansible/collections` (a default path, so no env is needed) |
+
+  `/usr/local/bin`, like `gitea-runner`, so jobs find the tools on the default `PATH`
+  with nothing added to the runner's `envs`. An archive is never extracted whole: the one
+  named member is read and written (no `extractall`, so no path traversal), and
+  "already installed" means the tool's own version command matches the pin as an exact
+  word (`1.17.20` is not `1.17.2`). pip is pinned by version only (a hash-locked
+  requirements file is a §15 option). `destroy` removes exactly these files, the venv,
+  the collection and `python3-venv`, so V1 holds.
+  Exit: `up` logs every tool and its version; `terraform version`,
+  `ansible --version` and `ansible-galaxy collection list cloud.terraform` match the pins,
+  also as `lab-runner`; a corrupted download is rejected; an unchanged re-run downloads
+  nothing.
+
+  ⤷ **Needs** 1.2a · **Recalls** — · **Produces** `src/host/toolchain.py`, its section of `src/host/config/config.py` ·
+  **Records** `path.toolchain` (`/usr/local/bin`, `/opt/lab/ansible`) · **Check** Exit
 
 ### Phase 2 — Control plane
 
@@ -1136,6 +1141,19 @@ runbook (14.4): a subshell with `VAULT_TOKEN` from a `lab-bootstrap` AppRole log
   ⤷ **Needs** 2.1b · **Recalls** `podman.pool`, `net.vmnet` · **Produces** nothing kept
   · **Records** `spike.netavark-fw` (driver, versions, chain names, the rule order that
   passed) · **Check** Exit
+- **2.1d KVM and libvirt** (added 2026-11-14, when CloudStack was dropped; built in
+  `src/host/kvm.py`, run after Podman). Installs `libvirt-daemon-system`,
+  `libvirt-daemon-driver-qemu`, `libvirt-clients`, `qemu-system-x86` and `qemu-utils`, and
+  enables `libvirtd.socket` (on 24.04 libvirtd is socket-activated, so the socket, not the
+  service, is what gets enabled). The step ends with `virsh --connect qemu:///system list
+  --all`, so a broken daemon fails here, not later inside a Terraform job. Networks, VMs and
+  volumes belong to Terraform (phase 5); `destroy` only purges the packages, after Terraform
+  has removed what it created.
+  Exit: `systemctl is-active libvirtd.socket` is `active` and the `virsh` call succeeds
+  (checked 2026-11-15: libvirt 10.0.0).
+
+  ⤷ **Needs** 1.2a · **Produces** the libvirt packages, `libvirtd.socket` enabled ·
+  **Records** `libvirt.uri` (`qemu:///system`) · **Check** Exit
 - **2.2 Host firewall.** The lab's own nftables table `inet lab`, so
   netavark's and libvirt's iptables-nft rules are never edited. It is persisted as its
   own file, `/etc/lab/nftables-lab.nft` (`table inet lab` declared empty, deleted,
@@ -1564,6 +1582,21 @@ runbook (14.4): a subshell with `VAULT_TOKEN` from a `lab-bootstrap` AppRole log
   **instance-wide** (only `lab/lab` exists and registration is disabled; Gitea 2.8 stores the
   token at `kv/lab/bootstrap/gitea-runner`), with `lab-runner` in the **`libvirt`** group for
   Terraform's `qemu:///system` (CloudStack dropped). Text below that says otherwise is superseded.
+  **Registration runs as root** (built 2026-11-14): `gitea-runner register --token-file
+  /dev/stdin` opens `/dev/stdin` by path, and the pipe Python hands it is root-owned `0600`,
+  so registering through `runuser -u lab-runner` fails with permission denied. The token
+  never goes on argv (rule 17), so root registers, then `.runner` is chowned to `lab-runner`
+  (`0600`) on every run, and the root-owned `.runner.lock` that `register` leaves is deleted
+  (the daemon recreates it as `lab-runner`). `.runner` existing means registered; delete it
+  to register again.
+  **Lab CA in jobs** (decided 2026-11-15): the runner config's `runner.envs` sets
+  `GIT_SSL_CAINFO=/etc/lab-runner/ca.pem` for every job, so `git` trusts Gitea's cert. No
+  `SSL_CERT_FILE` (it replaces the whole bundle for Python and Go, cutting Terraform off from
+  the public registry; Python already passes `cafile=`), and host trust (2.5b) stays deferred.
+  **Smoke-tested 2026-11-15** in a throwaway repo `lab/smoke` (not `lab/lab`, which 3.5a needs
+  empty): a `runs-on: host` job ran as `lab-runner` (in `libvirt`, not `docker`), cloned over
+  HTTPS with the job token (passed by env-based git config, never argv), and listed
+  `qemu:///system` with `virsh`.
   One `act_runner`, registered to repository `lab/lab` only, as a
   systemd service (`lab-runner.service`; job logs in Gitea, the runner's own log in
   `journalctl -u lab-runner`) under a dedicated non-root user `lab-runner` with a
@@ -1615,7 +1648,7 @@ runbook (14.4): a subshell with `VAULT_TOKEN` from a `lab-bootstrap` AppRole log
   `/run/podman/podman.sock`, and `podman info` as `lab-runner` reports
   rootless with its own ID range.
 
-  ⤷ **Needs** 2.7, 2.7b, 2.8, 2.9 · **Recalls** `gitea.repo`, `vault.policy.*`, `dns.zones`,
+  ⤷ **Needs** 2.1d, 2.7, 2.7b, 2.8, 2.9 · **Recalls** `gitea.repo`, `vault.policy.*`, `dns.zones`,
   `mon.backends` ·
   **Produces** `lab-runner.service`, act_runner config, `/var/lib/lab/runner/` ·
   **Records** `runner.user` (UID/GID, sub-ID range), `runner.label`, `vault.approle.lab-pipeline`
@@ -2052,25 +2085,21 @@ userdata) does the per-VM setup a golden image would have baked, and the package
 from Ansible through the proxy (6.1a). A Packer golden image (4.1a–4.3) is an **option
 if time permits** (§15).
 
-- **4.0 Cloud image template.** The upstream `noble-server-cloudimg-amd64.img` from a
-  dated release (`cloud-images.ubuntu.com/releases/noble/release-<date>/`, never
-  `current/`), pinned by URL and SHA-256 in `config/versions.toml`. The `image` job, as
-  `publisher`, runs the H2 gate (3.1d), then calls `registerTemplate` (KVM, QCOW2, the
-  upstream HTTPS URL and the checksum; name `ubuntu-24.04-<date>`): the SSVM downloads it
-  and CloudStack verifies the checksum. It grants `iac` launch permission and waits until
-  the template is Ready; a re-run skips when that template is already Ready. The pin is
-  the version VMs use: moving it is a pull request, and `setup` then replaces the VMs.
-  The stock image already has cloud-init, openssh-server and python3, and ships no SSH
-  host keys and an empty machine-id, so nothing per-VM is baked.
-  If the SSVM cannot reach the internet (3.3b shows it), the job copies the pinned image
-  into MinIO `images/` and registers it from the gateway's `:80` route instead (the Packer
-  option's transport, 2.7).
-  Exit: `cmk list templates` shows the template Ready and launchable by `iac`; an
-  unchanged re-run registers nothing.
+- **4.0 Cloud image** (rewritten 2026-11-15 for libvirt). The upstream
+  `noble-server-cloudimg-amd64.img` from a dated release
+  (`cloud-images.ubuntu.com/releases/noble/release-<date>/`, never `current/`), pinned by
+  URL and SHA-256 in `config/versions.toml`. `python3 -B -m lab.image` (run by hand
+  until 5.3b, then the first thing the `setup` job runs) downloads it to
+  `/var/lib/lab/images/` (owned by `lab-runner`) and verifies the SHA-256 before use;
+  5.1 uploads it as the base volume, and each VM's disk is an overlay on it (5.4a). A
+  re-run with the file present and matching downloads nothing. The pin is the version VMs use: moving it is a pull request, and
+  `setup` then replaces the VMs. The stock image already has cloud-init, openssh-server
+  and python3, and ships no SSH host keys and an empty machine-id, so nothing per-VM is
+  baked.
+  Exit: the file's SHA-256 matches the pin; an unchanged re-run downloads nothing.
 
-  ⤷ **Needs** 3.2a, 3.3b, 3.5b · **Recalls** `cs.account.publisher`, `vault.kv.publisher`,
-  `cs.health`, `vault.kv.health`, `spike.mgmt-nic` · **Produces** `image.py`, the `image`
-  job · **Records** `img.template` (name, pin) · **Check** Exit
+  ⤷ **Needs** 2.10 · **Recalls** `runner.owned-paths` · **Produces** `lab/image.py` · **Records**
+  `img.base` (file, pin) · **Check** Exit
 
 **Option, if time permits: golden image (4.1a–4.3).** Replaces 4.0's template with a
 Packer-built image; the `image` job then builds and publishes it instead. It brings back
@@ -2138,126 +2167,162 @@ MinIO `images/` with the gateway's `:80` route, and `secstorage.allowed.internal
   `image` job (Packer mode) · **Records** `img.template`, `cfg.golden-image`; `img.version` ·
   **Check** Exit
 
-### Phase 5 — Terraform: VPC, tiers, VMs
+### Phase 5 — Terraform: networks, tiers, VMs
 
-**To be rewritten for the libvirt provider** (decided 2026-11-14): three isolated libvirt
-networks in place of the VPC and its tiers, libvirt domains in place of CloudStack instances.
-The text below is still the CloudStack version.
+**Rewritten 2026-11-15 for the libvirt provider** (CloudStack dropped 2026-11-14). R1's VPC
+is mimicked with the **host as the VPC router**: three libvirt networks in `route` mode
+(no NAT, no DHCP), the host holding `.1` on each, and a host nftables table that plays the
+VPC's ACL lists (default deny, only R1's flows allowed). §5's tier addresses, the mgmt
+addresses and the WireGuard plan are unchanged. Phase 5 needs **no internet egress**:
+the VMs boot the stock cloud image and cloud-init installs nothing; packages arrive in
+phase 6 through Squid (2.9), which is built before 6.1a.
 
-- **5.1 Provider and remote state.** Pinned `cloudstack/cloudstack` provider (0.7.0) and
-  `ansible/ansible` provider (for the inventory resources, rule 8), lock file
-  committed; provider `api_url = https://cloudstack.lab.test/client/api` (through the
-  gateway). **Local backend** (decided 2026-11-12, 2.7 optional): `backend "local" { path =
+What changes from the VPC: the ACLs are host nftables applied by `bootstrap.sh` (root),
+not Terraform resources, because the pipeline identity is not root; so the policy gate
+(5.3a, **deferred 2026-11-15**) would check topology (which VM sits on which network, no
+network that bypasses the host), and the ACLs themselves are proven by tests from inside
+the VMs (5.4a, N1). The
+public IP becomes `HOST_IP:443`, DNATed to fe-1. §15 records the VPC as the production
+answer.
+
+- **5.1 Provider, state and spike.** Terraform (pinned in `config/versions.toml`, 1.3),
+  providers **`dmacvicar/libvirt` 0.9.9** (decided 2026-11-15: the maintained line after
+  v0.9.0's rewrite; its schema follows libvirt's XML) and `ansible/ansible` (inventory
+  resources, rule 8), lock file committed; `uri = "qemu:///system"`. No credentials:
+  `lab-runner`'s `libvirt` group membership is the authentication (2.10). A storage pool
+  `lab` (type `dir`, `/var/lib/lab/pool`) holds the base volume `ubuntu-24.04-<date>`
+  (uploaded once from 4.0's file) and the VM disks.
+  **Local backend** (decided 2026-11-12): `backend "local" { path =
   "/var/lib/lab/tfstate/terraform.tfstate" }`, outside the job workspace so it survives
-  between jobs, owned by `lab-runner` (`0700` directory, `0600` file: the state holds
-  secrets); Terraform's own file lock is the locking, enough for one runner that runs one
-  job at a time; phase 9 backs the file up with the Vault snapshot. (With optional 2.7: an
-  S3 backend on MinIO, `endpoints.s3 = https://minio.lab.test`, `use_path_style`,
-  `use_lockfile`, a dummy `region`, and `skip_credentials_validation`,
-  `skip_region_validation`, `skip_requesting_account_id`, `skip_metadata_api_check`,
-  `skip_s3_checksum`.) `iac` keys are injected from Vault as environment variables at run
-  time; data lookups for zone, offerings, template, mgmt network id.
-  `pr.yml` plans with `-lock=false`: PR jobs only read state, and must never block a
-  `deliver` run (the runner runs one job at a time, so they cannot overlap anyway).
-  Exit: `terraform init` + `validate` with the local backend; `terraform state list`
-  is empty (the state file is first written by the first gated apply, 5.3b).
+  between jobs, owned by `lab-runner` (`0700` directory, `0600` file); Terraform's file
+  lock is the locking, enough for one runner running one job at a time; phase 9 backs it
+  up. `pr.yml` plans with `-lock=false`.
+  **Spike first** (a gate, like 2.1c): by hand as `lab-runner`, one `route` network and
+  one VM from 4.0's image with a cloud-init disk carrying a static network-config. It
+  proves, at 0.9.9: a `route` network with no DHCP and DNS off; a qcow2 overlay on a base
+  volume, resized; the cloud-init disk applied (static addresses, user, key); a NIC on the
+  existing `cloudbr1` bridge (no libvirt network for mgmt); fixed MAC addresses; AppArmor
+  (`virt-aa-helper`) allowing disks in `/var/lib/lab/pool` **[verify each]**. If 0.9.9
+  cannot express one of these, fall back to **0.8.3** (the old schema) and record why.
+  Exit: `terraform init` + `validate` with the local backend; `virsh vol-list lab` shows
+  the base volume; the spike VM answers SSH on
+  its mgmt address and is destroyed.
 
-  ⤷ **Needs** 4.0, 3.3a · **Recalls** `cs.api`, `vault.kv.iac`,
-  `cs.offering.*`, `cs.network.mgmt`, `img.template` · **Produces** `terraform/`
-  provider + backend + data, `lib/terraform.py` · **Records** `tf.backend` (bucket,
-  key), `tf.env` (how credentials arrive) · **Check** Exit
-- **5.2 Network.** VPC `10.0.0.0/16` on the redundant offering; tiers from §5; one ACL
-  list per tier, **default deny in both directions**. The only allow rules, each
-  written as a matching egress rule on one side and ingress rule on the other:
-  - LAN → tier-frontend: TCP 443 from `LAN_CIDR` to `10.0.1.10` (the only
-    public-facing rule)
-  - fe-1 ↔ tun-1: UDP 51820 between `10.0.1.10` and `10.0.2.10`
-  - be-1 ↔ tun-1: UDP 51821 between `10.0.3.10` and `10.0.2.10`
-  - nothing at all between tier-frontend and tier-backend
-  - **no internet egress for any tier**
+  ⤷ **Needs** 4.0, 2.1d, 2.10 · **Recalls** `libvirt.uri`, `runner.owned-paths` ·
+  **Produces** `terraform/` provider + backend + pool + base volume,
+  `lib/terraform.py` · **Records**
+  `tf.backend` (path), `tf.provider-pin`, `spike.libvirt` (what 0.9.9 needed, or why
+  0.8.3) · **Check** Exit
+- **5.2 Networks and the host router.** Two halves, applied by different identities:
+  - **Terraform (pipeline):** three `libvirt_network`s in `route` mode, each with a fixed
+    bridge name (the host table matches them) and the host's address, **no DHCP, DNS
+    off** (VMs resolve through CoreDNS on `10.250.0.1` over their mgmt NIC):
 
-  `parallelism=1` for ACL rules. Steps 5.2 and 5.3a–5.3b merge in **one** pull request:
-  `setup` applies only when `policy/` exists, and plans without applying before
-  that, so no network is ever applied ungated.
-  Exit: plan shows the VPC, tiers and ACLs; nothing applied yet.
+    | Network | Bridge | Host (gateway) | VM |
+    |---|---|---|---|
+    | tier-frontend | `tier-fe` | `10.0.1.1/24` | fe-1 `10.0.1.10` |
+    | tier-tunnel | `tier-tun` | `10.0.2.1/24` | tun-1 `10.0.2.10` |
+    | tier-backend | `tier-be` | `10.0.3.1/24` | be-1 `10.0.3.10` |
 
-  ⤷ **Needs** 5.1 · **Recalls** `tf.backend`, `net.host` (`LAN_CIDR`) · **Produces**
-  `terraform/vpc.tf`, `tiers.tf`, `acls.tf` · **Records** `net.vpc` (CIDR, tiers),
-  `tf.acls` · **Check** Exit
-- **5.3a Policy rules.** Conftest rules (OPA's Rego language) over
-  `terraform plan -json`:
-  - no ingress from `0.0.0.0/0`
-  - every tier ends in deny-all, both directions
-  - no inter-tier allow except the two WireGuard flows to tun-1
-  - no rule of any kind between tier-frontend and tier-backend
-  - written with the resources they cover (5.4a, 5.4b): every VM's default NIC is on a
-    VPC tier, and it has exactly one mgmt NIC; the only public port-forward is
-    tier-frontend 443 → fe-1; the ingress public IP is never replaced or destroyed
-    (`teardown` destroys it without the gate: §14 runs `terraform destroy` directly)
-  Exit: `conftest test` passes the real plan; fixture plans opening `0.0.0.0/0:22`, and
-  allowing tier-frontend → tier-backend on any port, are rejected.
+    The mgmt NIC attaches straight to the existing `cloudbr1` (2.1a), so there is no
+    libvirt network for it.
+  - **Host (bootstrap, root):** `src/host/vpc.py` installs table `inet lab_vpc` as its own
+    file, `/etc/lab/nftables-vpc.nft`, loaded by `lab-vpc-nftables.service` (oneshot,
+    `RemainAfterExit=yes`; the table declared, deleted and recreated in one `nft -f`, as
+    2.2 does). Its own table, so 2.2's `inet lab` later adds the input rules without
+    touching it. Rules match the bridge names, so they exist before Terraform creates
+    the bridges. `HOST_IP` and the LAN card come from the baseline (1.2a):
+    - forward (filter priority): `ct state established,related` accept; fe-1 → tun-1
+      UDP 51820 (`iifname tier-fe ip saddr 10.0.1.10 oifname tier-tun ip daddr
+      10.0.2.10`); be-1 → tun-1 UDP 51821 (same shape from `tier-be`); LAN card →
+      `tier-fe` `10.0.1.10` TCP 443 with `ct status dnat`; then **drop anything else
+      in or out of `tier-*`**. That last pair is the default deny: nothing between
+      tier-frontend and tier-backend, and **no tier reaches the LAN or the internet**
+    - input: from `tier-*` only `established,related`; VMs reach host services only
+      over their mgmt NIC, as they could only through the mgmt network before
+    - nat prerouting: LAN card, `ip daddr HOST_IP tcp dport 443` → `dnat to
+      10.0.1.10`. It runs only on the LAN card, so Traefik (which listens on
+      `0.0.0.0:443`) still never answers the LAN
 
-  ⤷ **Needs** 5.2 · **Recalls** `net.vpc`, `tf.acls` · **Produces** `policy/*.rego`,
+    libvirt's `route` networks add their own accept rules; a drop in this separate base
+    chain still wins, since a packet must pass every base chain on the hook (proven by
+    5.4a's N1 tests, not assumed). Spokes initiate WireGuard with `PersistentKeepalive`
+    (phase 6), so tun-1's replies ride `established`.
+  Steps 5.2 and 5.3b merge in **one** pull request, so the networks are first applied by
+  the `setup` job, never by hand.
+  Exit: `nft list table inet lab_vpc` shows the rules and `lab-vpc-nftables.service` is
+  active after a reboot; `terraform plan` shows the three networks; nothing applied yet.
+
+  ⤷ **Needs** 5.1, 1.2a · **Recalls** `tf.backend`, `net.host` (`HOST_IP`, LAN card,
+  `LAN_CIDR`) · **Produces** `terraform/networks.tf`, `src/host/vpc.py`,
+  `src/host/files/nftables-vpc.nft`, `lab-vpc-nftables.service` · **Records** `net.tiers`
+  (bridges, gateways), `fw.vpc` (table, file, unit) · **Check** Exit
+- **5.3a Policy rules** (**deferred 2026-11-15**, if time permits; see **Moved later**).
+  Conftest rules (OPA's Rego) over `terraform plan -json`:
+  - every `libvirt_network` is `route` mode with a `tier-*` bridge, its §5 gateway, no
+    NAT, no DHCP: **no network in `nat`, `open` or `bridge` mode**, so nothing reaches
+    the internet or bypasses the host table
+  - every VM has exactly two NICs: the first on the one tier network §5 gives it, the
+    second on bridge `cloudbr1`; **no VM on two tiers** (that would bridge frontend and
+    backend around the host)
+  - each VM's cloud-init network-config carries its §5 addresses (tier and mgmt), and
+    only the tier NIC has a default route
+  The host's ACLs are not in the plan: 5.4a's tests prove them.
+  Exit: `conftest test` passes the real plan; fixture plans with a `nat` network, and
+  with fe-1 given a second NIC on tier-backend, are rejected.
+
+  ⤷ **Needs** 5.2 · **Recalls** `net.tiers` · **Produces** `policy/*.rego`,
   `policy/fixtures/` · **Records** `policy.dir`, `policy.fixtures` · **Check** Exit
-- **5.3b The gated apply.** The plan JSON carries no credentials, so the `setup` job
-  (`python3 -B -m lab.setup`) separately checks, before planning, that the API key in use
-  resolves to account `iac` (`listAccounts`), after the H2 platform-health gate (3.1d).
-  It runs **plan → policy → apply**, and apply is unreachable
-  if the policy fails. This is the first apply: the network goes in here.
-  Exit: the real plan passes and is applied by the `setup` job; with a fixture rule
-  added, the policy fails and nothing is applied; with admin keys, `setup` refuses
-  before planning.
+- **5.3b The gated apply.** The `setup` job (`python3 -B -m lab.setup`) first checks that
+  libvirt answers (`virsh --connect qemu:///system list`) and that
+  `lab-vpc-nftables.service` is active (readable without root, unlike the table), so
+  no network goes up without its ACLs. Then **plan → apply** (with 5.3a deferred,
+  2026-11-15; the policy step slots in between when it returns). This is the first apply:
+  the networks go in here.
+  Exit: the `setup` job applies the plan; with `lab-vpc-nftables.service` stopped,
+  `setup` refuses before planning.
 
-  ⤷ **Needs** 5.3a · **Recalls** `policy.dir`, `cs.account.iac`, `tf.env`, `cs.health`, `vault.kv.health` · **Produces**
-  `setup.py` (plan → policy → apply), the `setup` job · **Records** — ·
+  ⤷ **Needs** 5.2 · **Recalls** `fw.vpc`, `libvirt.uri` · **Produces**
+  `setup.py` (checks → plan → apply), the `setup` job · **Records** — ·
   **Check** Exit; N5
-- **5.4a Compute.** Lab SSH public key from Vault. Each VM's **default NIC
-  (eth0) is its tier**: default route, ConfigDrive userdata. The **mgmt NIC (eth1)** is
-  attached with `cloudstack_nic` at its fixed address from §5 (`ip_address`), and the
-  userdata writes that address into a static netplan file for `eth1` (§5). Policy rules
-  for the NICs (5.3a) go in with them. The userdata (cloud-init; nothing in it needs
-  egress) also does the per-VM setup a golden image would bake (4.1b):
-  - user `lab` with the lab SSH public key, `lock_passwd: true`, passwordless sudo;
-    `ssh_pwauth: false`: no password exists, so none sits in userdata or Terraform state
+- **5.4a Compute.** Per VM (§5 sizes): a qcow2 overlay on 4.0's base volume, resized
+  (10/10/40 GB); a `libvirt_domain` with fixed MACs; a cloud-init disk. The lab SSH public
+  key comes from Vault (the `setup` job reads it with `lab-pipeline` and passes it as
+  `TF_VAR_ssh_public_key`; it is public, so state holding it is fine). Cloud-init:
+  - user `lab` with the key, `lock_passwd: true`, passwordless sudo; `ssh_pwauth: false`
   - `lab.test CA` in the trust store (`ca_certs`)
-  - `use-dns: false` on both NICs, so the VPC router never becomes a resolver
-  - NIC names: the stock image names NICs by PCI slot (`ens3`, …), so the netplan files
-    match the names 3.3b recorded **[verify]**; fallback: `net.ifnames=0` and one reboot
-    at first boot
-  Packages (qemu-guest-agent, chrony, nftables, wireguard-tools, podman on fe-1) come
-  from the Ansible roles through the proxy (6.1a).
-  **If 3.3b took the fallback** (**[verify]**): `cloudstack_instance` takes one
-  `network_id`, so the `setup` job deploys the three VMs itself, between applying the
-  network and the ingress, with `deployVirtualMachine` carrying both networks and both
-  fixed addresses (adopted by name on a re-run; expunged and re-deployed when the
-  template or offering changes). Terraform keeps the VPC, tiers, ACLs, public IP,
-  port-forward (the VM found through a data source) and the `ansible_host` resources;
-  `cloudstack_nic` goes, and 5.3a's NIC rules become checks the `setup` job runs on its
-  deploy parameters.
-  Exit: apply; all VMs Running and reachable over SSH from the host on their mgmt NIC
-  at the fixed address; `networkctl status eth1` shows the static address (so the
-  ConfigDrive userdata applied);
-  **fe-1 cannot reach be-1's tier address `10.0.3.10`** on any port (N1 holds before
-  the tunnel exists).
+  - network-config v2, matched **by MAC** with `set-name: eth0`/`eth1`, so the stock
+    image's PCI-slot names (`ens3`, …) never matter: eth0 = tier address, default route
+    via the host's `.1`; eth1 = mgmt address on `10.250.0.0/24`, no gateway; nameserver
+    `10.250.0.1` (on-link through eth1). All static: nothing depends on a lease
+  Packages (qemu-guest-agent, chrony, nftables, wireguard-tools, podman on fe-1) come from
+  the Ansible roles through Squid (6.1a).
+  Exit: apply; `virsh list` shows the three VMs running; each answers SSH from the host on
+  its mgmt address; `ip -br addr` on each shows both static addresses and
+  `cloud-init status` is `done`. **N1 before the tunnel exists:** from fe-1, TCP to
+  `10.0.3.10` (any port) and to `10.0.2.10:22` fail; `curl -m5 https://1.1.1.1` fails (no
+  egress); `10.0.1.1:8200` (Vault through the tier gateway) fails; the host's
+  `lab_vpc` counters show the drops.
 
-  ⤷ **Needs** 5.3b, 3.3b, 4.0 · **Recalls** `vault.kv.ssh`, `img.template`,
-  `cs.network.mgmt`, `spike.mgmt-nic`, `path.lab-ca` · **Produces**
-  `terraform/compute.tf`, userdata template, NIC rules · **Records** `vm.<name>` (tier
-  and mgmt addresses), `ssh.access` (user, key source) · **Check** Exit; N1
-- **5.4b Ingress, inventory and DNS.** A VPC public IP with port-forward 443 →
-  `fe-1:443`, and its policy rules (5.3a).
-  Ansible's inventory: Terraform declares an `ansible_host` resource per VM (mgmt
-  address, groups `frontend`, `hub`, `backend`), and Ansible reads
-  them through the `cloud.terraform.terraform_provider` inventory plugin with absolute
-  paths (rule 8), so every job sees the same hosts without passing files between
-  jobs. The `setup` job writes `app.lab.test` (public IP) and `k3s.lab.test`
-  (`10.250.0.112`) into CoreDNS.
+  ⤷ **Needs** 5.3b, 4.0 · **Recalls** `vault.kv.ssh`, `img.base`, `net.tiers`,
+  `path.lab-ca` · **Produces** `terraform/compute.tf`, the cloud-init templates ·
+  **Records** `vm.<name>` (tier and mgmt addresses, MACs), `ssh.access` (user, key
+  source) · **Check** Exit; N1
+- **5.4b Ingress, inventory and DNS.** Ingress is the host's DNAT from 5.2, so
+  `app.lab.test` → `HOST_IP`. Ansible's inventory: an `ansible_host` resource per VM
+  (mgmt address, groups `frontend`, `hub`, `backend`), read through the
+  `cloud.terraform.terraform_provider` inventory plugin with absolute paths (rule 8), so
+  every job sees the same hosts without passing files. The `setup` job writes
+  `app.lab.test` (`HOST_IP`) and `k3s.lab.test` (`10.250.0.112`) into CoreDNS.
   Exit: `ansible-inventory --graph` lists the groups from state; `dig app.lab.test`
-  answers the public IP; a fixture plan replacing the public IP is rejected.
+  answers `HOST_IP`; with a throwaway listener on fe-1 (`sudo nc -l 443`), a connection
+  from another LAN machine to `HOST_IP:443` reaches it, and the same connection from the
+  host itself reaches Traefik instead.
 
-  ⤷ **Needs** 5.4a, 2.3a · **Recalls** `dns.add-record`, `dns.zones`, `vm.<name>` ·
-  **Produces** `terraform/ingress.tf`, `outputs.tf`, inventory file, DNS writer ·
-  **Records** `net.public-ip`, `ansible.inventory` (file, plugin) · **Check** Exit
+  ⤷ **Needs** 5.4a, 2.3a · **Recalls** `dns.add-record`, `dns.zones`, `vm.<name>`,
+  `fw.vpc` · **Produces** `terraform/inventory.tf`, `outputs.tf`, DNS writer ·
+  **Records** `ansible.inventory` (plugin), `net.ingress` (`HOST_IP:443` → fe-1) ·
+  **Check** Exit
 
 ### Phase 6 — Base configuration and the tunnel
 
@@ -3163,7 +3228,7 @@ so they come after 12.1c.
 
 - **10.1 `pr.yml`, on every pull request** (on the one host runner, with the
   pipeline identity: step 2.10's accepted risk): `terraform plan -lock=false` → policy
-  gate → `trivy config` on the Dockerfiles and
+  gate (deferred with 5.3a) → `trivy config` on the Dockerfiles and
   manifests → kubeconform over `kustomize build` of every Kustomization path in
   `clusters/backend/` (with the Flux, Gateway API, Istio, CNPG and VSO CRD schemas
   pinned in the repo) → the **no-Secrets-in-git** rule: any `Secret` with `data` or
@@ -3494,11 +3559,11 @@ V1–V5 run in `destroy` after its reboot.
 
 | ID | Check | How |
 |---|---|---|
-| **N1** | frontend and backend tiers are isolated | fe-1 → `10.0.3.10` (be-1's tier address) on any port times out, with and without the tunnel up; the ACL has no rule between the two tiers |
+| **N1** | frontend and backend tiers are isolated | fe-1 → `10.0.3.10` (be-1's tier address) on any port times out, with and without the tunnel up; the host table `inet lab_vpc` has no rule between `tier-fe` and `tier-be` (5.2) |
 | **N2** | the tunnel is the only path | fe-1 → `10.99.1.2:8000` (mTLS with the frontend's client certificate) succeeds and tun-1's forward counter rises; with `wg0` (fe-1) or `wg1` (tun-1) down it times out; `ip route get 10.99.1.2` on fe-1 shows `dev wg0` |
 | **N3** | no internet from tiers | direct `curl https://example.com` fails; through the proxy → 403 and logged |
 | **N4** | mgmt NIC reaches only the host | VM → another VM's mgmt address times out; VM → `10.250.0.1:8200` succeeds; from the host, be-1's `10.250.0.112:9100` and `10.0.3.10:9100` (node-exporter) time out |
-| **N5** | Terraform runs least-privilege | `iac` key denied an admin-only API call |
+| **N5** | Terraform runs least-privilege | the `setup` job runs as `lab-runner`, not root (`id`), and cannot change the host's ACLs (`nft list table inet lab_vpc` as `lab-runner` is denied); `libvirt` membership is root-equivalent and accepted (2.10) |
 | **N6** | the hub forwards one flow only | fe-1 → `10.99.1.2:22` and `:5432` time out and tun-1 logs `lab-hub-drop` |
 | **H2** | CloudStack platform healthy | `/client/api` returns 200; the KVM host is `Up`; SSVM and CPVM are `Running`; every system VM and router `cmk` lists as `Running` has a running domain of the same instance name in `virsh --readonly list` |
 | **E1** | field-level encryption | `psql` shows `vault:v<n>:…` (any key version); API returns `**** 4242` |
@@ -3829,6 +3894,7 @@ loop. Import one bead per row.
 | 2.1a | Host-only bridge | 1.2a | 2 | S |
 | 2.1b | Podman and Compose | 2.1a, 1.3 | 2 | M |
 | 2.1c | Spike: netavark's firewall driver and rule order | 2.1b | 2 | S |
+| 2.1d | KVM and libvirt | 1.2a | 2 | S |
 | 2.2 | Host firewall | 2.1c | 2 | M |
 | 2.3a | CoreDNS | 2.2 | 2 | M |
 | 2.3b | NTP | 2.2 | 2 | S |
@@ -3845,7 +3911,7 @@ loop. Import one bead per row.
 | 2.7b | Telemetry stores and Grafana | 2.6, 2.5c | 2 | M |
 | 2.8 | Gitea and registry | 2.6 | 2 | M |
 | 2.9 | Squid egress proxy | 2.2, 2.3a | 2 | S |
-| 2.10 | Runner | 2.7b, 2.8, 2.9 | 2 | M |
+| 2.10 | Runner | 2.1d, 2.7b, 2.8, 2.9 | 2 | M |
 | 3.1a | Install | 2.6, 2.5c | 3 | M |
 | 3.1b | Bridge netfilter | 2.1b | 3 | S |
 | 3.1c | Zone, networks and host | 3.1a, 3.1b | 3 | M |
@@ -3856,15 +3922,15 @@ loop. Import one bead per row.
 | 3.5a | Seed, workflows and branch protection | 2.10 | 3 | M |
 | 3.5b | Hand-off: dispatch and follow | 3.5a, 3.3b | 3 | M |
 | 3.5c | Platform consoles | 3.2a, 2.7b, 2.8, 2.5e | 3 | M |
-| 4.0 | Cloud image template | 3.2a, 3.3b, 3.5b | 4 | S |
+| 4.0 | Cloud image | 2.10 | 4 | S |
 | 4.1a | Build through the proxy (option) | 2.9, 1.3, 3.5b | 4 | M |
 | 4.1b | Image contents (option) | 4.1a, 2.5b | 4 | S |
 | 4.3 | Publish and register (option) | 4.1b, 3.2a, 2.7 | 4 | M |
-| 5.1 | Provider and remote state | 4.0, 3.3a | 5 | M |
-| 5.2 | Network | 5.1 | 5 | M |
-| 5.3a | Policy rules | 5.2 | 5 | M |
-| 5.3b | The gated apply | 5.3a | 5 | M |
-| 5.4a | Compute | 5.3b, 3.3b | 5 | M |
+| 5.1 | Provider, state and spike | 4.0, 2.1d, 2.10 | 5 | M |
+| 5.2 | Networks and the host router | 5.1, 1.2a | 5 | M |
+| 5.3a | Policy rules (deferred 2026-11-15) | 5.2 | 5 | M |
+| 5.3b | The gated apply | 5.2 | 5 | M |
+| 5.4a | Compute | 5.3b, 4.0 | 5 | M |
 | 5.4b | Ingress, inventory and DNS | 5.4a, 2.3a | 5 | M |
 | 6.1a | `base` role: DNS, time and proxy | 5.4b, 2.3b | 6 | M |
 | 6.1b | VM firewall | 6.1a | 6 | M |

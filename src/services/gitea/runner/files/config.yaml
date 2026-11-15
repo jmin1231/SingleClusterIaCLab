@@ -3,12 +3,14 @@ log:
   level: info
 
 runner:
-  file: /var/lib/lab/runner/.runner   # written by `register`, read by `daemon`
+  file: /var/lib/lab/runner/.runner
   capacity: 1
   timeout: 1h
-  ca_file: /etc/lab-runner/ca.pem     # Gitea's cert is signed by the lab CA
+  ca_file: /etc/lab-runner/ca.pem
   labels:
-    - "host:host"                     # jobs run directly on the host as lab-runner
+    - "host:host"
+  envs:
+    GIT_SSL_CAINFO: /etc/lab-runner/ca.pem
 
 cache:
   enabled: false

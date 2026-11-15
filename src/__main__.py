@@ -6,7 +6,7 @@ import logging
 import sys
 from collections.abc import Callable
 
-from src.host import network, ntp, preflight
+from src.host import kvm, network, ntp, preflight
 from src.lib import pki
 from src.lib.config import STATE_DIR
 from src.lib.log import setup_logging
@@ -27,6 +27,7 @@ def cmd_up() -> None:
     network.up()
     ntp.up()
     podman.up()
+    kvm.up()
     dns.up()
     certs_changed = pki.up()
     vault.up(certs_changed)
@@ -44,8 +45,8 @@ def cmd_teardown() -> None:
 
 
 def cmd_destroy() -> None:
-    # Reverse of up: services before the Podman they run on, chrony and CoreDNS before cloudbr1
     runner.down()
+    kvm.down()
     gitea.down()
     traefik.down()
     vault.down()

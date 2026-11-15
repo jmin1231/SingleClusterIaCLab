@@ -1559,6 +1559,11 @@ runbook (14.4): a subshell with `VAULT_TOKEN` from a `lab-bootstrap` AppRole log
 - **2.10 Runner.** (Checked 2026-11-14: `act_runner` was renamed **`gitea/runner`**, binary
   `gitea-runner`; v6.0.0 of 2026-11-11 needs Gitea ≥ 1.26.2 and removed `builtin:checkout`,
   neither of which affects this lab. "act_runner" below means this runner.)
+  **Decided 2026-11-14:** a systemd service on the host (not a container: a container runner
+  needs the Podman socket, which is root, and the libvirt socket anyway), registered
+  **instance-wide** (only `lab/lab` exists and registration is disabled; Gitea 2.8 stores the
+  token at `kv/lab/bootstrap/gitea-runner`), with `lab-runner` in the **`libvirt`** group for
+  Terraform's `qemu:///system` (CloudStack dropped). Text below that says otherwise is superseded.
   One `act_runner`, registered to repository `lab/lab` only, as a
   systemd service (`lab-runner.service`; job logs in Gitea, the runner's own log in
   `journalctl -u lab-runner`) under a dedicated non-root user `lab-runner` with a
@@ -1595,7 +1600,12 @@ runbook (14.4): a subshell with `VAULT_TOKEN` from a `lab-bootstrap` AppRole log
   only label is `host`]**.
   **Accepted risk:** a pull request can edit its own workflow, so PR code runs with
   the same host access as `main`: `lab-runner`'s rights (the pipeline AppRole, `/dev/kvm`,
-  the paths it owns), but not root, since there is no `docker` group. That is
+  the paths it owns), but not root, since there is no `docker` group. **Correction (2026-11-14):**
+  the `libvirt` group is root-equivalent (a VM can be given any host file as a disk), so the
+  pipeline identity is effectively root on the host; a container runner would not change that.
+  Contained by: registration disabled, one operator, branch protection (3.5a), one job at a time.
+  `qemu:///session` (libvirt as `lab-runner`, no root) is the §15 alternative: it needs
+  root-owned bridge setup (`qemu-bridge-helper`) for the three networks. That is
   acceptable for a single-operator lab where every PR is the operator's own; §15 names
   what an enterprise does instead.
   Exit: the runner shows Online in Gitea (the workflow tests are in 3.5a, once `main`

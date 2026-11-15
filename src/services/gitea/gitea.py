@@ -1,4 +1,4 @@
-"""Install gitea and gitea runner"""
+"""Run Gitea behind Traefik and set up its admin, org, repo and runner registration token."""
 
 import base64
 import json
@@ -12,19 +12,16 @@ import urllib.request, urllib.error
 from src.lib.config import LAB_ADMIN, LAB_CA_CERT
 from src.lib.system import compose
 from src.services.podman import podman
+from src.services.gitea.config.config import (
+    GITEA_API, GITEA_ADMIN_KV, GITEA_RUNNER_KV, GITEA_ORG, GITEA_REPO,
+)
 from src.services.vault import vault
-
-GITEA_API = "https://gitea.lab.test/api/v1"
-GITEA_ADMIN_KV = "kv/data/lab/bootstrap/gitea-admin"
-GITEA_ORG = "lab"
-GITEA_REPO = "lab"
-
 
 log = logging.getLogger(__name__)
 
 
 def gitea_api(creds: dict, method: str, path: str, body: dict | None = None) -> dict:
-    """Authenticate to Gitea and return the current user's details."""
+    """Call Gitea's API as the admin over HTTPS (lab CA); a GET that 404s returns {}."""
     credentials = base64.b64encode(
         f"{creds['username']}:{creds['password']}".encode()
     ).decode("ascii")
@@ -87,7 +84,7 @@ def ensure_org(creds: dict) -> None:
 
 
 def ensure_repo(creds: dict) -> None:
-    """Ensure the repo exists, creating it if it doesn't exist"""
+    """Find or create the private lab/lab repository."""
     full_name = f"{GITEA_ORG}/{GITEA_REPO}"
     repo = gitea_api(creds, "GET", f"repos/{full_name}")
     if repo:
@@ -103,19 +100,33 @@ def ensure_repo(creds: dict) -> None:
     log.info("Created private Gitea repository %s", full_name)
 
 
+def runner_registration_token(token: str, creds: dict) -> None:
+    """Store an instance-wide runner registration token in Vault once."""
+    if vault.api("GET", GITEA_RUNNER_KV, token=token):
+        log.info("Gitea runner token already exists in vault")
+        return
+
+    response = gitea_api(creds, "POST", "admin/actions/runners/registration-token")
+    vault.api("POST", GITEA_RUNNER_KV,
+              {"data": {"token": response["token"]}}, token=token)
+    log.info("Stored the runner registration token in Vault")
+
+
 def up() -> None:
-    """start Gitea and wait until its healthcheck passes"""
+    """Start Gitea, wait for its healthcheck, then ensure admin, org, repo and runner token; a re-run changes nothing."""
     compose("gitea", "up", "-d", "--wait", "--wait-timeout", "120")
-    creds = gitea_admin(vault.login())
+    token = vault.login()
+    creds = gitea_admin(token)
     ensure_org(creds)
     ensure_repo(creds)
+    runner_registration_token(token, creds)
     log.info("Gitea ready at https://gitea.lab.test")
 
 
 def down() -> None:
-    """REmove the Gitea container and its volumes."""
+    """Remove the Gitea container and its volumes."""
     if not podman.check():
-        log.info("Podman is not setup; no Gitea container to remove")
+        log.info("Podman is not set up; no Gitea container to remove")
         return
     compose("gitea", "down", "--volumes")
-    log.info("Gitea removed; container and data")
+    log.info("Gitea removed: container and data")

@@ -1,0 +1,17 @@
+# gitea-runner config, installed to /etc/lab-runner/config.yaml
+log:
+  level: info
+
+runner:
+  file: /var/lib/lab/runner/.runner   # written by `register`, read by `daemon`
+  capacity: 1
+  timeout: 1h
+  ca_file: /etc/lab-runner/ca.pem     # Gitea's cert is signed by the lab CA
+  labels:
+    - "host:host"                     # jobs run directly on the host as lab-runner
+
+cache:
+  enabled: false
+
+host:
+  workdir_parent: /var/lib/lab/runner/work

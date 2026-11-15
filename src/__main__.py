@@ -15,6 +15,7 @@ from src.services.podman import podman
 from src.services.traefik import traefik
 from src.services.vault import vault
 from src.services.gitea import gitea
+from src.services.gitea.runner import runner
 
 log = logging.getLogger(__name__)
 
@@ -31,6 +32,7 @@ def cmd_up() -> None:
     vault.up(certs_changed)
     traefik.up(certs_changed)
     gitea.up()
+    runner.up()
 
 
 def cmd_update() -> None:
@@ -43,6 +45,7 @@ def cmd_teardown() -> None:
 
 def cmd_destroy() -> None:
     # Reverse of up: services before the Podman they run on, chrony and CoreDNS before cloudbr1
+    runner.down()
     gitea.down()
     traefik.down()
     vault.down()

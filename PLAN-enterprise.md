@@ -983,23 +983,23 @@ network).
   | Tool | Pin | From | Installed as |
   |---|---|---|---|
   | terraform | 1.17.2 | `releases.hashicorp.com` zip, SHA-256 `e6f16b2f…6605b` | `/usr/local/bin/terraform` |
-  | ansible-core | 2.21.6 (2.22 needs Python 3.13; the host has 3.12) | PyPI, into a venv at `/opt/lab/ansible` (`python3-venv` from apt) | `ansible`, `ansible-playbook`, `ansible-inventory`, `ansible-galaxy` symlinked into `/usr/local/bin` |
+  | ansible-core | 2.16.3 (Ubuntu's archive; decided 2026-11-15 over a PyPI venv: no venv, pip or symlinks, and `cloud.terraform` 4.0.0 needs only ≥ 2.15) | apt | `/usr/bin/ansible*` |
   | cloud.terraform | 4.0.0 | Galaxy | `/usr/share/ansible/collections` (a default path, so no env is needed) |
 
   `/usr/local/bin`, like `gitea-runner`, so jobs find the tools on the default `PATH`
   with nothing added to the runner's `envs`. An archive is never extracted whole: the one
   named member is read and written (no `extractall`, so no path traversal), and
   "already installed" means the tool's own version command matches the pin as an exact
-  word (`1.17.20` is not `1.17.2`). pip is pinned by version only (a hash-locked
-  requirements file is a §15 option). `destroy` removes exactly these files, the venv,
-  the collection and `python3-venv`, so V1 holds.
+  word (`1.17.20` is not `1.17.2`). The collection is pinned by version only (Galaxy publishes no
+  hash to check against). `destroy` removes exactly these files,
+  the collection and the `ansible-core` package, so V1 holds.
   Exit: `up` logs every tool and its version; `terraform version`,
   `ansible --version` and `ansible-galaxy collection list cloud.terraform` match the pins,
   also as `lab-runner`; a corrupted download is rejected; an unchanged re-run downloads
   nothing.
 
   ⤷ **Needs** 1.2a · **Recalls** — · **Produces** `src/host/toolchain.py`, its section of `src/host/config/config.py` ·
-  **Records** `path.toolchain` (`/usr/local/bin`, `/opt/lab/ansible`) · **Check** Exit
+  **Records** `path.toolchain` (`/usr/local/bin`, `/usr/share/ansible/collections`) · **Check** Exit
 
 ### Phase 2 — Control plane
 
@@ -2085,21 +2085,26 @@ userdata) does the per-VM setup a golden image would have baked, and the package
 from Ansible through the proxy (6.1a). A Packer golden image (4.1a–4.3) is an **option
 if time permits** (§15).
 
-- **4.0 Cloud image** (rewritten 2026-11-15 for libvirt). The upstream
-  `noble-server-cloudimg-amd64.img` from a dated release
-  (`cloud-images.ubuntu.com/releases/noble/release-<date>/`, never `current/`), pinned by
-  URL and SHA-256 in `config/versions.toml`. `python3 -B -m lab.image` (run by hand
-  until 5.3b, then the first thing the `setup` job runs) downloads it to
-  `/var/lib/lab/images/` (owned by `lab-runner`) and verifies the SHA-256 before use;
-  5.1 uploads it as the base volume, and each VM's disk is an overlay on it (5.4a). A
-  re-run with the file present and matching downloads nothing. The pin is the version VMs use: moving it is a pull request, and
-  `setup` then replaces the VMs. The stock image already has cloud-init, openssh-server
-  and python3, and ships no SSH host keys and an empty machine-id, so nothing per-VM is
-  baked.
-  Exit: the file's SHA-256 matches the pin; an unchanged re-run downloads nothing.
+- **4.0 Cloud image** (rewritten 2026-11-15: **Terraform pulls it**, no download step). The
+  upstream image from a dated release, never `current/` (a dated folder's file never
+  changes), pinned as a Terraform variable in `terraform/`:
+  `https://cloud-images.ubuntu.com/releases/noble/release-20261017/ubuntu-24.04-server-cloudimg-amd64.img`
+  (621 MB, SHA-256 `04e8f2461a16a44e78a370284471f29616cdd9baf1893df25807b71f985b6c94` from that
+  folder's `SHA256SUMS`, kept as a comment next to the pin). 5.1's base volume uses the URL
+  as its source, so the provider downloads it during the first `apply`, and again only if
+  the volume is replaced. The SHA-256 is checked **once, by hand, when the pin is set or
+  moved** (`curl -sL <url> | sha256sum`), not on every download: the libvirt provider has
+  no checksum check. Accepted (decided 2026-11-15, by the user): a dated HTTPS URL on
+  Canonical's own host makes a swapped file unlikely, and a corrupt one fails to boot; one
+  module fewer. Moving the pin is a pull request, and `setup` then replaces the VMs. The
+  stock image already has cloud-init, openssh-server and python3, and ships no SSH host
+  keys and an empty machine-id, so nothing per-VM is baked. If 0.9.9 cannot take a URL as
+  a volume source (5.1's spike), a small download-and-verify step comes back here.
+  Exit: `sha256sum` of the pinned URL matches the comment; after 5.1, `virsh vol-list lab`
+  shows the base volume.
 
-  ⤷ **Needs** 2.10 · **Recalls** `runner.owned-paths` · **Produces** `lab/image.py` · **Records**
-  `img.base` (file, pin) · **Check** Exit
+  ⤷ **Needs** — · **Recalls** — · **Produces** the image pin (variable + checksum comment) in
+  `terraform/` · **Records** `img.base` (URL, SHA-256) · **Check** Exit
 
 **Option, if time permits: golden image (4.1a–4.3).** Replaces 4.0's template with a
 Packer-built image; the `image` job then builds and publishes it instead. It brings back
@@ -2190,16 +2195,22 @@ answer.
   v0.9.0's rewrite; its schema follows libvirt's XML) and `ansible/ansible` (inventory
   resources, rule 8), lock file committed; `uri = "qemu:///system"`. No credentials:
   `lab-runner`'s `libvirt` group membership is the authentication (2.10). A storage pool
-  `lab` (type `dir`, `/var/lib/lab/pool`) holds the base volume `ubuntu-24.04-<date>`
-  (uploaded once from 4.0's file) and the VM disks.
+  `lab` (type `dir`, `/var/lib/lab/pool`) holds the base volume `ubuntu-24.04-20261017`
+  (its source is 4.0's pinned URL; the provider downloads it once) and the VM disks.
   **Local backend** (decided 2026-11-12): `backend "local" { path =
   "/var/lib/lab/tfstate/terraform.tfstate" }`, outside the job workspace so it survives
   between jobs, owned by `lab-runner` (`0700` directory, `0600` file); Terraform's file
   lock is the locking, enough for one runner running one job at a time; phase 9 backs it
   up. `pr.yml` plans with `-lock=false`.
-  **Spike first** (a gate, like 2.1c): by hand as `lab-runner`, one `route` network and
+  **Spike cut short (2026-11-15, by the user):** `terraform init` as `lab-runner` installed
+  0.9.9 with the local backend, and 0.9.9's docs show a volume can take an HTTPS URL
+  (`create.content.url`), so 4.0 stands. Nothing was applied. The remaining checks below
+  are proven where each is first used instead (network: 5.2/5.3b; overlay, cloud-init,
+  `cloudbr1` NIC, MACs, AppArmor: 5.4a). Gotcha: `lab-runner` cannot write `.terraform/`
+  in the operator's checkout, so by-hand runs use a copy it owns.
+  **Spike as planned** (a gate, like 2.1c): by hand as `lab-runner`, one `route` network and
   one VM from 4.0's image with a cloud-init disk carrying a static network-config. It
-  proves, at 0.9.9: a `route` network with no DHCP and DNS off; a qcow2 overlay on a base
+  proves, at 0.9.9: a base volume whose source is an HTTPS URL; a `route` network with no DHCP and DNS off; a qcow2 overlay on a base
   volume, resized; the cloud-init disk applied (static addresses, user, key); a NIC on the
   existing `cloudbr1` bridge (no libvirt network for mgmt); fixed MAC addresses; AppArmor
   (`virt-aa-helper`) allowing disks in `/var/lib/lab/pool` **[verify each]**. If 0.9.9
@@ -3922,7 +3933,7 @@ loop. Import one bead per row.
 | 3.5a | Seed, workflows and branch protection | 2.10 | 3 | M |
 | 3.5b | Hand-off: dispatch and follow | 3.5a, 3.3b | 3 | M |
 | 3.5c | Platform consoles | 3.2a, 2.7b, 2.8, 2.5e | 3 | M |
-| 4.0 | Cloud image | 2.10 | 4 | S |
+| 4.0 | Cloud image (pin only; Terraform pulls it) | — | 4 | S |
 | 4.1a | Build through the proxy (option) | 2.9, 1.3, 3.5b | 4 | M |
 | 4.1b | Image contents (option) | 4.1a, 2.5b | 4 | S |
 | 4.3 | Publish and register (option) | 4.1b, 3.2a, 2.7 | 4 | M |

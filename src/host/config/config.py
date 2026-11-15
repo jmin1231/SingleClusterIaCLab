@@ -24,7 +24,6 @@ LIBVIRT_URI = "qemu:///system"
 
 # --- Toolchain ---
 BIN_DIR = Path("/usr/local/bin")  # on the default PATH, like gitea-runner
-ANSIBLE_COMMANDS = ["ansible", "ansible-playbook", "ansible-inventory", "ansible-galaxy"]
 
 # --- Toolchain: Terraform ---
 TERRAFORM_VERSION = "1.17.2"
@@ -32,7 +31,7 @@ TERRAFORM_URL = f"https://releases.hashicorp.com/terraform/{TERRAFORM_VERSION}/t
 TERRAFORM_SHA256 = "e6f16b2f0b137ee5729caa8c4e79a3bae4ee261acd198a1fcfa8584a6296605b"
 
 # --- Toolchain: Ansible ---
-ANSIBLE_CORE_VERSION = "2.21.6"     # 2.22 needs Python 3.13; Ubuntu 24.04 has 3.12
+ANSIBLE_PACKAGES = ["ansible-core"]               # Ubuntu's 2.16.3; cloud.terraform 4.0.0 needs >= 2.15
+ANSIBLE_GALAXY = Path("/usr/bin/ansible-galaxy")  # full path, so installed_version_ok can check it exists
 CLOUD_TERRAFORM_VERSION = "4.0.0"
-ANSIBLE_VENV = Path("/opt/lab/ansible")
-COLLECTIONS_DIR = Path("/usr/share/ansible/collections")
+COLLECTIONS_DIR = Path("/usr/share/ansible/collections")  # on Ansible's default search path

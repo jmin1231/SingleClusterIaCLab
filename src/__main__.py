@@ -47,6 +47,7 @@ def cmd_teardown() -> None:
 
 def cmd_destroy() -> None:
     runner.down()
+    toolchain.down()
     kvm.down()
     gitea.down()
     traefik.down()

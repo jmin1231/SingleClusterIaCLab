@@ -595,6 +595,7 @@ Left:
 |---|---|---|
 | Root runs `git add/commit`, so `.git/index` and objects become root-owned and the user's next commit fails | `gitea.commit_changes` | B08.5 |
 | `podman.down` wipes all rootful containers on the host | `podman.py` | Accept: the lab owns the host (README) |
+| Any change to the netplan file (even a comment) runs `netplan apply`, which rebuilds `cloudbr1` and leaves the running VMs' `*-mgmt` taps detached (run #9). Workaround: `ip link set <vm>-mgmt master cloudbr1` | `network.up` | Next: reattach `*-mgmt` taps after `netplan apply` |
 | Runner `VERSION` bump ignored (any existing binary is accepted) | `runner.ensure_binary` | Optional |
 | cloud-init exit 2 with `status: done` passes `ready` | `roles/ready` | Accept: exit 2 means warnings; a failure prints `status: error` |
 | `write_file` does not re-apply the mode when the content is unchanged | `system.py` | Accept |

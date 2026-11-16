@@ -7,6 +7,9 @@ Wants=network-online.target
 User=lab-runner
 Group=lab-runner
 WorkingDirectory=/var/lib/lab/runner
+# Terraform's state (terraform/provider.tf) and TMPDIR (terraform.yml): systemd creates it owned by lab-runner
+StateDirectory=lab/tfstate
+StateDirectoryMode=0700
 ExecStart=/usr/local/bin/gitea-runner daemon --config /etc/lab-runner/config.yaml
 Restart=on-failure
 TimeoutStopSec=60

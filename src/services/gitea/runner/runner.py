@@ -70,7 +70,7 @@ def ensure_config() -> bool:
 
 def ensure_ssh_key(token: str) -> None:
     """Publish the lab SSH public key (public, so 0644) where jobs read it; the private key stays in Vault."""
-    public = vault.api("GET", SSH_KV, token=token)["data"]["data"]["public_key"]
+    public = vault.vault_api("GET", SSH_KV, token=token)["data"]["data"]["public_key"]
     if write_file(public.encode(), SSH_PUB, 0o644):
         log.info("lab SSH public key installed at %s", SSH_PUB)
     else:
@@ -83,7 +83,7 @@ def ensure_registered(token: str) -> None:
     if runner_file.exists():
         log.info("runner already registered (%s exists)", runner_file)
     else:
-        reg_token = vault.api("GET", GITEA_RUNNER_KV, token=token)["data"]["data"]["token"]
+        reg_token = vault.vault_api("GET", GITEA_RUNNER_KV, token=token)["data"]["data"]["token"]
         subprocess.run(
             [str(BINARY), "register", "--no-interactive",
              "--config", str(CONFIG), "--instance", INSTANCE, "--name", NAME,

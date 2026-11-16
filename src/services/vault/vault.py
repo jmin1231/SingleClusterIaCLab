@@ -14,7 +14,7 @@ from pathlib import Path
 
 from src.services.podman import podman
 from src.lib.config import (
-    APPROLES, LAB_CA_CERT, LAB_DIR,
+    LAB_CA_CERT, LAB_DIR,
     VAULT_ADDR, VAULT_APPROLE_FILE, VAULT_INIT_FILE, VAULT_POLICY_DIR,
 )
 from src.lib.system import compose
@@ -22,7 +22,7 @@ from src.lib.system import compose
 log = logging.getLogger(__name__)
 
 
-def api(method: str, path: str, body: dict | None = None, token: str | None = None) -> dict:
+def vault_api(method: str, path: str, body: dict | None = None, token: str | None = None) -> dict:
     """Call Vault's HTTP API, verifying TLS against lab.test CA. Secrets travel in the body, never argv.
 
     A GET of something that does not exist returns {}; every other HTTP error raises.
@@ -46,7 +46,7 @@ def api(method: str, path: str, body: dict | None = None, token: str | None = No
 
 def init() -> None:
     """Initialize Vault once; the unseal key and root token go to vault-init.json (0600, never overwritten)."""
-    initialized = api("GET", "sys/init")["initialized"]
+    initialized = vault_api("GET", "sys/init")["initialized"]
     if initialized and VAULT_INIT_FILE.exists():
         log.info("Vault is already initialized")
         return
@@ -57,7 +57,7 @@ def init() -> None:
         log.error("%s exists but Vault is new: it belongs to an older Vault; move it away and re-run", VAULT_INIT_FILE)
         sys.exit(1)
 
-    keys = api("PUT", "sys/init", {"secret_shares": 1, "secret_threshold": 1})
+    keys = vault_api("PUT", "sys/init", {"secret_shares": 1, "secret_threshold": 1})
     LAB_DIR.mkdir(0o755, parents=True, exist_ok=True)
     fd = os.open(VAULT_INIT_FILE, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, "w") as file:
@@ -69,26 +69,26 @@ def init() -> None:
 
 def mount(token: str, path: str, body: dict) -> None:
     """Enable a secrets engine at <path>/ unless it is already mounted."""
-    if f"{path}/" in api("GET", "sys/mounts", token=token)["data"]:
+    if f"{path}/" in vault_api("GET", "sys/mounts", token=token)["data"]:
         log.info("%s/ is already mounted", path)
         return
-    api("POST", f"sys/mounts/{path}", body, token=token)
+    vault_api("POST", f"sys/mounts/{path}", body, token=token)
     log.info("enabled %s/", path)
 
 
 def unseal(key: str, timeout: int = 30) -> None:
     """Unseal Vault if it is sealed (after every restart), then wait until it is active."""
-    if not api("GET", "sys/seal-status")["sealed"]:
+    if not vault_api("GET", "sys/seal-status")["sealed"]:
         log.info("Vault is already unsealed")
         return
-    if api("PUT", "sys/unseal", {"key": key})["sealed"]:
+    if vault_api("PUT", "sys/unseal", {"key": key})["sealed"]:
         log.error("Vault is still sealed after the unseal")
         sys.exit(1)
 
     deadline = time.monotonic() + timeout
     while True:
         try:
-            api("GET", "sys/health")
+            vault_api("GET", "sys/health")
             break
         except urllib.error.HTTPError:
             if time.monotonic() > deadline:
@@ -102,7 +102,7 @@ def ssh_key(token: str) -> None:
     """Store the lab SSH keypair at kv/lab/pipeline/ssh once; never replace it."""
     path = "kv/data/lab/pipeline/ssh"
 
-    if api("GET", path, token=token):
+    if vault_api("GET", path, token=token):
         log.info("SSH key pair already exists")
         return
 
@@ -113,7 +113,7 @@ def ssh_key(token: str) -> None:
         private = key.read_text()
         public = key.with_suffix(".pub").read_text()
 
-    api("POST", path, {"data": {"private_key": private, "public_key": public}}, token=token)
+    vault_api("POST", path, {"data": {"private_key": private, "public_key": public}}, token=token)
     log.info("stored a new SSH key pair in kv/lab/pipeline/ssh")
 
 
@@ -123,60 +123,66 @@ def policy(token: str) -> None:
         path = f"sys/policies/acl/{file.stem}"
         text = file.read_text()
 
-        if api("GET", path, token=token).get("data", {}).get("policy") == text:
+        if vault_api("GET", path, token=token).get("data", {}).get("policy") == text:
             log.info("policy %s unchanged", file.stem)
             continue
 
-        api("PUT", path, {"policy": text}, token=token)
+        vault_api("PUT", path, {"policy": text}, token=token)
         log.info("policy %s written", file.stem)
 
 
 def enable_approle(token: str) -> None:
     """Enable the AppRole auth method unless it's already enabled."""
-    if "approle/" in api("GET", "sys/auth", token=token)["data"]:
+    if "approle/" in vault_api("GET", "sys/auth", token=token)["data"]:
         log.info("approle/ is already enabled")
         return
     
-    api("POST", "sys/auth/approle", {"type": "approle"}, token=token)
+    vault_api("POST", "sys/auth/approle", {"type": "approle"}, token=token)
     log.info("approle/ enabled")
 
 
-def approle(token: str, role: str, out: Path, owner: tuple[int, int]) -> None:
-    """Create AppRole <role> with policy <role>, and write its role_id + secret_id to <out> once."""
-    if out.exists() and out.stat().st_uid == owner[0]:
+def approle_credentials(token: str, role: str) -> dict:
+    """Create AppRole <role> (policy <role>) if needed and issue a new secret_id; returns role_id and secret_id."""
+    path = f"auth/approle/role/{role}"
+    vault_api("POST", path, {"token_policies": [role], "token_ttl": "1h",
+                             "secret_id_ttl": "8760h"}, token=token)
+    role_id = vault_api("GET", f"{path}/role-id", token=token)["data"]["role_id"]
+    secret_id = vault_api("POST", f"{path}/secret-id", token=token)["data"]["secret_id"]
+    return {"role_id": role_id, "secret_id": secret_id}
+
+
+def approle(token: str, role: str, creds_file: Path, owner: tuple[int, int]) -> None:
+    """Create AppRole <role> with policy <role>, and write its role_id + secret_id to <creds_file> once."""
+    if creds_file.exists() and creds_file.stat().st_uid == owner[0]:
         log.info("AppRole %s already set up", role)
         return
-    
-    path = f"auth/approle/role/{role}"
-    api("POST", path, {"token_policies": [role], "token_ttl": "1h",
-                       "secret_id_ttl": "8760h"}, token=token)
-    role_id = api("GET", f"{path}/role-id", token=token)["data"]["role_id"]
-    secret_id = api("POST", f"{path}/secret-id", token=token)["data"]["secret_id"]
 
-    out.parent.mkdir(0o755, parents=True, exist_ok=True)  # the file's 0600 protects the secret
-    out.unlink(missing_ok=True)  # a file left with the wrong owner by a crash before chown
-    fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    creds = approle_credentials(token, role)
+
+    creds_file.parent.mkdir(0o755, parents=True, exist_ok=True)  # the file's 0600 protects the secret
+    creds_file.unlink(missing_ok=True)  # a file left with the wrong owner by a crash before chown
+    fd = os.open(creds_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, "w") as file:
-        json.dump({"role_id": role_id, "secret_id": secret_id}, file)
+        json.dump(creds, file)
         file.flush()
         os.fsync(file.fileno())
-    os.chown(out, *owner)
-    log.info("AppRole %s created; credentials in %s", role, out)
+    os.chown(creds_file, *owner)
+    log.info("AppRole %s created; credentials in %s", role, creds_file)
 
 
 def login(creds_file: Path = VAULT_APPROLE_FILE) -> str:
     """Log in with an AppRole credentials file written by approle(); returns a token (1 h).
 
-    The default is lab-bootstrap's file; a CI job passes its own (lab-pipeline, 2.10).
+    The default is lab-bootstrap's file; CI jobs log in through Gitea secrets instead.
     """
     creds = json.loads(creds_file.read_text())
-    return api("POST", "auth/approle/login", creds)["auth"]["client_token"]
+    return vault_api("POST", "auth/approle/login", creds)["auth"]["client_token"]
 
 
 def revoke_root(root: str) -> None:
     """Revoke the initial root token; does nothing if it is already revoked."""
     try:
-        api("POST", "auth/token/revoke-self", token=root)
+        vault_api("POST", "auth/token/revoke-self", token=root)
         log.info("root token revoked")
     except urllib.error.HTTPError as err:
         if err.code != 403:  # a revoked token is "permission denied"
@@ -200,26 +206,22 @@ def up(certs_changed: bool) -> None:
         root = keys["root_token"]
         policy(root)  # AppRole lab-bootstrap's tokens get policy lab-bootstrap
         enable_approle(root)
-        approle(root, "lab-bootstrap", *APPROLES["lab-bootstrap"])
+        approle(root, "lab-bootstrap", VAULT_APPROLE_FILE, (0, 0))
     token = login()
     revoke_root(keys["root_token"])  # only once login() works, so a broken AppRole never locks us out
 
     mount(token, "kv", {"type": "kv", "options": {"version": "2"}})
-    mount(token, "transit", {"type": "transit"})
     policy(token)
-    for role, (out, owner) in APPROLES.items():
-        approle(token, role, out, owner)
     ssh_key(token)
     log.info("Vault ready on %s", VAULT_ADDR)
 
 
 def down() -> None:
-    """Remove the Vault container, its data, its unseal key and every AppRole credentials file."""
+    """Remove the Vault container, its data, its unseal key and lab-bootstrap's AppRole credentials."""
     if podman.check():
         compose("vault", "down", "--volumes")
     else:
         log.info("Podman is not set up; no Vault container to remove")
     VAULT_INIT_FILE.unlink(missing_ok=True)  # the keys are useless once the data is gone
-    for out, _ in APPROLES.values():
-        out.unlink(missing_ok=True)
+    VAULT_APPROLE_FILE.unlink(missing_ok=True)
     log.info("Vault removed: container, data, unseal key and AppRole credentials")

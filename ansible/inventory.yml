@@ -1,0 +1,3 @@
+# The VMs come from Terraform's ansible_host resources (terraform/inventory.tf).
+plugin: cloud.terraform.terraform_provider
+project_path: ../terraform

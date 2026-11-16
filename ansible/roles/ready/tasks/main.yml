@@ -1,0 +1,9 @@
+- name: Wait until SSH answers
+  ansible.builtin.wait_for_connection:
+    timeout: 300
+
+- name: Wait for cloud-init to finish
+  ansible.builtin.command: cloud-init status --wait
+  register: cloud_init
+  changed_when: false
+  failed_when: "'status: done' not in cloud_init.stdout"

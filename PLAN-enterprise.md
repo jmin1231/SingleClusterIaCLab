@@ -557,7 +557,7 @@ exist outside Vault, and each one is listed with its location and protection.
 | Secret | Lives in | Protection / rotation |
 |---|---|---|
 | Vault unseal key + initial root token | `/var/lib/lab/vault-init.json` (outside the repo) | root `0600`. The root token is used for steps 2.4b–2.5e only, then **revoked**; regenerate it with `vault operator generate-root` when needed. The unseal key is the one thing to back up offline. A later `up` never overwrites it; `destroy` deletes it together with Vault's data (2.4b) |
-| Runner registration and pipeline AppRole (`lab-pipeline`) role_id + secret_id | `/var/lib/lab/runner/` | owned by `lab-runner`, `0600`; secret_id TTL 30 days, re-issued by the renewal that every `up` and `update` runs (as `lab-bootstrap`, inside the platform phase) when under 7 days remain; never stored in Gitea or the repo. Every job, PR jobs included, runs on the host as `lab-runner` and can use this identity: an accepted risk for a single-operator lab (§15) |
+| Pipeline AppRole (`lab-pipeline`) role_id + secret_id | Gitea Actions secrets `VAULT_ROLE_ID`, `VAULT_SECRET_ID` on `lab/lab` | written once by `gitea.pipeline_secrets()` (as `lab-bootstrap`, in `gitea.up()`; a fresh secret_id only when either secret is missing); secret_id TTL 1 year, never renewed; Gitea encrypts them at rest and masks them in logs; workflows get them through `secrets: inherit` (decided 2026-11-16; was a `0600` file for `lab-runner`, "never stored in Gitea"). The runner's registration stays in `/var/lib/lab/runner/.runner` (`lab-runner`, `0600`). Every job, PR jobs included, runs on the host as `lab-runner` and can use this identity: an accepted risk for a single-operator lab (§15) |
 | Gitea `operator` password and its personal access token | the password in `kv/lab/bootstrap/gitea-operator`; the token in the operator's own git credential store | created in 2.8; the token is the operator's, scoped to repository write |
 | Pipeline registry credential (Gitea user `lab-ci`, token with `write:package` on org `lab` only) | `kv/lab/pipeline/gitea-ci` | created in 2.8; read by the `app` job into a temp `REGISTRY_AUTH_FILE` |
 | Flux's Gitea credential (user `lab-flux`, Read on `lab/lab` only, token scoped `read:repository`) | `kv/lab/pipeline/gitea-flux`; Secret `flux-system/gitea-auth` | created in 2.8; written to k3s on stdin by the `cluster` job (8.1b); it cannot push |
@@ -1388,6 +1388,8 @@ runbook (14.4): a subshell with `VAULT_TOKEN` from a `lab-bootstrap` AppRole log
   `path.lab-ca` (host trust-store file), `path.firefox-policy` · **Check** Exit; P3
 - **2.5c KV and Transit.** KV v2 at `kv/` with the `bootstrap` / `pipeline` split (§6);
   Transit at `transit/`. Seed the SSH keypair at `kv/lab/pipeline/ssh`.
+  **Trimmed 2026-11-16:** Transit is not mounted until phase 8 (the api's `customers`
+  key) needs it; KV and the SSH key stay here.
   Exit: `vault kv get kv/lab/pipeline/ssh` returns the public key; a Transit round trip
   on a throwaway key works and the key is deleted after.
 
@@ -1429,7 +1431,11 @@ runbook (14.4): a subshell with `VAULT_TOKEN` from a `lab-bootstrap` AppRole log
       the kubeconfig after each k3s install and can never read or list it)
     - `sys/storage/raft/snapshot`
     - never `auth/approle/*`, `sys/mounts/*`, or any other policy name
-  Built in 2.5d: only the KV, break-glass, Transit and snapshot rules; the k3s auth and
+  **Trimmed 2026-11-16 to what is used now:** `lab-bootstrap` = all of KV, `sys/mounts/kv`,
+  its two policy names, AppRole management; `lab-pipeline` = `kv/data/lab/pipeline/*` only.
+  App secrets, break-glass, Transit and k3s paths are added by the phase that uses them;
+  the snapshot rule went with phase 9.
+  Originally: only the KV, break-glass, Transit and snapshot rules; the k3s auth and
   `k3s-creds` rules are added in the steps that create those mounts (8.x), and the
   workload policies with their workloads.
   Exit: a token holding only policy `lab-pipeline` (made with the root token) is denied
@@ -1646,8 +1652,8 @@ runbook (14.4): a subshell with `VAULT_TOKEN` from a `lab-bootstrap` AppRole log
   `journalctl -u lab-runner`) under a dedicated non-root user `lab-runner` with a
   **fixed UID/GID** (`runner.uid` in `config/lab.toml`, default 1990, so files kept in
   `/var/lib/lab/` across `destroy`/`up` keep their owner) in the `kvm` group only.
-  This step also creates AppRole `lab-pipeline` (policy `lab-pipeline`) and writes its
-  role_id and secret_id to `/var/lib/lab/runner/`. The runner has **one label,
+  `gitea.up()` also creates AppRole `lab-pipeline` (policy `lab-pipeline`) and stores its
+  role_id and secret_id as the repo's Actions secrets (§6). The runner has **one label,
   `host`** (in act_runner's config, `labels: ["host:host"]`, which runs jobs directly
   on the host instead of in a container): every job (`deploy.yml`'s) runs directly on the host as `lab-runner`. Capacity **one job at a
   time**, so build memory never stacks and two jobs never share Terraform state.
@@ -1660,7 +1666,7 @@ runbook (14.4): a subshell with `VAULT_TOKEN` from a `lab-bootstrap` AppRole log
   line calls the tool itself; one workflow file per stage, called from `deploy.yml`. A
   script is added only where a step's logic would not fit a few `run:` lines, next to the
   tool it serves, decided when that happens.
-  `lab-runner` owns `/var/lib/lab/backups/`, `/var/lib/lab/tfstate/` (`0700`, Terraform's local state, 5.1), the CoreDNS zone file that `setup`
+  `lab-runner` owns `/var/lib/lab/backups/`, `/var/lib/lab/tfstate/` (`0700`, Terraform's local state, 5.1) (created by the unit's `StateDirectory=lab/tfstate`, `StateDirectoryMode=0700`: systemd makes it, owned by `lab-runner`, whenever the service starts; decided 2026-11-16, no Python), the CoreDNS zone file that `setup`
   updates and Grafana's dashboards directory that the `monitoring` job fills (2.7b). It builds container images with
   **rootless** Podman (`podman build`; no daemon, no socket, nothing root-owned) (and, with the
   Packer option, golden images on `/dev/kvm`), and reaches everything else over the network with
@@ -2474,8 +2480,9 @@ to fe-1's WAN address. §15 records the cloud VPC as the production answer.
   - disk ← base image and seed volume, domain ← disk, by `replace_triggered_by`: volumes
     cannot be updated in place in 0.9.9, and cloud-init runs once per disk, so a new
     image or new cloud-init rebuilds that VM (the trigger is the seed *volume*: the
-    provider recreates `libvirt_cloudinit_disk` whenever its `/tmp` ISO is gone). The
-    `setup` job strips the key and CA so user-data renders byte-identical every run
+    provider recreates `libvirt_cloudinit_disk` whenever its ISO is gone, hence
+    `TMPDIR` in 5.3b). The key and CA files do not change, so user-data renders
+    byte-identical every run
   Packages (qemu-guest-agent, chrony, nftables, wireguard-tools, podman on fe-1) come from
   the Ansible roles through Squid (6.1a).
   Exit: apply; `virsh list` shows the three VMs running; each answers SSH from the host on
@@ -2494,20 +2501,42 @@ to fe-1's WAN address. §15 records the cloud VPC as the production answer.
   fe-1 `198.51.100.11:443`), so
   `app.lab.test` → `HOST_IP`. Ansible's inventory: an `ansible_host` resource per VM
   (mgmt address, groups `frontend`, `hub`, `backend`), read through the
-  `cloud.terraform.terraform_provider` inventory plugin with absolute paths (rule 8), so
-  every job sees the same hosts without passing files. The `setup` job writes
-  `app.lab.test` (`HOST_IP`) and `k3s.lab.test` (`10.250.0.112`) into CoreDNS.
+  `cloud.terraform.terraform_provider` inventory plugin (`ansible/inventory.yml`,
+  `project_path: terraform`, run from the checkout's root after `init`: the backend
+  already names the absolute state path, rule 8), so every job sees the same hosts
+  without passing files; `terraform.yml` ends with `ansible-inventory --graph`, so a
+  broken handoff fails the run (`ANSIBLE_INVENTORY_UNPARSED_FAILED=true`: by default Ansible
+  only warns and carries on with no hosts). DNS: both addresses are fixed (§5), so they are static
+  lines in the Corefile's `hosts` block, `{$HOST_IP} app.lab.test` and
+  `10.250.0.112 k3s.lab.test`; CoreDNS's `reload` picks up the edit with no restart
+  (decided 2026-11-16: no DNS writer job).
   Exit: `ansible-inventory --graph` lists the groups from state; `dig app.lab.test`
   answers `HOST_IP`; with a throwaway listener on fe-1 (`sudo nc -l 443`), a connection
   from another LAN machine to `HOST_IP:443` reaches it, and the same connection from the
   host itself reaches Traefik instead.
 
   ⤷ **Needs** 5.4a, 2.3a · **Recalls** `dns.add-record`, `dns.zones`, `vm.<name>`,
-  `fw.vmfw` · **Produces** `terraform/inventory.tf`, `outputs.tf`, DNS writer ·
+  `fw.vmfw` · **Produces** `terraform/inventory.tf`, `ansible/inventory.yml`, Corefile lines ·
   **Records** `ansible.inventory` (plugin), `net.ingress` (`HOST_IP:443` → fe-1) ·
   **Check** Exit
 
 ### Phase 6 — Base configuration and the tunnel
+
+**Layout (decided 2026-11-16).** One pipeline stage, `.gitea/workflows/ansible.yml`
+(after `terraform` in `deploy.yml`, `secrets: inherit`), ready-made actions only:
+checkout; `hashicorp/vault-action@v4` logs in as `lab-pipeline` (`secrets.VAULT_ROLE_ID`,
+`secrets.VAULT_SECRET_ID`) and reads `kv/lab/pipeline/ssh`'s private key as a step output
+(`exportEnv: false`); `webfactory/ssh-agent@v0.10.0` loads it into an agent (memory only,
+killed by its post step); `terraform init` (the inventory plugin runs `terraform show`);
+`ansible-playbook site.yml` from `ansible/`. `NODE_EXTRA_CA_CERTS` makes both actions
+trust the lab CA. `ansible/ansible.cfg`: `host_key_checking = False` (rebuilt VMs get new
+host keys), `[inventory] unparsed_is_failed = True` (a broken inventory must not pass with
+no hosts), `UserKnownHostsFile=/dev/null` added to the default `ssh_args`. `site.yml` maps roles to inventory groups; roles live in `ansible/roles/`:
+`ready` first on every run (`wait_for_connection`, then `cloud-init status --wait` must say
+`done`: the gate a freshly built VM needs before anything else), then `base` (6.1) and a
+**single** `wireguard` role (6.2): hub and spokes run the same steps, only the config
+differs, so it is data (the 6.2a table) and one template, not two roles; the hub's forward
+policy (6.2b) is a `when: 'hub' in group_names` task or `base`'s nftables template.
 
 - **6.1a `base` role: DNS, time and proxy (all VMs).**
   - DNS and NTP from `10.250.0.1`.

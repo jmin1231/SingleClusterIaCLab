@@ -1,0 +1,4 @@
+- name: VMs are ready
+  hosts: all
+  gather_facts: false
+  roles: [ready]

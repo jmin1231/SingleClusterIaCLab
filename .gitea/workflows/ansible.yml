@@ -1,0 +1,37 @@
+name: ansible
+
+on:
+  workflow_call:
+
+jobs:
+  configure:
+    runs-on: host
+    env:
+      NODE_EXTRA_CA_CERTS: /etc/lab-runner/ca.pem
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Read the lab SSH key from Vault
+        id: vault
+        uses: hashicorp/vault-action@v4
+        with:
+          url: https://vault.lab.test:8200
+          method: approle
+          roleId: ${{ secrets.VAULT_ROLE_ID }}
+          secretId: ${{ secrets.VAULT_SECRET_ID }}
+          exportEnv: false
+          secrets: kv/data/lab/pipeline/ssh private_key | SSH_PRIVATE_KEY
+
+      - name: Load the key into ssh-agent
+        uses: webfactory/ssh-agent@v0.10.0
+        with:
+          ssh-private-key: ${{ steps.vault.outputs.SSH_PRIVATE_KEY }}
+
+      - name: Terraform init (the inventory reads state)
+        run: terraform -chdir=terraform init -input=false -lockfile=readonly
+
+      - name: Run the playbook
+        working-directory: ansible
+        run: ansible-playbook site.yml

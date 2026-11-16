@@ -48,7 +48,5 @@ VAULT_INIT_FILE = LAB_DIR / "vault-init.json"
 VAULT_POLICY_DIR = SERVICES_DIR / "vault" / "policies"
 VAULT_APPROLE_FILE = LAB_DIR / "approle.json"
 
-APPROLES: dict[str, tuple[Path, tuple[int, int]]] = {
-    # role (= policy name): (credentials file,  owner (uid, gid))
-    "lab-bootstrap":         (VAULT_APPROLE_FILE, (0, 0)),
-}
+# CI runner's user
+RUNNER_UID = 1990

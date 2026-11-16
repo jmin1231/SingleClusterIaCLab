@@ -54,7 +54,7 @@ def gitea_api(creds: dict, method: str, path: str, body: dict | None = None, raw
 
 def gitea_admin(token: str) -> dict:
     """Create Gitea's admin once, store its password in Vault, and return the credentials."""
-    saved = vault.api("GET", GITEA_ADMIN_KV, token=token)
+    saved = vault.vault_api("GET", GITEA_ADMIN_KV, token=token)
     if saved:
         log.info("Gitea admin %s already exists", LAB_ADMIN)
         return saved["data"]["data"]
@@ -73,7 +73,7 @@ def gitea_admin(token: str) -> dict:
         sys.exit(1)
 
     creds = {"username": LAB_ADMIN, "password": password.group(1)}
-    vault.api("POST", GITEA_ADMIN_KV, {"data": creds}, token=token)
+    vault.vault_api("POST", GITEA_ADMIN_KV, {"data": creds}, token=token)
     log.info("Created Gitea admin %s; password stored in Vault", LAB_ADMIN)
     return creds
 
@@ -108,14 +108,33 @@ def ensure_repo(creds: dict) -> None:
 
 def runner_registration_token(token: str, creds: dict) -> None:
     """Store an instance-wide runner registration token in Vault once."""
-    if vault.api("GET", GITEA_RUNNER_KV, token=token):
+    if vault.vault_api("GET", GITEA_RUNNER_KV, token=token):
         log.info("Gitea runner token already exists in vault")
         return
 
     response = gitea_api(creds, "POST", "admin/actions/runners/registration-token")
-    vault.api("POST", GITEA_RUNNER_KV,
+    vault.vault_api("POST", GITEA_RUNNER_KV,
               {"data": {"token": response["token"]}}, token=token)
     log.info("Stored the runner registration token in Vault")
+
+
+def pipeline_secrets(token: str, creds: dict) -> None:
+    """Store lab-pipeline's AppRole Login as gitea secrets"""
+    url = f"repos/{GITEA_ORG}/{GITEA_REPO}/actions/secrets"
+
+    results = []
+    for secret in gitea_api(creds, "GET", url):
+        results.append(secret["name"])
+
+    if "VAULT_ROLE_ID" in results and "VAULT_SECRET_ID" in results:
+        log.info("Gitea Actions secrets for vault already set")
+        return
+
+    result = vault.approle_credentials(token, "lab-pipeline")
+    gitea_api(creds, "PUT", f"{url}/VAULT_ROLE_ID", {"data": result["role_id"]})
+    gitea_api(creds, "PUT", f"{url}/VAULT_SECRET_ID", {"data": result["secret_id"]})
+
+    log.info("Gitea Action Secrets stored")
 
 
 def push(creds: dict) -> str:
@@ -252,6 +271,7 @@ def up() -> None:
     ensure_org(creds)
     ensure_repo(creds)
     runner_registration_token(token, creds)
+    pipeline_secrets(token, creds)
     log.info("Gitea ready at https://gitea.lab.test")
 
 

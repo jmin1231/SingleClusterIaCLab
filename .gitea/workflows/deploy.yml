@@ -15,3 +15,7 @@ jobs:
   terraform:
     needs: check
     uses: ./.gitea/workflows/terraform.yml
+  ansible:
+    needs: terraform
+    uses: ./.gitea/workflows/ansible.yml
+    secrets: inherit

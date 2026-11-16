@@ -1,12 +1,15 @@
 """Gitea settings: API address, Vault paths, and the org and repo the pipeline builds from."""
 
-# --- API ---
-GITEA_API = "https://gitea.lab.test/api/v1"
-
 # --- Vault (KV v2 API paths) ---
 GITEA_ADMIN_KV = "kv/data/lab/bootstrap/gitea-admin"
 GITEA_RUNNER_KV = "kv/data/lab/bootstrap/gitea-runner"
 
+# --- API and GIT URL ---
+GITEA_URL = "https://gitea.lab.test"
+GITEA_API = f"{GITEA_URL}/api/v1"
+
 # --- Org and repo ---
 GITEA_ORG = "lab"
 GITEA_REPO = "lab"
+GITEA_REPO_URL = f"{GITEA_URL}/{GITEA_ORG}/{GITEA_REPO}.git"
+

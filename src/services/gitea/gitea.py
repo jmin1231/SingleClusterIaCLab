@@ -3,17 +3,18 @@
 import base64
 import json
 import logging
+import os
 import re
 import ssl
 import subprocess
 import sys
 import urllib.request, urllib.error
 
-from src.lib.config import LAB_ADMIN, LAB_CA_CERT
+from src.lib.config import BASE_DIR, LAB_ADMIN, LAB_CA_CERT
 from src.lib.system import compose
 from src.services.podman import podman
 from src.services.gitea.config.config import (
-    GITEA_API, GITEA_ADMIN_KV, GITEA_RUNNER_KV, GITEA_ORG, GITEA_REPO,
+    GITEA_API, GITEA_ADMIN_KV, GITEA_RUNNER_KV, GITEA_ORG, GITEA_REPO, GITEA_REPO_URL, GITEA_URL,
 )
 from src.services.vault import vault
 
@@ -110,6 +111,44 @@ def runner_registration_token(token: str, creds: dict) -> None:
     vault.api("POST", GITEA_RUNNER_KV,
               {"data": {"token": response["token"]}}, token=token)
     log.info("Stored the runner registration token in Vault")
+
+
+def push(creds: dict) -> None:
+    """Push to Gitea repo's main branch"""
+    credentials = base64.b64encode(
+        f"{creds['username']}:{creds['password']}".encode()
+    ).decode("ascii")
+
+    env = {
+        **os.environ,
+        "GIT_SSL_CAINFO": str(LAB_CA_CERT),
+        "GIT_TERMINAL_PROMPT": "0",
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "http.extraHeader",
+        "GIT_CONFIG_VALUE_0": f"Authorization: Basic {credentials}",
+    }
+    subprocess.run(
+        ["git", "-C", str(BASE_DIR),
+         "push", GITEA_REPO_URL, "refs/heads/main:refs/heads/main"],
+        env=env, check=True,
+    )
+
+
+def initial_push() -> None:
+    """Push main into the still-empty lab/lab once (later pushes come from update)."""
+    creds = gitea_admin(vault.login())
+    full_name = f"{GITEA_ORG}/{GITEA_REPO}"
+
+    repo = gitea_api(creds, "GET", f"repos/{full_name}")
+    if not repo:
+        log.error("Gitea repository %s is missing; ensure_repo should have created it", full_name)
+        sys.exit(1)
+    if not repo["empty"]:
+        log.info("Gitea repository %s already has commits; nothing to push", full_name)
+        return
+
+    push(creds)
+    log.info("Pushed main to %s; seeded at %s/%s", full_name, GITEA_URL, full_name)
 
 
 def up() -> None:

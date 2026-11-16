@@ -1,10 +1,8 @@
 # --- Switched: VM <-> VM inside one bridge (the "security groups") ---
-# Frames between two taps on the same bridge never reach IP routing,
-# so only a bridge-family table sees them.
-table bridge lab_vpc_l2
-delete table bridge lab_vpc_l2
+table bridge lab_vmfw_l2
+delete table bridge lab_vmfw_l2
 
-table bridge lab_vpc_l2 {
+table bridge lab_vmfw_l2 {
     set wan_taps {
         type ifname
         elements = { "fe-1-wan", "tun-1-wan", "be-1-wan" }
@@ -39,10 +37,10 @@ table bridge lab_vpc_l2 {
 }
 
 # --- Routed: anything through the host's IP layer (the "internet gateway") ---
-table inet lab_vpc
-delete table inet lab_vpc
+table inet lab_vmfw
+delete table inet lab_vmfw
 
-table inet lab_vpc {
+table inet lab_vmfw {
     # The LAN's HTTPS reaches fe-1's public address. Only on the LAN card,
     # so Traefik on 0.0.0.0:443 still answers the host and the VMs.
     chain prerouting {

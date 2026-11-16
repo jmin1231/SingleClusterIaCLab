@@ -1,4 +1,4 @@
-"""Install all of the necesary tools for the lab"""
+"""Install the tools the pipeline jobs need: Terraform, Ansible with cloud.terraform, and Node."""
 
 import hashlib
 import io
@@ -6,6 +6,7 @@ import logging
 import os
 import subprocess
 import shutil
+import tarfile
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -38,23 +39,38 @@ def installed_version_ok(cmd: list[str], version: str) -> bool:
     return version in result.stdout.split()
 
 
-def install_binary(tool: str, url: str, sha256: str, version_cmd: list[str], version: str) -> None:
-    """Install tool from a pinned version, unless the version is already installed."""
-    if installed_version_ok(version_cmd, version):
-        log.info("%s %s already installed.", tool, version)
-        return
-
+def download(url: str, sha256: str) -> bytes:
+    """Download url into memory and check against its pinned sha256"""
     with urllib.request.urlopen(url, timeout=120) as response:
         data = response.read()
 
     if hashlib.sha256(data).hexdigest() != sha256:
         raise RuntimeError(f"{url}: sha256 mismatch")
 
-    binary = zipfile.ZipFile(io.BytesIO(data)).read(tool)
+    return data
 
-    write_file(binary, config.BIN_DIR / tool, 0o755)
 
-    log.info("%s %s installed at %s", tool, version, config.BIN_DIR)
+def ensure_terraform() -> None:
+    """Install the pinned terraform binary from HashiCorp's zip, unless that version is present."""
+    terraform = config.BIN_DIR / "terraform"
+    if installed_version_ok([str(terraform), "version"], f"v{config.TERRAFORM_VERSION}"):
+        log.info("terraform %s already installed", config.TERRAFORM_VERSION)
+        return
+
+    data = download(config.TERRAFORM_URL, config.TERRAFORM_SHA256)
+    binary = zipfile.ZipFile(io.BytesIO(data)).read("terraform")  # only this member is read
+    write_file(binary, terraform, 0o755)
+    log.info("terraform %s installed at %s", config.TERRAFORM_VERSION, terraform)
+
+
+def ensure_node() -> None:
+    """Install node from the pinned version"""
+    node = config.BIN_DIR / "node"
+    if installed_version_ok([str(node), "--version"], f"v{config.NODE_VERSION}"):
+        log.info("node %s already installed", config.NODE_VERSION)
+        return
+
+    data = download()
 
 
 def ensure_ansible() -> None:
@@ -79,17 +95,31 @@ def ensure_ansible() -> None:
     log.info("cloud.terraform %s installed in %s", config.CLOUD_TERRAFORM_VERSION, config.COLLECTIONS_DIR)
 
 
+def ensure_node() -> None:
+    """Install the pinned node binary (no npm) so the runner can run JavaScript actions, unless present."""
+    node = config.BIN_DIR / "node"
+    if installed_version_ok([str(node), "--version"], f"v{config.NODE_VERSION}"):
+        log.info("node %s already installed", config.NODE_VERSION)
+        return
+
+    data = download(config.NODE_URL, config.NODE_SHA256)
+    with tarfile.open(fileobj=io.BytesIO(data), mode="r:xz") as archive:
+        binary = archive.extractfile(config.NODE_MEMBER).read()  # only this member is read
+    write_file(binary, node, 0o755)
+    log.info("node %s installed at %s", config.NODE_VERSION, node)
+
+
 def up() -> None:
-    """Install Terraform and Ansible with the cloud.terraform collection; a re-run changes nothing."""
-    install_binary("terraform", config.TERRAFORM_URL, config.TERRAFORM_SHA256,
-                   [str(config.BIN_DIR / "terraform"), "version"],
-                   f"v{config.TERRAFORM_VERSION}")
+    """Install Terraform, Ansible with the cloud.terraform collection, and Node; a re-run changes nothing."""
+    ensure_terraform()
     ensure_ansible()
+    ensure_node()
 
 
 def down() -> None:
     """Remove everything up() installed; safe to run twice."""
     (config.BIN_DIR / "terraform").unlink(missing_ok=True)
+    (config.BIN_DIR / "node").unlink(missing_ok=True)
     shutil.rmtree(config.COLLECTIONS_DIR / "ansible_collections" / "cloud", ignore_errors=True)
     apt_purge(config.ANSIBLE_PACKAGES)
     log.info("toolchain removed")

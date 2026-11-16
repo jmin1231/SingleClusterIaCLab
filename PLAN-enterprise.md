@@ -109,6 +109,7 @@ section as the production answer. §15 is different: it compares tools and desig
 | Examiner walkthrough (`demo`) | 12.2, 12.3 | 2026-11-10 | about two sessions of work | §15 option; the review is walked by hand |
 | Packer golden image | 4.1a–4.3 | an option from the start | the stock cloud image + cloud-init is enough | §15 option |
 | Third-party image mirror | after 8.1c | an option since 2026-11-09 | the cluster pulls pinned public images directly | §15 option |
+| Pull-request gate (`pull-request.yaml`, 10.1) and branch protection | 3.5a, 10.1 | 2026-11-16 | one operator: a PR, its required check and the auto-merge would only add moving parts, and branch protection is no security wall here, since any pushed code already runs on the runner | `update` pushes straight to `main`, and `deploy.yml`'s first job, `check` (`terraform fmt`/`validate`), stops the run before anything is applied; a bad commit sits on `main` until the fix is pushed. The enterprise answer: a protected `main`, merges only through a PR whose required checks (plan, policy, scans) passed, and a second reviewer once more than one person pushes |
 
 **Dropped if it runs long**
 
@@ -121,7 +122,7 @@ section as the production answer. §15 is different: it compares tools and desig
 | What | Step | Decided | Where it goes |
 |---|---|---|---|
 | Monitoring and observability: Prometheus, Loki, Grafana, k8s-monitoring, dashboards | 2.7b, 8.8a–8.8d (R6) | 2026-11-13 | after everything else works |
-| Conftest policy gate (5.3a) and its use in `setup` (5.3b) and `pr.yml` (10.1) | 5.3a | 2026-11-15 | if time permits, after the core pipeline works: the lab already has many moving parts; until then `setup` runs checks → plan → apply and the plan is read in the pull request |
+| Conftest policy gate (5.3a) and its use in `setup` (5.3b) | 5.3a | 2026-11-15 | if time permits, after the core pipeline works: the lab already has many moving parts; until then `setup` runs checks → plan → apply and the plan is read in the pull request |
 | Host trust (lab CA in the host store) | 2.5b | 2026-11-12 | when a person or host tool must reach a lab URL without `--cacert`; services get the CA file directly |
 
 **Dropped within a step** (smaller design choices)
@@ -191,13 +192,13 @@ left out, and why, is in §15.
 - **Bootstrap by hand, everything else by pipeline.** `bootstrap.sh` builds only what
   must exist before CI can run: the host, the control plane, CloudStack and the
   runner (Phases 1–3). From Phase 4 on, every phase is a job in the delivery
-  pipeline, and each job runs its phase module directly (`python3 -B -m lab.<module>`,
-  e.g. `python3 -B -m lab.setup`).
+  pipeline, and each job runs its phase module directly (`python3 -B -m src.pipeline.<module>`,
+  e.g. `python3 -B -m src.pipeline.setup`).
   Inside k3s, **Flux** applies what `main` holds (GitOps); jobs never `kubectl apply`
   manifests, they only write the run-time Secrets Flux waits for (§6).
-  A pipeline phase has no `bootstrap.sh` command: it runs as a `deliver.yml` job, as
+  A pipeline phase has no `bootstrap.sh` command: it runs as a `deploy.yml` job, as
   `lab-runner` (never as root, so it leaves no root-owned files behind for later jobs),
-  from a clone of Gitea's `main`; a merge, `up` or `update` dispatches the run. While
+  from a clone of Gitea's `main`; the seed push, a merge, or `update` starts the run. While
   developing it, the operator runs the same module by hand, also as `lab-runner`, from
   a clone of their branch (§9). Only the four `bootstrap.sh` commands run
   locally, as root with the `lab-bootstrap` identity: bootstrap, unsealing Vault after a
@@ -208,9 +209,9 @@ left out, and why, is in §15.
   remote, `gitea` = `https://gitea.lab.test/lab/lab.git`, which is the origin the
   pipeline builds from. The operator works as the Gitea user `operator` (write access
   to `lab/lab`, not a site admin), pushing over HTTPS with a personal access token; the
-  Gitea admin account is break-glass only. A change is: branch → `git push gitea
-  <branch>` → open a pull request in Gitea → `pr.yml` passes → merge → `deliver.yml`
-  runs. A Gitea push mirror copies `main` back to GitHub (optional: skipped when no
+  Gitea admin account is break-glass only. A change is (since 2026-11-16): commit →
+  `sudo ./bootstrap.sh update`, which pushes `main` to Gitea and starts `deploy.yml`,
+  whose `check` job gates the rest. A Gitea push mirror copies `main` back to GitHub (optional: skipped when no
   GitHub token was given). Each job clones `lab/lab` (private) with the job's own
   short-lived token (`GITEA_TOKEN`, which act_runner provides) into its work directory;
   the runner never runs code from the operator's checkout.
@@ -240,15 +241,15 @@ left out, and why, is in §15.
   read-only `view`); cluster-admin is a break-glass kubeconfig in Vault, read only by
   `lab-bootstrap`, its API calls recorded in the k3s API audit log (8.2d).
 - **Secrets are issued at run time**, with the exceptions in §6, each named and
-  protected. None is ever in git: the `pr.yml` gate rejects a Secret with data under
-  `clusters/` (10.1).
+  protected. None is ever in git: a Secret with data under `clusters/` is meant to fail
+  `deploy.yml`'s `check` job (the 10.1 gate, dropped with the PR workflow).
 - **Pinned and immutable.** Every version, image digest, provider and chart is
   pinned in `config/versions.toml`. Images are built, scanned and published once, then
   never patched in place. Nothing installs software at container start.
 - **Gates before change.** Terraform cannot apply
   without passing the policy gate, on the local path and in CI alike. (**Deferred
   2026-11-15:** the conftest gate, 5.3a, waits until the core pipeline works; until then
-  the gates are branch protection and `setup`'s pre-checks.)
+  the gate is `setup`'s pre-checks.)
 - **Fresh host assumed, dirty host refused.** Preflight refuses a host showing
   leftovers from an earlier install rather than trying to work around them.
 
@@ -416,8 +417,8 @@ TEST-NET-2 (RFC 5737), never routed onto the LAN.
 | Network | Range | VM (NIC) | Size | Role |
 |---|---|---|---|---|
 | `site-a` | `10.1.0.0/16`, subnet `10.1.1.0/24` | `fe-1` `10.1.1.10` (eth0) | 1 vCPU · 1 GB · 10 GB | frontend application (Caddy + frontend container); public 443 lands here |
-| `site-hub` | `10.2.0.0/16`, subnet `10.2.1.0/24` | `tun-1` `10.2.1.10` (eth0) | 1 vCPU · 1 GB · 10 GB | WireGuard hub: the only path from frontend to backend |
-| `site-c` | `10.3.0.0/16`, subnet `10.3.1.0/24` | `be-1` `10.3.1.10` (eth0) | 4 vCPU · 6 GB · 40 GB | k3s, Flux, mesh, api, database, telemetry agents (Alloy) |
+| `site-hub` | `10.2.0.0/16`, subnet `10.2.1.0/24` | `tun-1` `10.2.1.10` (eth0) | 1 vCPU · 0.5 GB · 10 GB | WireGuard hub: the only path from frontend to backend |
+| `site-c` | `10.3.0.0/16`, subnet `10.3.1.0/24` | `be-1` `10.3.1.10` (eth0) | 2 vCPU · 4 GB · 40 GB | k3s, Flux, mesh, api, database, telemetry agents (Alloy) |
 | `wan` | `198.51.100.0/24`, host `.1` (libvirt `route`, no NAT) | fe-1 `.11`, tun-1 `.12`, be-1 `.13` (eth1, default route via `.1`) | | WireGuard transport and fe-1's public 443 |
 | WireGuard `wg0` overlay | `10.99.0.0/24` | tun-1 `.1`, fe-1 `.2` | | frontend ↔ hub, tun-1 listens on UDP 51820 |
 | WireGuard `wg1` overlay | `10.99.1.0/24` | tun-1 `.1`, be-1 `.2` | | hub ↔ backend, tun-1 listens on UDP 51821 |
@@ -492,45 +493,41 @@ shows them all. `up` ends by printing the URLs and `sudo cat state/credentials`.
 | MinIO (optional 2.7) | `https://minio-console.lab.test/` | the root user |
 | Grafana | `https://grafana.lab.test/` | the server admin |
 
-**Host capacity: 32 GB RAM is the ceiling, not a target.** The lab must fit
-under it with a reserve, at its peak, with no memory overcommit (CloudStack
-`mem.overprovisioning.factor = 1.0`, no swap counted). Figures are estimates until
-measured; after each phase, `up` logs the host's measured steady-state
-RSS, and the operator records it in `docs/capacity.md` through a normal pull request, and `up` refuses to start a phase if the host's available memory
-would drop below the **4 GB reserve**.
+**Host capacity: 16 GB RAM and 4 cores is the target host** (resized 2026-11-16 from
+8 cores / 32 GB; CloudStack's 6.5 GB left with it on 2026-11-14). A 16 GB host reports
+about 15.5 GB usable. The lab must fit under it with a reserve, at its peak, with no
+memory overcommit (no swap counted). Figures are estimates until measured; after each
+phase, `up` logs the host's measured steady-state RSS, the operator records it in
+`docs/capacity.md`, and a pipeline job refuses to start if the host's available memory
+would drop below the **2 GB reserve**.
 
 | Consumer | Memory |
 |---|---|
-| Host OS + page-cache floor | 2.0 GB |
-| CloudStack management (JVM) + MySQL + KVM agent (the 4.22 docs' 4 GB management-server minimum, until measured) | 4.0 GB |
-| System VMs: SSVM, CPVM, redundant VPC router pair, mgmt-network router | 2.5 GB |
-| Control plane: CoreDNS, Vault, MinIO, Gitea, Squid, Traefik, Prometheus ~0.55, Loki ~0.4, Grafana ~0.15 | 2.7 GB |
-| fe-1 + tun-1 (1 GB each) + be-1 (6 GB) + KVM overhead | 9.0 GB |
-| Gitea runner (idle host service) | 0.2 GB |
-| **Steady state** | **20.4 GB** |
+| Ubuntu Desktop + CoreDNS, Vault, Gitea, Traefik, runner (idle) | 3.0 GB (**measured** 2026-11-16: `free` with all of them running) |
+| fe-1 (1 GB) + tun-1 (0.5 GB) + be-1 (4 GB) + KVM overhead | 5.8 GB |
+| **Steady state** | **8.8 GB** |
 | Peak transient, one job at a time: container build + scan | +1.5 GB |
-| *(the Packer option's build VM, +2.0 GB, never overlaps it: the runner runs one job at a time)* | |
-| **Peak** | **21.9 GB** (22.4 GB with the Packer option) |
-| **Headroom under 32 GB** (must stay ≥ 4 GB reserve) | **9.6 GB** (9.2 GB with §15's tracing option, Tempo ~0.4) |
+| Monitoring on the host when it returns: Prometheus ~0.55, Loki ~0.4, Grafana ~0.15 | +1.1 GB |
+| **Peak** | **11.4 GB** |
+| **Headroom under 15.5 GB** (must stay ≥ 2 GB reserve) | **~4 GB** |
 
-**What be-1's 6 GB holds** (requests in the manifests must sum to ≤ 4.5 GB): k3s
+**CPU:** fe-1 1 vCPU, tun-1 1, be-1 2 (k3s's minimum): 4 vCPUs on 4 cores, shared with
+the host's services. CPU overcommit only slows things down (the `app` job's image build,
+k3s's first start); memory is never overcommitted.
+
+**What be-1's 4 GB holds** (requests in the manifests must sum to ≤ 3 GB): k3s
 server ~0.6, Flux (three controllers) ~0.2, istiod ~0.3, ztunnel + istio-cni ~0.15,
 the backend Istio gateway ~0.1, CNPG operator + Vault Secrets Operator ~0.2, Postgres
 ~0.3, api ~0.15, Alloy ~0.55 (512 Mi request, 1 Gi limit, plus its config-reloader),
 Alloy Operator, kube-state-metrics, node-exporter (with kube-rbac-proxy) and
-alloy-audit ~0.05 each: about 2.75 GB, ~1.75 GB under the cap. Metrics, logs and
-dashboards are stored on the host (2.7b). Disk is not budgeted: Prometheus is capped at
-2 GB on the host, Loki keeps roughly 1–2 GB for 7 days in MinIO (estimate), and Alloy's
-WAL and alloy-audit's positions on be-1 carry `ephemeral-storage` limits, since the WAL
-grows while the host is down. CloudStack's KVM agent sets
-`host.reserved.mem.mb` to the host OS, CloudStack and control-plane rows only (system
-VMs are VMs CloudStack already plans for), so CloudStack never plans VMs into the
-control plane's memory.
+alloy-audit ~0.05 each: about 2.75 GB, ~1.25 GB under the cap (about 2.2 GB, and
+1.8 GB under, while monitoring waits). Metrics, logs and dashboards are stored on the
+host (2.7b). Disk is not budgeted.
 
-**If measurements overrun:** drop the redundant VPC router (a single router saves
-~0.25 GB but loses the HA story).
+**If measurements overrun, cut in this order:** monitoring on the host (+1.1 GB, already
+moved later), then Alloy and the telemetry agents on be-1 (~0.7 GB).
 
-**Host:** **Ubuntu 24.04 Desktop** · 8 cores · **32 GB RAM (ceiling)** · 250 GB
+**Host:** **Ubuntu 24.04 Desktop** · 4 cores · **16 GB RAM** · 250 GB
 disk · `/dev/kvm`. Built from a **clean snapshot**: a static `HOST_IP` in netplan,
 `systemd-timesyncd` as shipped, `open-vm-tools` on a VMware host. The host may
 be bare metal **or a VM**. As a VM, every CloudStack guest (system VMs and lab VMs)
@@ -784,8 +781,8 @@ clusters/backend/            everything Flux applies to k3s (no Secret values, e
 app/                         api/ and frontend/ (Flask), each with Dockerfile and
                              requirements.txt (hash-pinned); frontend/ also holds the
                              Caddyfile and the Podman quadlet units for fe-1
-.gitea/workflows/            pr.yml (gates on every PR), deliver.yml (Phases 4–12 on
-                             main), schedules.yml (nightly backup and verify)
+.gitea/workflows/            deploy.yml (`check`, then Phases 4–12, on
+                             main); no schedules.yml (Phase 9 cut)
 docs/                        capacity.md, runbook.md
 state/                       local run state (gitignored): bootstrap log, run lock. Pipeline
                              jobs keep **no** local state between jobs (§9 intro)
@@ -799,7 +796,7 @@ state/                       local run state (gitignored): bootstrap log, run lo
 `update`, `teardown`, `destroy` and `--help` (last table below). There are no
 subcommands and no flags. The phases are Python modules with `up/down/check`, not
 commands: `up` and `update` run them, and a pipeline job runs its phase module
-directly, `python3 -B -m lab.<module>` (e.g. `python3 -B -m lab.setup`). The first two
+directly, `python3 -B -m src.pipeline.<module>` (e.g. `python3 -B -m src.pipeline.setup`). The first two
 tables are in **build order**.
 
 **Bootstrap: local, run by `up`** (CI cannot exist before these)
@@ -818,7 +815,7 @@ included); 3 `provision.py`; 4 `image.py`;
 9 `backup.py`; 12 `verify.py`; 13 `teardown.py` + `revert.py`. (Phases 7 and 11 were
 removed; their numbers are kept free so the others keep theirs.)
 
-**Delivery pipeline: `deliver.yml` jobs on the runner** (one job per phase)
+**Delivery pipeline: `deploy.yml` jobs on the runner** (one job per phase)
 
 | # | Job | Phase | Needs |
 |---|---|---|---|
@@ -840,17 +837,17 @@ the merged revision (`cmd.flux-wait`).
 
 | Command | Runs |
 |---|---|
-| `up` | First build and resume. `preflight` → `platform` (Phases 2–3 and the 3.5 hand-off) → dispatches `deliver.yml` and follows it. Each step resumes at the first phase whose `check()` fails. Unseals Vault when it is sealed (after a host reboot, before the pipeline can read secrets) issues any certificate missing from `state/pki/` (2.5a), and runs the renewal: re-issues the runner's `lab-pipeline` secret_id when under 7 days (the `platform` phase runs the same renewal). After the pipeline is green, its **local stage** runs as root: the Vault DR drill (9.3a–9.4, proves B2/B3; it needs the unseal key, which the runner can never read), then it prints the `verify` job's pass/fail summary |
-| `update` | For a lab already built; otherwise it refuses with "run `up` first". Applies what changed in `config/lab.toml` or the YAML, Compose and manifest files: unseals when sealed, runs the renewal, re-runs the platform phases so each converges to the current files (a changed host service is re-applied, e.g. `docker-compose up -d` recreates the changed containers), then dispatches `deliver.yml` on `main` and follows it. Changes under `clusters/` still reach k3s through git and Flux. No preflight dirty-host refusal, no DR drill |
+| `up` | First build, and resume after a failed first build (redesigned 2026-11-16). If `state/initialized` exists it logs "initial infrastructure already initialized; use `update`" and stops, changing nothing (no Gitea or Vault needed for the check). Otherwise `platform_up()` (every host and platform module's `up()`, each converging, so a re-run continues where a failed one broke) → seed `lab/lab` if still empty (the push triggers `deploy.yml`'s first build) → write `state/initialized` → print the Actions URL. It does not follow the run: the operator watches it in Gitea (3.5a) |
+| `update` | The one command for every change (redesigned 2026-11-16). For a lab already initialized (`state/initialized`); otherwise it refuses. `platform_up()` applies host changes from the local checkout (and after a reboot reloads the VM firewall and unseals Vault). Then it pushes the committed local `main` straight to Gitea's `main`, which triggers `deploy.yml`; its first job, `check` (`terraform fmt`/`validate`), stops the run before anything is applied if the change is malformed. With nothing new to push, it dispatches `deploy.yml` instead. It prints the Actions URL and exits (3.5b) |
 | `teardown` | The tenant side only: the VPCs, the WAN and the VMs (fe-1, tun-1, be-1, so the k3s cluster goes with be-1) and the state and Vault entries that belong only to them (e.g. the break-glass kubeconfig). Keeps the host platform (control plane, Vault, Gitea, MinIO, telemetry, CloudStack, runner, VM image template), so the next `up` is quick |
-| `destroy` | First asks: it prints what it is about to delete (the VPC and VMs, CloudStack with its `cloud` databases and all of MySQL's data, the platform, every package and user the lab added) and continues only if the operator types `destroy`; anything else, or no terminal on stdin, stops it with nothing changed (no flag skips the question). Then teardown's rows (always run: each is a no-op if `teardown` already ran), then the platform and host restore, in §14 order. Ends with a reboot (it removes the runner, so it cannot run in CI). Run again after the reboot, it asks again, finds nothing left, runs the revert checks V1–V5 and writes the pass/fail report. Every row tolerates "already gone" |
+| `destroy` | First asks: it prints what it is about to delete (the VPC and VMs, CloudStack with its `cloud` databases and all of MySQL's data, the platform, every package and user the lab added) and continues only if the operator types `destroy`; anything else, or no terminal on stdin, stops it with nothing changed (no flag skips the question). Then teardown's rows (always run: each is a no-op if `teardown` already ran), then `platform_down()` (the platform and host restore, in §14 order), which also removes `state/initialized`. Ends with a reboot (it removes the runner, so it cannot run in CI). Run again after the reboot, it asks again, finds nothing left, runs the revert checks V1–V5 and writes the pass/fail report. Every row tolerates "already gone" |
 | `--help` | Lists the four commands (run with `sudo`, like the others: the shim checks root first) |
 
-**Pipeline-only jobs** (not `bootstrap.sh` commands; each runs `python3 -B -m lab.<module>`)
+**Pipeline-only jobs** (not `bootstrap.sh` commands; each runs `python3 -B -m src.pipeline.<module>`)
 
 | Job | Where | Runs |
 |---|---|---|
-| `verify` | last job of `deliver.yml`; nightly in `schedules.yml` | Phase 12; non-zero on any failure. A green run ending in `verify`, plus `up`'s local-stage output, is the lab's evidence (§13) |
+| `verify` | last job of `deploy.yml` | Phase 12; non-zero on any failure. A green run ending in `verify`, plus `up`'s local-stage output, is the lab's evidence (§13) |
 | `backup` / `restore-drill` | `schedules.yml` nightly / dispatch | Phase 9.1a–9.2 (`restore-drill` takes a fresh backup first) |
 
 Hand work that is not a command (reading `state/credentials`, a Vault shell
@@ -863,11 +860,11 @@ in `docs/runbook.md` (14.4). A read-only `status` inventory is a §15 option.
 
 Each step fits one focused session and ends with an **Exit** you can run. Phases
 0–3 run locally through `bootstrap.sh`. **From Phase 4 on, each phase is a job in
-`deliver.yml`, and its Exit is checked on the pipeline run.** Jobs share nothing on
+`deploy.yml`, and its Exit is checked on the pipeline run.** Jobs share nothing on
 disk: Terraform state is in MinIO, the inventory comes from it, the kubeconfig and
 every secret come from Vault, and "is this phase done?" is answered by `check()`. While developing a
 phase, run its module by hand as `lab-runner` from a clone of your branch
-(`sudo -u lab-runner python3 -B -m lab.<module>`), then prove it from the pipeline.
+(`sudo -u lab-runner python3 -B -m src.pipeline.<module>`), then prove it from the pipeline.
 
 **Steps and handoffs.** Every step is sized for one session (one context window): one
 outcome, a few files, **S** (60 min) or **M** (105 min) in the study loop. A split step
@@ -969,9 +966,9 @@ network).
   network is read from the host, the minimums are constants: they are the lab's needs,
   the same on every host). `up` runs the checks **before** 1.1's baseline writer, and
   reports every problem in one run (each check returns messages, then one refusal):
-  - Ubuntu 24.04; `/dev/kvm` usable; at least 8 cores; at least 200 GB on `/` (a
-    250 GB disk gives about 210); `MemTotal` ≥ 30 GiB (a 32 GB host reports about
-    31 GiB). The `/proc/meminfo` reader is reused later: `up` checks the §5 reserve
+  - Ubuntu 24.04; `/dev/kvm` usable; at least 4 cores; at least 200 GB on `/` (a
+    250 GB disk gives about 210); `MemTotal` ≥ 15 GiB (a 16 GB host reports about
+    15.5 GiB). The `/proc/meminfo` reader is reused later: `up` checks the §5 reserve
     before each phase with it
   - strict `apt-get update` (fail naming any broken source)
   - first run only (no baseline yet):
@@ -1011,6 +1008,7 @@ network).
   | terraform | 1.17.2 | `releases.hashicorp.com` zip, SHA-256 `e6f16b2f…6605b` | `/usr/local/bin/terraform` |
   | ansible-core | 2.16.3 (Ubuntu's archive; decided 2026-11-15 over a PyPI venv: no venv, pip or symlinks, and `cloud.terraform` 4.0.0 needs only ≥ 2.15) | apt | `/usr/bin/ansible*` |
   | cloud.terraform | 4.0.0 | Galaxy | `/usr/share/ansible/collections` (a default path, so no env is needed) |
+  | node | 24.22.3 (LTS "Krypton", a security release; added 2026-11-16 so jobs can run `actions/checkout@v4`, which needs Node ≥ 20; Ubuntu 24.04 ships 18.19) | `nodejs.org` `linux-x64.tar.xz`, SHA-256 `4f2b175a…66fcfb`; only member `node-v24.22.3-linux-x64/bin/node` | `/usr/local/bin/node` |
 
   `/usr/local/bin`, like `gitea-runner`, so jobs find the tools on the default `PATH`
   with nothing added to the runner's `envs`. An archive is never extracted whole: the one
@@ -1018,9 +1016,12 @@ network).
   "already installed" means the tool's own version command matches the pin as an exact
   word (`1.17.20` is not `1.17.2`). The collection is pinned by version only (Galaxy publishes no
   hash to check against). `destroy` removes exactly these files,
-  the collection and the `ansible-core` package, so V1 holds.
+  `node`, the collection and the `ansible-core` package, so V1 holds. One `ensure_<tool>()`
+  per tool (`ensure_terraform`, `ensure_ansible`, `ensure_node`) reads its own pins; zip and
+  tar.xz share one checked `download()`.
   Exit: `up` logs every tool and its version; `terraform version`,
-  `ansible --version` and `ansible-galaxy collection list cloud.terraform` match the pins,
+  `ansible --version`, `ansible-galaxy collection list cloud.terraform` and
+  `node --version` match the pins,
   also as `lab-runner`; a corrupted download is rejected; an unchanged re-run downloads
   nothing.
 
@@ -1575,7 +1576,7 @@ runbook (14.4): a subshell with `VAULT_TOKEN` from a `lab-bootstrap` AppRole log
   `kv/lab/pipeline/gitea-flux`, for Flux, 8.1b).
   Public org `lab` for the container registry; private repository `lab/lab`, the
   origin the pipeline builds from; a push mirror of `main` to GitHub if the operator
-  gives a token at the prompt (§6). `main` is seeded and protected in 3.5a. The 2.6
+  gives a token at the prompt (§6). `main` is seeded in 3.5a. The 2.6
   placeholder backend is removed.
   Exit: `podman push` then `podman pull` of `gitea.lab.test/lab/hello:test` from the
   host succeed with no `insecure` entry in `registries.conf`; the Gitea web UI loads on the host at
@@ -1631,11 +1632,15 @@ runbook (14.4): a subshell with `VAULT_TOKEN` from a `lab-bootstrap` AppRole log
   This step also creates AppRole `lab-pipeline` (policy `lab-pipeline`) and writes its
   role_id and secret_id to `/var/lib/lab/runner/`. The runner has **one label,
   `host`** (in act_runner's config, `labels: ["host:host"]`, which runs jobs directly
-  on the host instead of in a container): every job (`pr.yml`, `deliver.yml`,
-  `schedules.yml`) runs directly on the host as `lab-runner`. Capacity **one job at a
+  on the host instead of in a container): every job (`deploy.yml`'s) runs directly on the host as `lab-runner`. Capacity **one job at a
   time**, so build memory never stacks and two jobs never share Terraform state.
-  Workflows use only `run:` steps that call `git` and `python3 -B -m lab.<module>` (no
-  JavaScript actions), so the host needs no Node.js.
+  Workflows check out with `actions/checkout@v4` (decided 2026-11-16 over four `run:`
+  lines): a JavaScript action, so the runner runs it with the host's `node` (1.3 installs
+  Node 24 at `/usr/local/bin`) and downloads it from github.com (Gitea's default actions
+  source); `persist-credentials: false` keeps the job token out of the workspace's
+  `.git/config`. Rule (2026-11-16): workflows stay short; a ready-made action replaces a
+  step whenever one exists, and any real logic lives in a `src/pipeline/` module called by
+  one `run:` line (`python3 -B -m src.pipeline.<module>`), never in inline shell.
   `lab-runner` owns `/var/lib/lab/backups/`, `/var/lib/lab/tfstate/` (`0700`, Terraform's local state, 5.1), the CoreDNS zone file that `setup`
   updates and Grafana's dashboards directory that the `monitoring` job fills (2.7b). It builds container images with
   **rootless** Podman (`podman build`; no daemon, no socket, nothing root-owned) (and, with the
@@ -1662,7 +1667,7 @@ runbook (14.4): a subshell with `VAULT_TOKEN` from a `lab-bootstrap` AppRole log
   the paths it owns), but not root, since there is no `docker` group. **Correction (2026-11-14):**
   the `libvirt` group is root-equivalent (a VM can be given any host file as a disk), so the
   pipeline identity is effectively root on the host; a container runner would not change that.
-  Contained by: registration disabled, one operator, branch protection (3.5a), one job at a time.
+  Contained by: registration disabled, one operator, one job at a time; `main` changes through `update`'s push, and `deploy.yml`'s `check` job gates every build.
   `qemu:///session` (libvirt as `lab-runner`, no root) is the §15 alternative: it needs
   root-owned bridge setup (`qemu-bridge-helper`) for the three networks. That is
   acceptable for a single-operator lab where every PR is the operator's own; §15 names
@@ -2032,45 +2037,82 @@ switching**.
   `cs.network.mgmt` · **Produces** nothing kept · **Records**
   `spike.mgmt-nic` (hot-add, fallback or fail; what was learned); only if both fail,
   `decision.mgmt-design` is opened and Phase 5 waits · **Check** Exit
-- **3.5a Seed, workflows and branch protection.** The platform phase seeds `lab/lab`
-  **once**, by pushing the current repository to the still-empty Gitea repo. The seed
-  already contains `.gitea/workflows/`:
-  - `pr.yml`, whose jobs grow with the repo: the no-Secrets-in-git rule always;
-    `terraform plan -lock=false` + policy once `terraform/` exists; `trivy config` once
-    there are Dockerfiles and manifests; kubeconform once there are manifests. There
-    are no unit tests: each step's Exit, run by hand, and the pipeline are the tests
-  - `deliver.yml` (triggers: push to `main`, `workflow_dispatch`), with every phase
-    job, each running `python3 -B -m lab.<module>`; a phase not written yet runs its
-    0.2a stub and passes
-  - `schedules.yml`
+- **3.5a Seed** (redesigned 2026-11-16; workflow moved to 3.5b the same day, so the seed
+  is tested on its own). The last step of the first `up`
+  seeds `lab/lab` with a plain `git push` of the local `main` (its commits, history
+  included; uncommitted edits simply stay behind, nothing refuses them). `initial_push()` and
+  `update` share one `push(creds)` (local `main` → Gitea's `main`). The push is **not**
+  `[skip ci]`: once `.gitea/workflows/deploy.yml` is in the history, any push to `main`
+  starts a build. The first seed (2026-11-16) does not contain it, so it starts no run;
+  the workflow arrives with 3.5b through `update`'s push (a normal push to a non-empty
+  repo, so the question of Actions on a first push never arises). `deploy.yml`
+  (triggers: push to `main`, `workflow_dispatch`; written in 3.5b):
+  - first job **`check`**: `terraform init -backend=false` → `terraform fmt -check` →
+    `terraform validate` (`-backend=false` touches no state and needs no secrets). Every
+    other job `needs: check`, so a red check stops the run before anything is planned or
+    applied
+  - then one job per phase, each running `python3 -B -m src.pipeline.<module>` (pipeline
+    code lives in `src/pipeline/` and reuses `src/lib`); a phase not written yet runs a
+    stub that passes. A `concurrency` group keeps two runs from interleaving their jobs
+    (check the Gitea version supports it)
+  - no `pull-request.yaml`, no branch protection and no `schedules.yml` (see **Dropped and
+    deferred**)
 
-  The seed commit carries `[skip ci]`, so the push itself starts no run. Then it
-  protects `main`: no direct pushes (admin included), merge only from a pull
-  request whose `pr.yml` status check passed, **0 required approvals** (one operator:
-  Gitea does not count an author's approval of their own PR, so a required review would
-  deadlock). After that, bootstrap never pushes again.
-  Exit: a test branch pushed to `gitea` with a PR runs `pr.yml` (its job log prints
-  `id`: `lab-runner`), and the PR can be merged only after it passes; a direct
-  `git push gitea main` is rejected.
+  The push happens only if the repo is still empty (`GET /repos/lab/lab` → `"empty"`; an
+  API error stops `up`, it never counts as empty). Only then does `up` write
+  `state/initialized`, so an `up` that failed anywhere before it leaves no marker and the next
+  `up` carries on (a repo already seeded is not pushed again). `up` checks the marker
+  first, before anything needs Gitea or Vault: a second `up` stops at once with "initial
+  infrastructure already initialized; use `update`". The marker means *initialized*, not
+  *built*: `up` prints the run's Actions URL and exits, and the operator follows the run
+  in Gitea's Actions tab; a failed first build is re-run with `update`.
+  The push token rides in the environment (`GIT_CONFIG_*` → `http.extraHeader`), never
+  on the command line or in `.git/config`, so `ps` cannot show it (rule 17).
+  Exit: after `up`, `lab/lab` in Gitea shows the local `main`'s commits and
+  `state/initialized` exists; a second `up` prints the message and changes nothing; a
+  repo that already has commits is never pushed by `up`.
 
   ⤷ **Needs** 2.10 · **Recalls** `gitea.repo`, `git.remote.gitea`, `runner.label` ·
-  **Produces** `.gitea/workflows/{pr,deliver,schedules}.yml`, seed +
-  protection in `platform.py` · **Records** `ci.workflows`, `gitea.protection`,
-  `cmd.pr-flow` (branch → push → PR → merge) · **Check** Exit
-- **3.5b Hand-off: dispatch and follow.** Bootstrap dispatches `deliver.yml`
-  through the Gitea API; `bootstrap.sh up` (and `update`) then follows the run and
-  exits with its result; after a green run, `up` goes on to its local stage (9.3a–9.4).
-  From here, `deliver.yml` runs one job per phase, in order:
-  `image` → `setup` → `base` → `tunnel` → `cluster` → `mesh` → `app` →
-  `monitoring` → `verify`. Every job converges on every run (§2), so re-running
-  the pipeline is safe, and each job checks the host's available memory against the
-  §5 reserve before it starts (a job, not `up`, is what runs on the host).
-  Exit: the first `deliver` run is triggered and visible in Gitea; `up` streams its job
-  status; its jobs ran as `lab-runner` (the job log prints `id`).
+  **Produces** `platform_up()`/`platform_down()` in
+  `src/__main__.py`, `push()`/`initial_push()` in `src/services/gitea/gitea.py`, `state/initialized` ·
+  **Records** `cmd.update-flow` (commit → `update`) · **Check** Exit
+- **3.5b Workflow, updates: push and re-run** (redesigned 2026-11-16). `update` is the one command
+  for every change, so the local checkout is the only place the operator edits:
+  1. refuse unless `state/initialized` exists ("run `up` first"); only committed work is
+     pushed, uncommitted edits stay behind
+  2. `platform_up()`: host changes applied from the checkout (Gitea, runner, vmfw rules,
+     CoreDNS, …); after a reboot it also reloads the VM firewall and unseals Vault
+  3. `push(creds)`: new commits go straight to Gitea's `main`, and the push
+     triggers `deploy.yml`. If Gitea's `main` already held them (nothing new), git pushes
+     nothing and no run starts, so `update` dispatches `deploy.yml` instead
+     (`POST /repos/lab/lab/actions/workflows/deploy.yml/dispatches`, `{"ref": "main"}`)
+  4. print the Actions URL and exit; the operator follows the run in Gitea
+
+  Built in order: `push(creds)` in `cmd_update` first; then Node 24 in the toolchain (1.3,
+  for `actions/checkout@v4`), `deploy.yml` with only `check` and a stub `setup` job, and
+  `src/pipeline/__init__.py` + `setup.py`, committed and pushed by `update` (the first
+  `deploy` run); then `dispatch()`.
+
+  A bad change fails `deploy.yml`'s `check` job: nothing after it runs, so nothing is
+  planned or applied. The commit does sit on Gitea's `main`; the operator fixes, commits
+  and runs `update` again, which pushes the fix on top. Every job converges on every run
+  (§2), so nothing has to detect what changed and unchanged parts finish as no-ops; that
+  holds only if each component is written for it (Ansible: no bare `command:` without
+  `creates:` or `changed_when:`). Each job checks the host's available memory against
+  the §5 reserve before it starts. A change touching host and VMs is safe in one
+  `update`: step 2 applies the host part before step 3 pushes.
+  Exit: the `update` that pushes `deploy.yml` starts the first run, `check` and the
+  stub `setup` go green, and the job log prints `id`: `lab-runner`; a deliberately
+  misformatted `.tf` committed and run through `update` turns
+  `check` red and no later job runs; the fix, run through `update`, goes green and the
+  build runs as `lab-runner` (the job log prints `id`); `update` with nothing new
+  dispatches a run; `update` before `up` refuses with "run `up` first".
 
   ⤷ **Needs** 3.5a, 3.3b · **Recalls** `ci.workflows`, `gitea.url`,
-  `vault.approle.lab-pipeline`, `host.memory` · **Produces** dispatch + follow in
-  `__main__.py`/`platform.py` · **Records** `ci.dispatch`; how `up` follows the run · **Check** Exit
+  `vault.approle.lab-pipeline`, `host.memory` · **Produces** `.gitea/workflows/deploy.yml`,
+  `src/pipeline/`, `dispatch()` in `gitea.py`, `cmd_update` in `src/__main__.py` ·
+  **Records** `ci.workflows`, `ci.dispatch`, `cmd.update-flow` ·
+  **Check** Exit
 - **3.5c Platform consoles** (R7; run by the platform phase). One **admin** login,
   `labadmin`, per console (decided 2026-11-11, replacing read-only `operator` logins:
   whoever runs `bootstrap.sh` is root on the host). Passwords are random, one per
@@ -2186,11 +2228,11 @@ MinIO `images/` with the gateway's `:80` route, and `secstorage.allowed.internal
   **Publishing never changes running VMs:** the version VMs use is pinned in
   `config/lab.toml` (`golden_image`), and moving it is a pull request. The seed ships
   `golden_image = ""`, which `setup` accepts **only while the state holds no VMs** (it
-  then uses the newest published version and prints it). After the first `deliver`,
+  then uses the newest published version and prints it). After the first `deploy`,
   the operator pins that version by pull request; from then on an empty value fails
   `setup`.
   Exit: `cmk list templates` shows the version ready; an unchanged re-run builds
-  nothing; the `image` job passes in `deliver`.
+  nothing; the `image` job passes in `deploy`.
 
   ⤷ **Needs** 4.1b, 3.2a, 2.7 · **Recalls** `minio.url`, `minio.users`,
   `minio.images-http`, `cs.account.publisher`, `vault.kv.publisher`,
@@ -2231,7 +2273,7 @@ to fe-1's WAN address. §15 records the cloud VPC as the production answer.
   "/var/lib/lab/tfstate/terraform.tfstate" }`, outside the job workspace so it survives
   between jobs, owned by `lab-runner` (`0700` directory, `0600` file); Terraform's file
   lock is the locking, enough for one runner running one job at a time; phase 9 backs it
-  up. `pr.yml` plans with `-lock=false`.
+  up.
   **Spike cut short (2026-11-15, by the user):** `terraform init` as `lab-runner` installed
   0.9.9 with the local backend, and 0.9.9's docs show a volume can take an HTTPS URL
   (`create.content.url`), so 4.0 stands. Nothing was applied. The remaining checks below
@@ -2271,17 +2313,21 @@ to fe-1's WAN address. §15 records the cloud VPC as the production answer.
     is no libvirt network for it. Each NIC's host-side tap gets a fixed name through the
     domain's `target.dev` (5.4a): `fe-1-wan`, `fe-1-mgmt`, `tun-1-wan`, … (libvirt reserves
     the `vnet` and `vif` prefixes).
-  - **Host (bootstrap, root):** `src/host/vpc.py` installs two tables from one file,
-    `/etc/lab/nftables-vpc.nft`, loaded atomically by `lab-vpc-nftables.service`
-    (oneshot, `RemainAfterExit=yes`, ordered `Before=network-pre.target libvirtd.service`
-    so the rules are in place before any VM starts, also after a reboot; each table
-    declared, deleted and recreated in one `nft -f`, as 2.2 does). The repo file is plain
-    nft; `vpc.py` prepends `define lan_card` / `define host_ip` from the baseline (1.2a).
+  - **Host (bootstrap, root):** `src/host/vmfw.py` (the VM firewall) loads two tables
+    from one file, `src/host/files/nftables-vmfw.nft`, piped straight into `nft -f -`
+    after an `nft -c` check (each table declared, deleted and recreated in one load, as
+    2.2 does, so a re-run swaps the rules atomically). The repo file is plain nft;
+    `vmfw.py` prepends `define lan_card` / `define host_ip` from the baseline (1.2a).
+    **No systemd unit (2026-11-16):** the rules live until reboot, which suits a lab that
+    lives a day or two. Domains have `autostart = false` (5.4a), so a reboot never starts a
+    VM without its firewall; after a reboot, `bootstrap.sh update` (reloads the rules, then dispatches the pipeline). After loading,
+    `vmfw.py` writes `/run/lab/vmfw.loaded`, which `/run` loses on reboot just like the
+    rules; it is the signal 5.3b reads, since `lab-runner` cannot list nft tables.
     Its own tables, so 2.2's `inet lab` later adds the host's input rules without
     touching them. Rules match bridge and port names, so they exist before Terraform
     creates the bridges. Scoped to the lab's bridges and ports: other libvirt and Podman
     networks are untouched, and nothing flushes the host ruleset.
-    - **`bridge lab_vpc_l2`** (guest ↔ guest on one bridge, which never reaches the
+    - **`bridge lab_vmfw_l2`** (guest ↔ guest on one bridge, which never reaches the
       host's IP rules): forward chain, `ct state established,related` accept; on `wan`:
       ARP between the VM ports; `iifname "fe-1-wan" oifname "tun-1-wan"` UDP dport 51820;
       `iifname "be-1-wan" oifname "tun-1-wan"` UDP dport 51821; then **drop every other
@@ -2289,7 +2335,7 @@ to fe-1's WAN address. §15 records the cloud VPC as the production answer.
       everything between `*-mgmt` ports, ARP included; each VM still talks to the host.
       Rules key on the **host-side port**, which a guest cannot change, so a VM that
       spoofs another's IP or MAC gains none of that VM's paths
-    - **`inet lab_vpc`** (routed): nat prerouting, LAN card, `ip daddr HOST_IP tcp dport
+    - **`inet lab_vmfw`** (routed): nat prerouting, LAN card, `ip daddr HOST_IP tcp dport
       443` → `dnat to 198.51.100.11` (it runs only on the LAN card, so Traefik, which
       listens on `0.0.0.0:443`, still never answers the LAN, and the host's own requests
       still reach Traefik); forward, `ct state established,related` accept, LAN card →
@@ -2311,15 +2357,15 @@ to fe-1's WAN address. §15 records the cloud VPC as the production answer.
     a day or two).
   Steps 5.2 and 5.3b merge in **one** pull request, so the networks are first applied by
   the `setup` job, never by hand.
-  Exit: `sudo nft -c -f /etc/lab/nftables-vpc.nft` passes; `nft list tables` shows `bridge
-  lab_vpc_l2` and `inet lab_vpc` with `lan_card` and `HOST_IP` filled in;
-  `lab-vpc-nftables.service` is active after a reboot; `terraform plan` shows the four
+  Exit: `bootstrap up` loads the rules (its `nft -c` check passes); `nft list tables` shows
+  `bridge lab_vmfw_l2` and `inet lab_vmfw` with `lan_card` and `HOST_IP` filled in;
+  `/run/lab/vmfw.loaded` exists; a second `up` changes nothing; `terraform plan` shows the four
   networks; nothing applied yet.
 
   ⤷ **Needs** 5.1, 1.2a · **Recalls** `tf.backend`, `net.host` (`HOST_IP`, LAN card,
-  `LAN_CIDR`) · **Produces** `terraform/network.tf`, `src/host/vpc.py`,
-  `src/host/files/nftables-vpc.nft`, `lab-vpc-nftables.service` · **Records** `net.vpcs`
-  (bridges, ranges, WAN addresses, tap names), `fw.vpc` (tables, file, unit) · **Check** Exit
+  `LAN_CIDR`) · **Produces** `terraform/network.tf`, `src/host/vmfw.py`,
+  `src/host/files/nftables-vmfw.nft` · **Records** `net.vpcs`
+  (bridges, ranges, WAN addresses, tap names), `fw.vmfw` (tables, file, marker) · **Check** Exit
 - **5.3a Policy rules** (**deferred 2026-11-15**, if time permits; see **Moved later**).
   Conftest rules (OPA's Rego) over `terraform plan -json`:
   - the three `site-*` networks are isolated (no `forward`, no `ips`) and `wan` is `route`
@@ -2335,16 +2381,16 @@ to fe-1's WAN address. §15 records the cloud VPC as the production answer.
 
   ⤷ **Needs** 5.2 · **Recalls** `net.vpcs` · **Produces** `policy/*.rego`,
   `policy/fixtures/` · **Records** `policy.dir`, `policy.fixtures` · **Check** Exit
-- **5.3b The gated apply.** The `setup` job (`python3 -B -m lab.setup`) first checks that
+- **5.3b The gated apply.** The `setup` job (`python3 -B -m src.pipeline.setup`) first checks that
   libvirt answers (`virsh --connect qemu:///system list`) and that
-  `lab-vpc-nftables.service` is active (readable without root, unlike the table), so
+  `/run/lab/vmfw.loaded` exists (readable without root, unlike the table), so
   no network goes up without its ACLs. Then **plan → apply** (with 5.3a deferred,
   2026-11-15; the policy step slots in between when it returns). This is the first apply:
   the networks go in here.
-  Exit: the `setup` job applies the plan; with `lab-vpc-nftables.service` stopped,
-  `setup` refuses before planning.
+  Exit: the `setup` job applies the plan; with `/run/lab/vmfw.loaded` missing (as after
+  a reboot), `setup` refuses before planning.
 
-  ⤷ **Needs** 5.2 · **Recalls** `fw.vpc`, `libvirt.uri` · **Produces**
+  ⤷ **Needs** 5.2 · **Recalls** `fw.vmfw`, `libvirt.uri` · **Produces**
   `setup.py` (checks → plan → apply), the `setup` job · **Records** — ·
   **Check** Exit; N5
 - **5.4a Compute.** Per VM (§5 sizes): a qcow2 overlay on 4.0's base volume, resized
@@ -2373,8 +2419,8 @@ to fe-1's WAN address. §15 records the cloud VPC as the production answer.
   `cloud-init status` is `done`; `virsh domiflist fe-1` shows the fixed tap names.
   **N1 before the tunnel exists:** from fe-1, TCP to `10.3.1.10` and `198.51.100.13` (any
   port) and to `198.51.100.12:22` fail; `curl -m5 https://1.1.1.1` fails (no egress);
-  `198.51.100.1:8200` (Vault through the WAN gateway) fails; the host's `lab_vpc_l2` and
-  `lab_vpc` counters show the drops.
+  `198.51.100.1:8200` (Vault through the WAN gateway) fails; the host's `lab_vmfw_l2` and
+  `lab_vmfw` counters show the drops.
 
   ⤷ **Needs** 5.3b, 4.0 · **Recalls** `vault.kv.ssh`, `img.base`, `net.vpcs`,
   `path.lab-ca` · **Produces** `terraform/compute.tf`, the cloud-init templates ·
@@ -2393,7 +2439,7 @@ to fe-1's WAN address. §15 records the cloud VPC as the production answer.
   host itself reaches Traefik instead.
 
   ⤷ **Needs** 5.4a, 2.3a · **Recalls** `dns.add-record`, `dns.zones`, `vm.<name>`,
-  `fw.vpc` · **Produces** `terraform/inventory.tf`, `outputs.tf`, DNS writer ·
+  `fw.vmfw` · **Produces** `terraform/inventory.tf`, `outputs.tf`, DNS writer ·
   **Records** `ansible.inventory` (plugin), `net.ingress` (`HOST_IP:443` → fe-1) ·
   **Check** Exit
 
@@ -2447,7 +2493,7 @@ to fe-1's WAN address. §15 records the cloud VPC as the production answer.
   Exit: `curl` from one VM to another VM's mgmt address times out; VM →
   `10.250.0.1:8200` still succeeds; 6.1a's Exit still passes; `nft list table inet lab`
   on each VM shows only its role's rules (N4); with the sender's `inet lab` table
-  flushed, VM → another VM's mgmt address still times out and the host's `lab_vpc_l2`
+  flushed, VM → another VM's mgmt address still times out and the host's `lab_vmfw_l2`
   counter rises (the bridge table, 5.2); once 8.8d runs, `10.250.0.112:9100` times out
   from the host.
 
@@ -2482,7 +2528,7 @@ to fe-1's WAN address. §15 records the cloud VPC as the production answer.
     installs the routes for `AllowedIPs`, on the spokes the `PostUp` routes do.
 
   Where to look when a handshake never happens, layer by layer: `wg show` (latest
-  handshake, transfer counters), the host's `lab_vpc_l2` counters (UDP 51820/51821 on
+  handshake, transfer counters), the host's `lab_vmfw_l2` counters (UDP 51820/51821 on
   `wan`, 5.2), each VM's `nft list table inet lab` counters on eth1, then whether the published
   keys in Vault match `wg show <if> public-key` on each side.
   Exit: `wg show` on tun-1 has a recent handshake with both spokes; tun-1 reaches
@@ -2558,8 +2604,8 @@ run by the learner with the break-glass kubeconfig (runbook), and the API audit 
   - `clusters/backend/flux-system/gotk-components.yaml`, generated by the pinned
     `flux install --export --components=source-controller,kustomize-controller,helm-controller`
     and committed (a Flux upgrade is a pull request). The `cluster` job applies it
-    server-side; `flux bootstrap` is not used, because it pushes to `main`, which is
-    protected (3.5a).
+    server-side; `flux bootstrap` is not used, because it pushes commits to `main` itself; the
+    repo's history holds only the operator's commits.
   - (From 8.2c, the first install below, before Flux exists, runs on be-1 through the
     `k3s` role with the node's own admin config; later runs only refresh the two Secrets,
     as `lab-ci`.)
@@ -2641,7 +2687,7 @@ run by the learner with the break-glass kubeconfig (runbook), and the API audit 
 
     | Identity | Grants | Used by |
     |---|---|---|
-    | `lab-ci` | ClusterRole `view` (it has no Secrets, exec or port-forward) and `lab-flux-read` (get, list, watch on GitRepositories, Kustomizations, HelmRepositories, HelmReleases, and CNPG `clusters`, since `view` may not aggregate CRDs); `get`, `update`, `patch` by `resourceNames` on the Secrets it owns: `flux-system/{gitea-auth,lab-ca}`, `ingress/backend-tls`, `db/vault-ca`, `app/vault-ca`, `monitoring/vault-ca`, and ConfigMap `flux-system/app-images`; `create` on Secrets or ConfigMaps in those namespaces only (RBAC cannot limit `create` by name); `create` on `pods/portforward` in `istio-system` only (`istioctl`'s ztunnel views); in `probe` and `probe-plain`: pods `create`, `delete`, `get`, `list`, `watch` and `pods/log` `get` | every `deliver` job and `verify` |
+    | `lab-ci` | ClusterRole `view` (it has no Secrets, exec or port-forward) and `lab-flux-read` (get, list, watch on GitRepositories, Kustomizations, HelmRepositories, HelmReleases, and CNPG `clusters`, since `view` may not aggregate CRDs); `get`, `update`, `patch` by `resourceNames` on the Secrets it owns: `flux-system/{gitea-auth,lab-ca}`, `ingress/backend-tls`, `db/vault-ca`, `app/vault-ca`, `monitoring/vault-ca`, and ConfigMap `flux-system/app-images`; `create` on Secrets or ConfigMaps in those namespaces only (RBAC cannot limit `create` by name); `create` on `pods/portforward` in `istio-system` only (`istioctl`'s ztunnel views); in `probe` and `probe-plain`: pods `create`, `delete`, `get`, `list`, `watch` and `pods/log` `get` | every `deploy` job and `verify` |
     | `lab-dbops` | `view`; in `db`: `get` and `create` on `pods/exec` with `resourceNames: [postgres-1]` (WebSocket exec is authorized as `get` by older API servers, `create` by newer); `get`, `delete` on CNPG `clusters` named `postgres` | `backup`, `restore-drill`, the canary cleanup of the DR drill in `up`'s local stage; E1, E3, S3 and S4's settings half in `verify` |
     | `lab-operator` | `view` and `lab-flux-read` | read-only hand checks by the operator at a terminal |
     | `vault-token-issuer` | in `lab-access`: `create` on `serviceaccounts/token`, `resourceNames: [lab-ci, lab-dbops, lab-operator]` | Vault only |
@@ -3233,7 +3279,7 @@ run by the learner with the break-glass kubeconfig (runbook), and the API audit 
 ### Phase 9 — Backup, restore, DR and crypto-shredding
 
 - **9.1a Backup: the Vault snapshot and the database.** The `backup` job
-  (`python3 -B -m lab.backup`; `schedules.yml` nightly, or dispatch):
+  (`python3 -B -m src.pipeline.backup`; `schedules.yml` nightly, or dispatch):
   - `vault operator raft snapshot save`
   - `pg_dump -Fc -d app` as `postgres` over the instance's local socket (`kubectl exec
     postgres-1 -c postgres` as `lab-dbops`, the one identity allowed to exec, and only
@@ -3315,22 +3361,22 @@ The runner (2.10) and the delivery pipeline (3.5) exist from bootstrap; this pha
 hardens how changes get in and adds what runs on a timer. 10.2 and 10.3a run `verify`,
 so they come after 12.1c.
 
-- **10.1 `pr.yml`, on every pull request** (on the one host runner, with the
+- **10.1 `pull-request.yaml`, on every pull request** (**dropped 2026-11-16** with the PR workflow; its checks belong in `deploy.yml`'s `check` job if added; on the one host runner, with the
   pipeline identity: step 2.10's accepted risk): `terraform plan -lock=false` → policy
   gate (deferred with 5.3a) → `trivy config` on the Dockerfiles and
   manifests → kubeconform over `kustomize build` of every Kustomization path in
   `clusters/backend/` (with the Flux, Gateway API, Istio, CNPG and VSO CRD schemas
   pinned in the repo) → the **no-Secrets-in-git** rule: any `Secret` with `data` or
-  `stringData` under `clusters/` fails. Container images are built and scanned in `deliver`'s `app` job, after
+  `stringData` under `clusters/` fails. Container images are built and scanned in `deploy`'s `app` job, after
   merge. The plan output and the scan summary are posted to the PR. `main` requires
   this check to pass (0 approvals, 3.5a) before merge.
   Exit: a PR that opens `0.0.0.0/0`, or adds a Secret with data under `clusters/`, fails
   the gate and cannot merge (G1).
 
   ⤷ **Needs** 5.3b, 8.6a, 8.1b · **Recalls** `ci.workflows`, `policy.fixtures`,
-  `cmd.pr-flow`, `flux.kustomizations` · **Produces** `.gitea/workflows/pr.yml` · **Records** `ci.pr-gates` ·
+  `cmd.update-flow`, `flux.kustomizations` · **Produces** `.gitea/workflows/pull-request.yaml` · **Records** `ci.pr-gates` ·
   **Check** Exit; G1
-- **10.2 `deliver.yml`, on every merge to `main`** (and on dispatch): the job chain
+- **10.2 `deploy.yml`, on every merge to `main`** (and on dispatch): the job chain
   in 3.5b. Jobs that change running services print what they changed. A failed job
   stops the chain.
   Exit: merging a change to the frontend's template makes the `app` job rebuild both
@@ -3339,9 +3385,9 @@ so they come after 12.1c.
   Ansible `changed=0`, no Flux object changed); a merged manifest change is applied by
   Flux before the `app` job, which only waits for it; `verify` passes at the end (G2).
 
-  ⤷ **Needs** 8.7f, 12.1f · **Recalls** `ci.dispatch`, `cmd.pr-flow`, `img.app.digests` ·
-  **Produces** `.gitea/workflows/deliver.yml` (change reporting) · **Records**
-  `ci.deliver` · **Check** Exit; G2
+  ⤷ **Needs** 8.7f, 12.1f · **Recalls** `ci.dispatch`, `cmd.update-flow`, `img.app.digests` ·
+  **Produces** `.gitea/workflows/deploy.yml` (change reporting) · **Records**
+  `ci.deploy` · **Check** Exit; G2
 - **10.3a `schedules.yml`: nightly backup and verify.** Nightly `backup` (9.1a) and
   `verify`.
   Exit: the nightly runs appear in Gitea with their results; a backup lands in
@@ -3381,7 +3427,7 @@ so they come after 12.1c.
     `k8s.audit`, `db.cluster` · **Produces** checks in `verify.py` · **Records**
     `verify.checks` · **Check** Exit; E1–E3, S1–S4, T1, T2, Z1, Z2, P2, K1 (access half), A1
   - **12.1c TLS checks and the `verify` job:** P1, P3, the P4 sweep over §5's fixed
-    port lists (§6), P5 and T3; then the `verify` job in `deliver` (`python3 -B -m
+    port lists (§6), P5 and T3; then the `verify` job in `deploy` (`python3 -B -m
     lab.verify`).
     Exit: they pass; a temporary plain-HTTP listener on a §5 port fails P4; `verify`
     green twice in a row.
@@ -3401,7 +3447,7 @@ so they come after 12.1c.
     `spike.denial-metric`, `console.urls`, `flux.kustomizations`,
     `img.app.digests` · **Produces** checks in `verify.py` · **Records** `verify.checks` ·
     **Check** Exit; O1–O5, C1, G4, K1 (monitoring half)
-The evidence (§13) is a green `deliver` run ending in `verify`, plus `up`'s local-stage
+The evidence (§13) is a green `deploy` run ending in `verify`, plus `up`'s local-stage
 output (B2, B3). Proofs that only the old walkthrough showed are dropped: E2 and E3 on
 the real `customers` key (`verify` proves both on a scratch key) and the break-glass
 port-forward in A1 and O4 (`verify` still proves A1 with the `lab-dbops` exec and the
@@ -3452,7 +3498,7 @@ G4's hand edit by 12.1f.
 - **14.4 Runbook and evidence.** `docs/runbook.md`: short manual procedures for reading
   `state/credentials` (3.5c), a Vault shell with the `lab-bootstrap` AppRole, the
   break-glass k3s kubeconfig in a `0600` temp file deleted after use, and keeping the
-  unseal key offline (9.1a); then links to one green `deliver` run ending in `verify`
+  unseal key offline (9.1a); then links to one green `deploy` run ending in `verify`
   and one `up` local-stage output (B2, B3). Once the final `destroy` runs (13.1a), those
   two are the evidence for R1–R3 and R5–R7 (§13).
 
@@ -3616,13 +3662,13 @@ cluster first.*
 | Pod logs hold whatever pods print | 8.8a | Loki is as sensitive as pod stdout; the api logs no card data (S1); Grafana's console login is an admin (3.5c), so anyone with it reads every log; gitleaks-style `secretFilter` is available but off to save memory |
 | The Alloy write credential leaks | 2.7b | it only appends metrics and logs, and only from `10.250.0.112` (the allowlist runs before the password check); rotated by a new KV version with versioned usernames, so no batch is refused during the switch |
 | Egress allow-list too tight | 2.9, 6.1a, 8.x | denials are logged by Squid; grow the list from the log, never by opening the ACL |
-| Host memory (32 GB ceiling) | all | §5 budget with a 4 GB reserve, measured per phase; `up` refuses a phase that would breach the reserve; §5 cut order if it overruns |
+| Host memory (16 GB, 4 cores) | all | §5 budget with a 2 GB reserve, measured per phase; `up` refuses a phase that would breach the reserve; §5 cut order if it overruns |
 | Vault sealed after a host reboot | everything | pipeline jobs fail fast with "Vault sealed"; the operator runs `sudo ./bootstrap.sh up` (or `update`), which unseals first (the runner cannot read the unseal key, by design); production answer is KMS auto-unseal |
 | Losing the unseal key or Vault snapshot | 9 | that is total loss of encrypted data, by design; the runbook (14.4) makes offline custody of both an explicit operator duty |
 | MinIO community edition distribution | 2.7 | upstream changed how community images and binaries ship; the image is pinned by digest and kept as a `podman save` archive in `/var/lib/lab/images/`, which `destroy` keeps (2.7). If it can no longer be pulled at all, Garage or SeaweedFS (both S3-compatible, both work as a Terraform S3 backend) replace it behind the same `minio.lab.test` name |
 | The gateway is a single point of failure for every web service | 2.6 | Vault, CoreDNS, Squid and SSH never depend on it, so unseal, DNS and break-glass access survive a gateway outage; `up` and `update` name it first when it is down |
 | ServiceLB exposes the backend gateway on every node address | 8.7d | be-1's nftables admit 8000 only on `wg1` from `10.1.1.10`; P4 and Z1 test the WAN and mgmt addresses too |
-| PR code runs on the host with the pipeline identity | 2.10 | accepted for one operator (§15); `main` is protected, so nothing reaches `deliver` without a merge; with no `docker` group and rootless builds, it runs with `lab-runner`'s rights, not root's |
+| PR code runs on the host with the pipeline identity | 2.10 | accepted for one operator (§15); anything pushed to `main` runs in `deploy`, gated only by its `check` job; with no `docker` group and rootless builds, it runs with `lab-runner`'s rights, not root's |
 | Podman comes from Ubuntu's universe component, paired with an older netavark (4.9.3 with 1.4.0) | 2.1b, 2.1c, 2.2 | security fixes come from the community or Ubuntu Pro, not a vendor repo; versions are pinned (`config/versions.toml`) and logged by `up`; no container port faces the LAN except through the firewall. Netavark features after 1.4 (the nftables driver, `isolate=strict`) are absent, so 2.1c proves the driver, the DNAT path and DNS before 2.2 depends on them. If it fails: Podman 5.x with netavark ≥ 1.10 (nftables driver) from a pinned third-party repository (2.1c names it); Docker is the last resort |
 | aardvark-dns and CoreDNS both want port 53 | 2.1b, 2.3a | aardvark-dns moves to `dns_bind_port` 1053; the lab's own nat rule redirects containers' TCP and UDP port 53 queries to it on every network, since netavark 1.4 does it for UDP only and never on internal networks (2.1c, 2.2) |
 | A mesh CA forging names other clients trust | 8.3a | the mesh CA is istiod's own self-signed root (Istio's built-in CA, 2026-11-11), which no host or VM trusts (§6); P2 proves the chain ends there and not at `lab.test CA` |
@@ -3648,11 +3694,11 @@ V1–V5 run in `destroy` after its reboot.
 
 | ID | Check | How |
 |---|---|---|
-| **N1** | the VPCs are isolated | without the tunnel, fe-1 → be-1's private `10.3.1.10` and WAN `198.51.100.13` time out on any port, and `lab_vpc_l2`'s drop counter rises; a VM sending another VM's traffic through `198.51.100.1` is dropped by `inet lab_vpc`; with the tunnel up, only 6.2b's flow passes; the bridges `site-*` carry no host address (`ip -br addr`) |
+| **N1** | the VPCs are isolated | without the tunnel, fe-1 → be-1's private `10.3.1.10` and WAN `198.51.100.13` time out on any port, and `lab_vmfw_l2`'s drop counter rises; a VM sending another VM's traffic through `198.51.100.1` is dropped by `inet lab_vmfw`; with the tunnel up, only 6.2b's flow passes; the bridges `site-*` carry no host address (`ip -br addr`) |
 | **N2** | the tunnel is the only path | fe-1 → `10.3.1.10:8000` (mTLS with the frontend's client certificate) succeeds and tun-1's forward counter rises; with `wg0` (fe-1) or `wg1` (tun-1) down it times out, with no fallback over the WAN; `ip route get 10.3.1.10` on fe-1 shows `dev wg0 src 10.1.1.10` |
 | **N3** | no internet from the VPCs | direct `curl https://example.com` fails; through the proxy → 403 and logged |
 | **N4** | mgmt NIC reaches only the host | VM → another VM's mgmt address times out, also with the sender's `inet lab` table flushed (the host's bridge table drops it); VM → `10.250.0.1:8200` succeeds; from the host, be-1's `10.250.0.112:9100` (node-exporter) times out |
-| **N5** | Terraform runs least-privilege | the `setup` job runs as `lab-runner`, not root (`id`), and cannot change the host's ACLs (`nft list table inet lab_vpc` as `lab-runner` is denied); `libvirt` membership is root-equivalent and accepted (2.10) |
+| **N5** | Terraform runs least-privilege | the `setup` job runs as `lab-runner`, not root (`id`), and cannot change the host's ACLs (`nft list table inet lab_vmfw` as `lab-runner` is denied); `libvirt` membership is root-equivalent and accepted (2.10) |
 | **N6** | the hub forwards one flow only | fe-1 → `10.3.1.10:22` and `:5432` time out and tun-1 logs `lab-hub-drop` |
 | **H2** | CloudStack platform healthy | `/client/api` returns 200; the KVM host is `Up`; SSVM and CPVM are `Running`; every system VM and router `cmk` lists as `Running` has a running domain of the same instance name in `virsh --readonly list` |
 | **E1** | field-level encryption | `psql` shows `vault:v<n>:…` (any key version); API returns `**** 4242` |
@@ -3697,7 +3743,7 @@ V1–V5 run in `destroy` after its reboot.
 
 Two outputs prove the build. The runbook (14.4) links one of each.
 
-1. **A green `deliver.yml` run on `main` ending in the `verify` job.** Every §12 check
+1. **A green `deploy.yml` run on `main` ending in the `verify` job.** Every §12 check
    except B1–B3, G1–G3 and V1–V5 passes, each with its evidence line. G1–G3 are the
    pipeline's own history: a refused PR, the merge run, the nightly `schedules.yml`
    runs. B1 is the `restore-drill` job.
@@ -3774,8 +3820,8 @@ kept (2.7).
 | Mesh | Istio ambient | Linkerd: simpler install, but sidecars per pod and edge-only open-source releases |
 | CNI | k3s flannel | Cilium: its flow visibility is covered by ztunnel's deny logs for meshed traffic |
 | Cluster ingress | one Istio Gateway, `backend` (mutual TLS, reachable only from the tunnel) | k3s's Traefik (disabled), NGINX Gateway Fabric: a second controller outside the mesh's identity model; a separate operator gateway: not needed since Grafana moved to the host (2026-11-09) |
-| GitOps | Flux CD, installed from committed `flux install --export` output, pulling `main` from Gitea with a read-only token; charts mirrored into Gitea's OCI registry | Argo CD: a UI and an app-of-apps model, heavier for one cluster; `flux bootstrap`: pushes to `main`, which is protected; jobs running `kubectl apply`: no drift repair and no single source of truth |
-| Image delivery to k3s | digests in ConfigMap `app-images`, written by the `app` job, substituted by Flux | Flux image automation committing the digest to git: auditable in history, but it needs an identity allowed past `main`'s protection |
+| GitOps | Flux CD, installed from committed `flux install --export` output, pulling `main` from Gitea with a read-only token; charts mirrored into Gitea's OCI registry | Argo CD: a UI and an app-of-apps model, heavier for one cluster; `flux bootstrap`: pushes its own commits to `main`; jobs running `kubectl apply`: no drift repair and no single source of truth |
+| Image delivery to k3s | digests in ConfigMap `app-images`, written by the `app` job, substituted by Flux | Flux image automation committing the digest to git: auditable in history, but it needs an identity that commits to `main` |
 | Mesh authorization | mesh-wide `allow-nothing`, one ALLOW per flow | ALLOW policies only on the sensitive workloads: anything unlisted would be open to every meshed pod |
 | Web front door | Caddy on fe-1, `lab.test CA` certificate issued on the host with cfssl | a managed load balancer with TLS offload: what a cloud would give; one VM needs no balancer |
 | DB credentials | static, in Vault KV, synced by VSO to CNPG's managed role | Vault database engine: short-lived users per pod; costs refresh logic in the api and a Vault → Postgres path through STRICT mTLS |
@@ -3789,7 +3835,7 @@ kept (2.7).
 | Egress control | proxy allow-list | ACL allow-list by CIDR: registries and mirrors sit behind CDNs, so CIDR lists rot |
 | Console exposure | host only, each tool's own login, one admin `labadmin` per tool (decided 2026-11-11) | read-only identities (the earlier design): they protect nothing from whoever runs `bootstrap.sh`, who is root on the host. Consoles on the LAN behind SSO (OIDC from a directory): the enterprise answer; needs the directory (above) |
 | Grafana access | a host console behind the gateway, on the one gateway certificate, `labadmin` login (3.5c) | on be-1 behind its own Istio gateway on the mgmt NIC (the earlier design): a second gateway, a DNAT rule and a `pki/sign/grafana` role; `kubectl port-forward`: plain HTTP on the host's loopback and a helper process to keep alive |
-| CI runner | one runner on the host as `lab-runner` (in `kvm` only; images built with rootless Podman), one label, every job; `main` protected by a required `pr.yml` check with 0 approvals | separate untrusted runners for pull requests (no host access, no deploy credentials), a deploy runner only `main` can reach, a remote BuildKit service, and a required second reviewer: the enterprise answer once more than one person pushes. With one operator, every PR is the operator's own code, so a PR running with host access and the pipeline identity is an accepted, stated risk |
+| CI runner | one runner on the host as `lab-runner` (in `kvm` only; images built with rootless Podman), one label, every job; no PR workflow or branch protection: `update` pushes to `main` and `deploy.yml`'s `check` job gates the build (one operator) | separate untrusted runners for pull requests (no host access, no deploy credentials), a deploy runner only `main` can reach, a remote BuildKit service, and a required second reviewer: the enterprise answer once more than one person pushes. With one operator, every PR is the operator's own code, so a PR running with host access and the pipeline identity is an accepted, stated risk |
 | Control-plane runtime | **decided 2026-11-09: Podman over Docker; 2026-11-10: Compose over quadlets.** Rootful Podman from the Ubuntu 24.04 archive, the host services in one `compose.yaml` run by a pinned `docker-compose` v2 against Podman's socket, started by `lab-platform.service` after the firewall; TLS at a gateway, Vault direct; rootless Podman for the runner's image builds | Docker Compose (the earlier design): a root daemon, a third-party apt repo and key, and the `docker` group, which made the runner root-equivalent; Docker also set FORWARD to drop and loaded `br_netfilter`, which the lab had to undo (§10 rule 13). Podman has no daemon and the runner needs no privileged group. Quadlets (one systemd unit per container, the native way on a Podman production host) were the first choice; Compose replaced them because the operator already knows it, one file shows the whole control plane, and Podman 4.9's quadlets lack `AddHost=` and `Notify=healthy`. Compose's costs: rootful Podman's API socket is on (root-only), services are not separate systemd units (`podman logs`, `docker-compose restart`), and the firewall dependency is on the whole stack. Its costs: netavark adds no forward filtering, so the lab's table is the default deny (2.2), and aardvark-dns moves off port 53 (2.1c). If the 2.1c spike fails, the named fallback is Podman 5.x with netavark ≥ 1.10 (nftables driver) from a pinned third-party apt repository, today OBS `home:alvistack` **[verify]**, removed by `destroy`; returning to Docker is the last resort. A host k3s cluster with a mesh: the mesh's CA would be Vault running inside it, CloudStack and `/dev/kvm` builds cannot move in, and k3s needs bridge netfilter on, which breaks bridged VM traffic (§10 rule 13). Enterprises keep foundation services (DNS, PKI, SCM, artifact store) outside the platforms they bootstrap |
 | Supply-chain admission | images scanned and pinned by digest; Pod Security Admission `restricted` | cosign signing at push with a Kyverno/policy-controller verify rule at admission: the production answer for "only our images run"; here digest pinning in reviewed manifests gives the same guarantee for a single registry and operator |
 | Gateway certificates | one certificate for every gateway name, made once by 2.5a with the rest; a new name means deleting its files and re-running `up` | per-hostname certificates hot-reloaded on renewal, or ACME from Vault's PKI (Traefik as an ACME client): the common enterprise pattern; renewal machinery a 3-week build never exercises |
@@ -3797,17 +3843,17 @@ kept (2.7).
 | Behind the gateway | plain HTTP on an internal Podman network and loopback | re-encrypting to every backend: needed when the network behind the gateway is shared or untrusted; here it never leaves the host |
 | SSH host trust | per-job `known_hosts` with `accept-new` | Vault's SSH CA signing host and user certificates, so host keys are verified and no static key exists: the production answer, out of scope |
 | istiod CA name constraints | none: Istio's built-in root is self-signed and trusted only inside the mesh (8.3a) | a `cluster.local`-constrained istiod intermediate under a lab-controlled mesh root: defence in depth for the upgrade path |
-| Management network isolation | the host's `bridge lab_vpc_l2` table drops guest ↔ guest frames on `cloudbr1`, keyed on host-side ports, so a VM's root cannot reach another VM's mgmt NIC (5.2); in-guest nftables as a second layer | private VLANs or per-VM L2 isolation (Open vSwitch PVLANs); in a cloud, no shared mgmt network at all: SSM and VPC endpoints |
+| Management network isolation | the host's `bridge lab_vmfw_l2` table drops guest ↔ guest frames on `cloudbr1`, keyed on host-side ports, so a VM's root cannot reach another VM's mgmt NIC (5.2); in-guest nftables as a second layer | private VLANs or per-VM L2 isolation (Open vSwitch PVLANs); in a cloud, no shared mgmt network at all: SSM and VPC endpoints |
 | VPC topology | **redesigned 2026-11-15:** three VPCs (`site-a`, `site-hub`, `site-c`), one VM each, each VM its VPC's gateway; a routed `wan` plays the internet; the host's bridge and inet tables enforce the WAN rules outside the guests; WireGuard site-to-site carries the VPC ranges through the hub | one VPC with three tiers and the host as its router (the design before): isolation was only drop rules on a shared router. A router VM per VPC: closest to CloudStack's virtual router, keeps a compromised workload from rewriting its own boundary and keeps k3s's rules apart from the edge; +3 VMs, the path if a VPC ever holds more than one VM. Network namespaces as routers: light, but imperative and invisible to Terraform. Across providers (what the lab mimics): site-to-site VPN over the internet, often IPsec to each provider's managed VPN gateway (AWS VPN, Cloud VPN); within one cloud: inter-region peering or Transit Gateway on the provider's backbone, security groups enforced by the hypervisor |
 | Privileged access | SSH to the host as Ubuntu ships it, from `LAN_CIDR` only (2.2); CloudStack adds the KVM host as root with a key limited by `from=` to the host's own address (3.1c) | key-only SSH hardening (the option below); AD logins (above), Teleport/Boundary with an SSH CA and session recording: the production answer, out of scope |
 | Host SSH hardening | **option, not in the core build** (moved out of 2.2 on 2026-11-10; about one M session, folds into 2.2): config key `OPERATOR_LOGIN`, which preflight requires to be a local non-root user with a usable key in the file `sshd -T -C user=<login>` names (owned by the user, not group- or world-writable); a drop-in `/etc/ssh/sshd_config.d/00-lab.conf` (sorts before cloud-init's `50-cloud-init.conf`; sshd keeps the first value) with `PasswordAuthentication no`, `KbdInteractiveAuthentication no`, `PermitRootLogin prohibit-password`, `AllowUsers <OPERATOR_LOGIN> root@<HOST_IP>` (the second for 3.1c; `user@host` avoids a `Match` block), `X11Forwarding no`, `AllowAgentForwarding no`, `PermitTunnel no`, `AllowStreamLocalForwarding no`, `AllowTcpForwarding local` (`ssh -D`, `-L`, `-J` work; `-R` does not); a per-source nftables meter on new tcp 22 connections (`limit rate over 10/minute burst 10 packets`); lockout guards: the key check re-runs, `install -d -m 0755 /run/sshd` then `sshd -t` (a failure removes the file), then `systemctl try-reload-or-restart ssh`, the applying session kept open. Check H1: `ssh -o PreferredAuthentications=none` as `OPERATOR_LOGIN`, root and an unknown user lists only `publickey`; root and a temporary keyed user from the LAN are refused. `destroy` removes the drop-in (rule 26 names it) and reloads. Further tightenings: refuse stray `AllowUsers`/`AllowGroups`/`Match` lines elsewhere in the sshd config (sshd adds up `AllowUsers` from every file); a timed undo (`systemd-run --on-active=5min` removes the drop-in unless confirmed from a new session) | the core build keeps Ubuntu's SSH defaults to stay on the core functions; the risk accepted is password logins from `LAN_CIDR` if the host allows them |
-| Linting | **option, not in the core build** (moved out of the scaffold step on 2026-11-10; about one M session): a `lint` job in `pr.yml` running ruff, mypy, shellcheck (`bootstrap.sh`), yamllint, ansible-lint and tflint, each only over the file types that exist so far, failing when files of a type exist but its linter is missing; ruff, mypy, yamllint and ansible-lint hash-pinned in a dev requirements file this option adds, shellcheck and tflint pinned in `config/versions.toml` | not needed for the core functions; `terraform plan` + policy, `trivy config`, kubeconform and the no-Secrets rule still gate every PR (10.1) |
-| Unit tests | **option, not in the core build** (removed 2026-11-10): pytest over `lab/` in a `tests/` tree, with a `pyproject.toml`, hash-pinned dev tools in `requirements-dev.txt` and a repo `.venv/`, run as a `pr.yml` job | testing happens as the lab is built: each step's Exit is run by hand on the CLI, and every change runs through the Gitea pipeline (`pr.yml`'s gates, then `verify`); most units would only mock CloudStack, Vault and k3s |
+| Linting | **option, not in the core build** (moved out of the scaffold step on 2026-11-10; about one M session): lint steps in `deploy.yml`'s `check` job running ruff, mypy, shellcheck (`bootstrap.sh`), yamllint, ansible-lint and tflint, each only over the file types that exist so far, failing when files of a type exist but its linter is missing; ruff, mypy, yamllint and ansible-lint hash-pinned in a dev requirements file this option adds, shellcheck and tflint pinned in `config/versions.toml` | not needed for the core functions; `terraform plan` + policy, `trivy config`, kubeconform and the no-Secrets rule still gate every PR (10.1) |
+| Unit tests | **option, not in the core build** (removed 2026-11-10): pytest over `lab/` in a `tests/` tree, with a `pyproject.toml`, hash-pinned dev tools in `requirements-dev.txt` and a repo `.venv/`, run in `deploy.yml`'s `check` job | testing happens as the lab is built: each step's Exit is run by hand on the CLI, and every change runs through the Gitea pipeline (`check`, then `verify`); most units would only mock CloudStack, Vault and k3s |
 | `status` command | **option, not in the core build** (removed 2026-11-10): a read-only `status` command printing each phase's `check()` result, the pinned versions, Vault's seal state, the gateway and host memory against the §5 budget | the core build keeps four commands; `up` and `update` log each phase's state as they converge, and a version is one `/opt/lab/bin/<tool> version` away |
-| Examiner walkthrough (`demo`) | **option, not in the core build** (removed 2026-11-10; about two M sessions): a `demo` command running a 14-minute walkthrough (shape, tiers and tunnel, application, encryption, zero trust, trust chain, backup, operations) as re-runnable proofs with human-readable output, reusing the `verify` checks; E2/E3 on the real `customers` key with every row rewrapped first; the break-glass port-forward shown in S4 and A1; a hand edit Flux reverts; kept as `docs/walkthrough.md` with real output | the evidence already exists without it: a green `deliver.yml` run ending in `verify`, and `up`'s local stage for B2/B3 (§13); a walkthrough re-states it for a human audience |
+| Examiner walkthrough (`demo`) | **option, not in the core build** (removed 2026-11-10; about two M sessions): a `demo` command running a 14-minute walkthrough (shape, tiers and tunnel, application, encryption, zero trust, trust chain, backup, operations) as re-runnable proofs with human-readable output, reusing the `verify` checks; E2/E3 on the real `customers` key with every row rewrapped first; the break-glass port-forward shown in S4 and A1; a hand edit Flux reverts; kept as `docs/walkthrough.md` with real output | the evidence already exists without it: a green `deploy.yml` run ending in `verify`, and `up`'s local stage for B2/B3 (§13); a walkthrough re-states it for a human audience |
 | Egress tightening | **option, not in the core build** (added 2026-11-09; folds into 2.2, minutes of work): Gitea's public egress in rule 4 also excludes `100.64.0.0/10` (carrier-grade NAT) and `169.254.0.0/16` (link-local, where cloud metadata services listen), so a compromised Gitea cannot reach a provider's metadata endpoint or a CGNAT neighbour; the 2.2 Exit adds `169.254.169.254:443` timing out from Gitea's address | not needed for the core functions |
 | Defence in depth inside k3s | mesh identity (AuthorizationPolicy) only | Kubernetes NetworkPolicies as an L3 layer under the mesh: worth it with many teams; its interplay with ambient's HBONE port needs care, out of scope |
-| Git provenance | protected `main`, read-only Flux token | Flux verifying signed commits: needs every merge signed by a key Flux trusts, Gitea's merge commits included |
+| Git provenance | read-only Flux token; `main` changed through `update`'s checked PR | Flux verifying signed commits: needs every merge signed by a key Flux trusts, Gitea's merge commits included |
 
 ---
 
@@ -4009,7 +4055,7 @@ loop. Import one bead per row.
 | 3.2a | `cmk` and the scoped accounts | 3.1d | 3 | M |
 | 3.3a | Offerings and the mgmt network | 3.2a | 3 | M |
 | 3.3b | Spike: a mgmt NIC on a VPC VM | 3.3a, 3.2a | 3 | M |
-| 3.5a | Seed, workflows and branch protection | 2.10 | 3 | M |
+| 3.5a | Seed and workflow | 2.10 | 3 | M |
 | 3.5b | Hand-off: dispatch and follow | 3.5a, 3.3b | 3 | M |
 | 3.5c | Platform consoles | 3.2a, 2.7b, 2.8, 2.5e | 3 | M |
 | 4.0 | Cloud image (pin only; Terraform pulls it) | — | 4 | S |
@@ -4057,8 +4103,8 @@ loop. Import one bead per row.
 | 9.3a | DR drill: scratch Vault from the snapshot | 9.1a | 9 | M |
 | 9.3b | DR drill: the canary decrypts | 9.3a | 9 | S |
 | 9.4 | Crypto-shredding | 9.3b | 9 | S |
-| 10.1 | `pr.yml` gates | 5.3b, 8.6a, 8.1b | 10 | M |
-| 10.2 | `deliver.yml` change flow | 8.7f, 12.1f | 10 | S |
+| 10.1 | ~~`pull-request.yaml` gates~~ dropped 2026-11-16 | 5.3b, 8.6a, 8.1b | 10 | M |
+| 10.2 | `deploy.yml` change flow | 8.7f, 12.1f | 10 | S |
 | 10.3a | `schedules.yml`: nightly backup and verify | 9.1a, 12.1c | 10 | S |
 | 12.1a | `verify`: framework and network checks | 8.7f | 12 | M |
 | 12.1b | `verify`: data, secrets, mesh and API access | 12.1a | 12 | M |
@@ -4075,7 +4121,7 @@ Steps not listed kept their number. A bare old number now names the whole group.
 **Removed** numbers stay unused; what they built is summarised in §15.
 On 2026-11-10, 0.2c (dev tools and unit tests), 12.2 and 12.3 (`demo`) were removed:
 each step's Exit, run by hand, and the Gitea pipeline are the tests, and the evidence is a
-green `deliver.yml` run plus `up`'s local stage (§13).
+green `deploy.yml` run plus `up`'s local stage (§13).
 
 | Old | New |
 |---|---|

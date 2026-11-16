@@ -36,9 +36,13 @@ ANSIBLE_GALAXY = Path("/usr/bin/ansible-galaxy")  # full path, so installed_vers
 CLOUD_TERRAFORM_VERSION = "4.0.0"
 COLLECTIONS_DIR = Path("/usr/share/ansible/collections")  # on Ansible's default search path
 
-# --- VPC ---
-VPC_NFT_SRC = FILES / "nftables-vpc.nft"
-VPC_NFT_FILE = Path("/etc/lab/nftables-vpc.nft")
-VPC_SERVICE = "lab-vpc-nftables.service"
-VPC_SERVICE_UNIT_SRC = FILES / VPC_SERVICE
-VPC_SERVICE_UNIT_FILE = Path("/etc/systemd/system") / VPC_SERVICE
+# --- Toolchain: Node ---
+NODE_VERSION = "24.22.3"
+NODE_URL = f"https://nodejs.org/dist/v{NODE_VERSION}/node-v{NODE_VERSION}-linux-x64.tar.xz"
+NODE_SHA256 = "4f2b175a6d53a5c617a80dba2676238a0688cef28c6da4eba35c7d844e66fcfb"
+NODE_MEMBER = f"node-v{NODE_VERSION}-linux-x64/bin/node"  # the only file taken from the archive
+
+# --- VM firewall (vmfw) ---
+VMFW_NFT_SRC = FILES / "nftables-vmfw.nft"
+VMFW_TABLES = ["bridge lab_vmfw_l2", "inet lab_vmfw"]  # must match the tables in VMFW_NFT_SRC
+VMFW_MARKER = Path("/run/lab/vmfw.loaded")  # /run empties on reboot, like the rules; setup reads it

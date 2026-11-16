@@ -16,7 +16,7 @@ locals {
     "tun-1" = {
       group    = "hub"
       vcpu     = 1
-      memory   = 1024
+      memory   = 512 # WireGuard only
       disk_gb  = 10
       network  = libvirt_network.site_hub.name
       vpc_ip   = "10.2.1.10"
@@ -28,8 +28,8 @@ locals {
     }
     "be-1" = {
       group    = "backend"
-      vcpu     = 4
-      memory   = 6144
+      vcpu     = 2 # k3s minimum; the host has 4 cores
+      memory   = 4096
       disk_gb  = 40
       network  = libvirt_network.site_c.name
       vpc_ip   = "10.3.1.10"
@@ -96,7 +96,7 @@ resource "libvirt_domain" "vm" {
   memory      = each.value.memory
   memory_unit = "MiB"
   running     = true
-  autostart   = true
+  autostart   = false # vmfw rules vanish on reboot; no VM boots before `bootstrap up` reloads them
 
   cpu = {
     mode = "host-passthrough"

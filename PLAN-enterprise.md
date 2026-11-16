@@ -192,8 +192,10 @@ left out, and why, is in §15.
 - **Bootstrap by hand, everything else by pipeline.** `bootstrap.sh` builds only what
   must exist before CI can run: the host, the control plane, CloudStack and the
   runner (Phases 1–3). From Phase 4 on, every phase is a job in the delivery
-  pipeline, and each job runs its phase module directly (`python3 -B -m src.pipeline.<module>`,
-  e.g. `python3 -B -m src.pipeline.setup`).
+  pipeline: `deploy.yml` calls one workflow file per stage (`check.yml` →
+  `terraform.yml` → `ansible.yml` → Flux → app, decided 2026-11-16), and each file runs
+  the tools themselves (`terraform`, `ansible-playbook`, `flux`) and ready-made actions,
+  with no Python pipeline package.
   Inside k3s, **Flux** applies what `main` holds (GitOps); jobs never `kubectl apply`
   manifests, they only write the run-time Secrets Flux waits for (§6).
   A pipeline phase has no `bootstrap.sh` command: it runs as a `deploy.yml` job, as
@@ -205,14 +207,14 @@ left out, and why, is in §15.
   reboot, the Vault DR drill and teardown, because CI cannot exist before them, would
   not survive them, or must never hold the unseal key or break-glass credentials they
   use.
-- **The development loop.** The working checkout (cloned from GitHub) has a second
-  remote, `gitea` = `https://gitea.lab.test/lab/lab.git`, which is the origin the
-  pipeline builds from. The operator works as the Gitea user `operator` (write access
-  to `lab/lab`, not a site admin), pushing over HTTPS with a personal access token; the
-  Gitea admin account is break-glass only. A change is (since 2026-11-16): commit →
-  `sudo ./bootstrap.sh update`, which pushes `main` to Gitea and starts `deploy.yml`,
-  whose `check` job gates the rest. A Gitea push mirror copies `main` back to GitHub (optional: skipped when no
-  GitHub token was given). Each job clones `lab/lab` (private) with the job's own
+- **The development loop** (rewritten 2026-11-16 for the review). The lab is published
+  as its own repo; the reviewer clones it, runs `up`, edits files and runs `update`.
+  Gitea's `lab/lab` plays the company's internal GitLab: after `up` it is the repo of
+  record, and the clone's own remote (`origin`) is never pushed to or relied on. A
+  change is: edit → `sudo ./bootstrap.sh update`, which commits the edits, pushes `main`
+  to Gitea, and that push starts `deploy.yml`, whose `check` job gates the rest. No
+  `gitea` remote, `operator` account or push mirror (the admin pushes from
+  `bootstrap.sh`, credentials from Vault). Each job clones `lab/lab` (private) with the job's own
   short-lived token (`GITEA_TOKEN`, which act_runner provides) into its work directory;
   the runner never runs code from the operator's checkout.
 - **Every phase owns its teardown.** Each phase module exports `up()`, `down()` and
@@ -781,8 +783,9 @@ clusters/backend/            everything Flux applies to k3s (no Secret values, e
 app/                         api/ and frontend/ (Flask), each with Dockerfile and
                              requirements.txt (hash-pinned); frontend/ also holds the
                              Caddyfile and the Podman quadlet units for fe-1
-.gitea/workflows/            deploy.yml (`check`, then Phases 4–12, on
-                             main); no schedules.yml (Phase 9 cut)
+.gitea/workflows/            deploy.yml (triggers + chain) calling check.yml,
+                             terraform.yml, then ansible/Flux/app/verify files;
+                             no schedules.yml (Phase 9 cut)
 docs/                        capacity.md, runbook.md
 state/                       local run state (gitignored): bootstrap log, run lock. Pipeline
                              jobs keep **no** local state between jobs (§9 intro)
@@ -795,9 +798,9 @@ state/                       local run state (gitignored): bootstrap log, run lo
 `bootstrap.sh` execs `python3 -B -m lab "$@"` and has exactly five commands: `up`,
 `update`, `teardown`, `destroy` and `--help` (last table below). There are no
 subcommands and no flags. The phases are Python modules with `up/down/check`, not
-commands: `up` and `update` run them, and a pipeline job runs its phase module
-directly, `python3 -B -m src.pipeline.<module>` (e.g. `python3 -B -m src.pipeline.setup`). The first two
-tables are in **build order**.
+commands: `up` and `update` run them. Pipeline jobs are workflow files that call the
+tools directly (no `src/pipeline/`, decided 2026-11-16). The first two tables are in
+**build order**.
 
 **Bootstrap: local, run by `up`** (CI cannot exist before these)
 
@@ -815,7 +818,13 @@ included); 3 `provision.py`; 4 `image.py`;
 9 `backup.py`; 12 `verify.py`; 13 `teardown.py` + `revert.py`. (Phases 7 and 11 were
 removed; their numbers are kept free so the others keep theirs.)
 
-**Delivery pipeline: `deploy.yml` jobs on the runner** (one job per phase)
+**Delivery pipeline: `deploy.yml` jobs on the runner** (one job per phase). Restructured
+2026-11-16: `deploy.yml` holds only the triggers and the chain; each stage is its own
+workflow file (`on: workflow_call`), called with `uses: ./.gitea/workflows/<stage>.yml`
+and ordered by `needs:`. Built so far: `check.yml` (gate) → `terraform.yml` (the
+`setup` row; a stub until 5.3b). The rows below map onto `ansible.yml` (base, tunnel),
+a Flux/cluster file (cluster, mesh), `app.yml` (app, monitoring) and `verify.yml` as
+those phases are written; the `image` row is dropped (no image job).
 
 | # | Job | Phase | Needs |
 |---|---|---|---|
@@ -837,13 +846,21 @@ the merged revision (`cmd.flux-wait`).
 
 | Command | Runs |
 |---|---|
-| `up` | First build, and resume after a failed first build (redesigned 2026-11-16). If `state/initialized` exists it logs "initial infrastructure already initialized; use `update`" and stops, changing nothing (no Gitea or Vault needed for the check). Otherwise `platform_up()` (every host and platform module's `up()`, each converging, so a re-run continues where a failed one broke) → seed `lab/lab` if still empty (the push triggers `deploy.yml`'s first build) → write `state/initialized` → print the Actions URL. It does not follow the run: the operator watches it in Gitea (3.5a) |
-| `update` | The one command for every change (redesigned 2026-11-16). For a lab already initialized (`state/initialized`); otherwise it refuses. `platform_up()` applies host changes from the local checkout (and after a reboot reloads the VM firewall and unseals Vault). Then it pushes the committed local `main` straight to Gitea's `main`, which triggers `deploy.yml`; its first job, `check` (`terraform fmt`/`validate`), stops the run before anything is applied if the change is malformed. With nothing new to push, it dispatches `deploy.yml` instead. It prints the Actions URL and exits (3.5b) |
+| `up` | First build, and resume after a failed first build (redesigned 2026-11-16). If `state/initialized` exists it logs "initial infrastructure already initialized; use `update`" and stops, changing nothing (no Gitea or Vault needed for the check). Otherwise `platform_up()` (every host and platform module's `up()`, each converging, so a re-run continues where a failed one broke) → commit any edits → seed `lab/lab` if still empty (the push starts `deploy.yml`'s first build) → write `state/initialized` → print the Actions URL. It does not follow the run: the operator watches it in Gitea (3.5a) |
+| `update` | The one command for every change (redesigned 2026-11-16). For a lab already initialized (`state/initialized`); otherwise it refuses. `platform_up()` applies host changes from the local checkout (and after a reboot reloads the VM firewall and unseals Vault). It first commits the checkout's edits, then pushes `main` to Gitea's `main`, and the push starts `deploy.yml` (with nothing new it dispatches one run instead); its first job, `check` (`terraform fmt`/`validate`), stops the run before anything is applied if the change is malformed. It prints the Actions URL and exits; watching the run is the only manual part (3.5b) |
 | `teardown` | The tenant side only: the VPCs, the WAN and the VMs (fe-1, tun-1, be-1, so the k3s cluster goes with be-1) and the state and Vault entries that belong only to them (e.g. the break-glass kubeconfig). Keeps the host platform (control plane, Vault, Gitea, MinIO, telemetry, CloudStack, runner, VM image template), so the next `up` is quick |
 | `destroy` | First asks: it prints what it is about to delete (the VPC and VMs, CloudStack with its `cloud` databases and all of MySQL's data, the platform, every package and user the lab added) and continues only if the operator types `destroy`; anything else, or no terminal on stdin, stops it with nothing changed (no flag skips the question). Then teardown's rows (always run: each is a no-op if `teardown` already ran), then `platform_down()` (the platform and host restore, in §14 order), which also removes `state/initialized`. Ends with a reboot (it removes the runner, so it cannot run in CI). Run again after the reboot, it asks again, finds nothing left, runs the revert checks V1–V5 and writes the pass/fail report. Every row tolerates "already gone" |
 | `--help` | Lists the four commands (run with `sudo`, like the others: the shim checks root first) |
 
-**Pipeline-only jobs** (not `bootstrap.sh` commands; each runs `python3 -B -m src.pipeline.<module>`)
+**Errors (rule, 2026-11-16): no Python traceback on the console.** `main()` catches every
+failure of a command: a failed subprocess prints its own message, then one `[x] <command>
+stopped: '<cmd>' exited with code N; fix the cause and run it again` line; any other error
+one `[x] <command> stopped: <reason>; details in state/bootstrap.log` line. The traceback
+goes to `state/bootstrap.log` only, exit code 1 (130 on Ctrl-C). Modules raise or exit with
+a message; they do not wrap each call in `try/except`. Expected conditions (repo missing,
+not initialized) keep their own `log.error` + `sys.exit(1)`.
+
+**Pipeline-only jobs** (not `bootstrap.sh` commands; workflow files that run the tools directly)
 
 | Job | Where | Runs |
 |---|---|---|
@@ -863,8 +880,8 @@ Each step fits one focused session and ends with an **Exit** you can run. Phases
 `deploy.yml`, and its Exit is checked on the pipeline run.** Jobs share nothing on
 disk: Terraform state is in MinIO, the inventory comes from it, the kubeconfig and
 every secret come from Vault, and "is this phase done?" is answered by `check()`. While developing a
-phase, run its module by hand as `lab-runner` from a clone of your branch
-(`sudo -u lab-runner python3 -B -m src.pipeline.<module>`), then prove it from the pipeline.
+phase, run its tool commands by hand as `lab-runner` from a clone of your branch
+(e.g. `sudo -u lab-runner terraform -chdir=terraform plan`), then prove it from the pipeline.
 
 **Steps and handoffs.** Every step is sized for one session (one context window): one
 outcome, a few files, **S** (60 min) or **M** (105 min) in the study loop. A split step
@@ -1638,9 +1655,11 @@ runbook (14.4): a subshell with `VAULT_TOKEN` from a `lab-bootstrap` AppRole log
   lines): a JavaScript action, so the runner runs it with the host's `node` (1.3 installs
   Node 24 at `/usr/local/bin`) and downloads it from github.com (Gitea's default actions
   source); `persist-credentials: false` keeps the job token out of the workspace's
-  `.git/config`. Rule (2026-11-16): workflows stay short; a ready-made action replaces a
-  step whenever one exists, and any real logic lives in a `src/pipeline/` module called by
-  one `run:` line (`python3 -B -m src.pipeline.<module>`), never in inline shell.
+  `.git/config`. Rule (2026-11-16): workflows stay short and as little Python as
+  possible: a ready-made action replaces a step whenever one exists, otherwise a `run:`
+  line calls the tool itself; one workflow file per stage, called from `deploy.yml`. A
+  script is added only where a step's logic would not fit a few `run:` lines, next to the
+  tool it serves, decided when that happens.
   `lab-runner` owns `/var/lib/lab/backups/`, `/var/lib/lab/tfstate/` (`0700`, Terraform's local state, 5.1), the CoreDNS zone file that `setup`
   updates and Grafana's dashboards directory that the `monitoring` job fills (2.7b). It builds container images with
   **rootless** Podman (`podman build`; no daemon, no socket, nothing root-owned) (and, with the
@@ -2040,21 +2059,24 @@ switching**.
 - **3.5a Seed** (redesigned 2026-11-16; workflow moved to 3.5b the same day, so the seed
   is tested on its own). The last step of the first `up`
   seeds `lab/lab` with a plain `git push` of the local `main` (its commits, history
-  included; uncommitted edits simply stay behind, nothing refuses them). `initial_push()` and
-  `update` share one `push(creds)` (local `main` → Gitea's `main`). The push is **not**
-  `[skip ci]`: once `.gitea/workflows/deploy.yml` is in the history, any push to `main`
-  starts a build. The first seed (2026-11-16) does not contain it, so it starts no run;
-  the workflow arrives with 3.5b through `update`'s push (a normal push to a non-empty
-  repo, so the question of Actions on a first push never arises). `deploy.yml`
-  (triggers: push to `main`, `workflow_dispatch`; written in 3.5b):
+  included). Edits not yet committed are committed first (`commit_changes()`: `git add
+  -A` and a commit as `lab operator`, as root; `.gitignore` keeps `state/` and caches
+  out). `initial_push()` and `update` share one `push(creds)` (the checked-out `HEAD` →
+  Gitea's `main`, so the host code `platform_up()` applied and the deployed code are
+  always the same commit; a push that is not a fast-forward is rejected). **A push to `main` starts the run**, as a
+  push to an internal GitLab would (decided 2026-11-16, replacing dispatch-only the
+  same day): the seed push starts the first build. To verify on a fresh `up`: that
+  Gitea fires Actions on the first push into an empty repo (fallback: `up` dispatches).
+  `deploy.yml` (triggers: push to `main`, `workflow_dispatch`; written in 3.5b):
   - first job **`check`**: `terraform init -backend=false` → `terraform fmt -check` →
     `terraform validate` (`-backend=false` touches no state and needs no secrets). Every
     other job `needs: check`, so a red check stops the run before anything is planned or
     applied
-  - then one job per phase, each running `python3 -B -m src.pipeline.<module>` (pipeline
-    code lives in `src/pipeline/` and reuses `src/lib`); a phase not written yet runs a
-    stub that passes. A `concurrency` group keeps two runs from interleaving their jobs
-    (check the Gitea version supports it)
+  - then one workflow file per stage (`terraform.yml`, `ansible.yml`, …), each called
+    with `uses: ./.gitea/workflows/<stage>.yml` and running the tool directly; a stage not
+    written yet is a one-line `echo` stub that passes. `concurrency: {group: lab-deploy,
+    cancel-in-progress: false}` (added 2026-11-16) makes a second run wait for the first
+    instead of interleaving its jobs or cancelling it mid-apply
   - no `pull-request.yaml`, no branch protection and no `schedules.yml` (see **Dropped and
     deferred**)
 
@@ -2077,21 +2099,29 @@ switching**.
   `src/__main__.py`, `push()`/`initial_push()` in `src/services/gitea/gitea.py`, `state/initialized` ·
   **Records** `cmd.update-flow` (commit → `update`) · **Check** Exit
 - **3.5b Workflow, updates: push and re-run** (redesigned 2026-11-16). `update` is the one command
-  for every change, so the local checkout is the only place the operator edits:
-  1. refuse unless `state/initialized` exists ("run `up` first"); only committed work is
-     pushed, uncommitted edits stay behind
-  2. `platform_up()`: host changes applied from the checkout (Gitea, runner, vmfw rules,
+  for every change, so the local checkout is the only place anyone edits:
+  1. refuse unless `state/initialized` exists ("run `up` first")
+  2. `commit_changes()`: every edit becomes one commit (`update <date time>`, as `lab
+     operator`), run as root like everything else (the operator owns the infrastructure);
+     the reviewer never runs `git` themselves
+  3. `platform_up()`: host changes applied from the checkout (Gitea, runner, vmfw rules,
      CoreDNS, …); after a reboot it also reloads the VM firewall and unseals Vault
-  3. `push(creds)`: new commits go straight to Gitea's `main`, and the push
-     triggers `deploy.yml`. If Gitea's `main` already held them (nothing new), git pushes
-     nothing and no run starts, so `update` dispatches `deploy.yml` instead
-     (`POST /repos/lab/lab/actions/workflows/deploy.yml/dispatches`, `{"ref": "main"}`)
-  4. print the Actions URL and exit; the operator follows the run in Gitea
+  4. `main_differs(creds)` (the checked-out `HEAD` vs `GET /repos/lab/lab/branches/main`):
+     if they differ, `push(creds)`, and **the push starts `deploy.yml`**; if not,
+     `dispatch(creds)` (`POST …/actions/workflows/deploy.yml/dispatches`, `{"ref":
+     "main"}`), so `update` alone also recovers after a reboot (the VMs have `autostart =
+     false`) or re-runs a build that failed for a reason outside Git. Exactly one run
+     either way
+  5. print the Actions URL and exit; watching the run in Gitea is the only manual part
+
+  Deferred (2026-11-16, user's idea): ask Gitea's API for the latest `deploy` run's
+  status, so `update` can report it or refuse while a run is still in progress. It must
+  not refuse after a *failed* run: `update` is the only way to push the fix.
 
   Built in order: `push(creds)` in `cmd_update` first; then Node 24 in the toolchain (1.3,
-  for `actions/checkout@v4`), `deploy.yml` with only `check` and a stub `setup` job, and
-  `src/pipeline/__init__.py` + `setup.py`, committed and pushed by `update` (the first
-  `deploy` run); then `dispatch()`.
+  for `actions/checkout@v4`), `deploy.yml` calling `check.yml` and a stub
+  `terraform.yml`, `dispatch()`; then (2026-11-16, for the review) the push trigger back,
+  `commit_changes()` and `main_differs()`.
 
   A bad change fails `deploy.yml`'s `check` job: nothing after it runs, so nothing is
   planned or applied. The commit does sit on Gitea's `main`; the operator fixes, commits
@@ -2100,17 +2130,22 @@ switching**.
   holds only if each component is written for it (Ansible: no bare `command:` without
   `creates:` or `changed_when:`). Each job checks the host's available memory against
   the §5 reserve before it starts. A change touching host and VMs is safe in one
-  `update`: step 2 applies the host part before step 3 pushes.
-  Exit: the `update` that pushes `deploy.yml` starts the first run, `check` and the
-  stub `setup` go green, and the job log prints `id`: `lab-runner`; a deliberately
+  `update`: `platform_up()` applies the host part before the push. That order is forced
+  (`platform_up()` starts Gitea and unseals Vault, which the push needs), so a push that
+  fails (rejected as not a fast-forward, network) leaves the host one commit ahead of the
+  pipeline; there is no rollback. git prints the reason and `update` stops, and the next
+  successful `update` brings both onto the same commit.
+  Exit: an uncommitted edit run through `update` becomes a commit on Gitea's `main` and
+  starts one `deploy` run (trigger: push); `update` with nothing new starts one run
+  (trigger: dispatch); `check` and the stub `terraform` go green; a deliberately
   misformatted `.tf` committed and run through `update` turns
   `check` red and no later job runs; the fix, run through `update`, goes green and the
-  build runs as `lab-runner` (the job log prints `id`); `update` with nothing new
-  dispatches a run; `update` before `up` refuses with "run `up` first".
+  build runs as `lab-runner` (the job log prints `id`); `update` before `up` refuses
+  with "run `up` first".
 
   ⤷ **Needs** 3.5a, 3.3b · **Recalls** `ci.workflows`, `gitea.url`,
   `vault.approle.lab-pipeline`, `host.memory` · **Produces** `.gitea/workflows/deploy.yml`,
-  `src/pipeline/`, `dispatch()` in `gitea.py`, `cmd_update` in `src/__main__.py` ·
+  `check.yml`, `terraform.yml` (stub), `dispatch()` in `gitea.py`, `cmd_update` in `src/__main__.py` ·
   **Records** `ci.workflows`, `ci.dispatch`, `cmd.update-flow` ·
   **Check** Exit
 - **3.5c Platform consoles** (R7; run by the platform phase). One **admin** login,
@@ -2381,14 +2416,14 @@ to fe-1's WAN address. §15 records the cloud VPC as the production answer.
 
   ⤷ **Needs** 5.2 · **Recalls** `net.vpcs` · **Produces** `policy/*.rego`,
   `policy/fixtures/` · **Records** `policy.dir`, `policy.fixtures` · **Check** Exit
-- **5.3b The gated apply.** The `setup` job (`python3 -B -m src.pipeline.setup`) first checks that
+- **5.3b The gated apply.** `terraform.yml` (called by `deploy.yml` after `check`) first checks that
   libvirt answers (`virsh --connect qemu:///system list`) and that
   `/run/lab/vmfw.loaded` exists (readable without root, unlike the table), so
   no network goes up without its ACLs. Then **plan → apply** (with 5.3a deferred,
   2026-11-15; the policy step slots in between when it returns). This is the first apply:
   the networks go in here.
-  Exit: the `setup` job applies the plan; with `/run/lab/vmfw.loaded` missing (as after
-  a reboot), `setup` refuses before planning.
+  Exit: `terraform.yml` applies the plan; with `/run/lab/vmfw.loaded` missing (as after
+  a reboot), it refuses before planning (one `run:` line: `test -f /run/lab/vmfw.loaded`).
 
   ⤷ **Needs** 5.2 · **Recalls** `fw.vmfw`, `libvirt.uri` · **Produces**
   `setup.py` (checks → plan → apply), the `setup` job · **Records** — ·
@@ -3279,7 +3314,7 @@ run by the learner with the break-glass kubeconfig (runbook), and the API audit 
 ### Phase 9 — Backup, restore, DR and crypto-shredding
 
 - **9.1a Backup: the Vault snapshot and the database.** The `backup` job
-  (`python3 -B -m src.pipeline.backup`; `schedules.yml` nightly, or dispatch):
+  (a workflow file; `schedules.yml` nightly, or dispatch; Phase 9 is cut):
   - `vault operator raft snapshot save`
   - `pg_dump -Fc -d app` as `postgres` over the instance's local socket (`kubectl exec
     postgres-1 -c postgres` as `lab-dbops`, the one identity allowed to exec, and only

@@ -5,22 +5,13 @@ on:
     branches: [main]
   workflow_dispatch:
 
+concurrency:
+  group: lab-deploy
+  cancel-in-progress: false
+
 jobs:
   check:
-    runs-on: host
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - run: terraform -chdir=terraform init -backend=false -input=false -lockfile=readonly
-      - run: terraform -chdir=terraform fmt -check -recursive
-      - run: terraform -chdir=terraform validate
-
-  setup:
+    uses: ./.gitea/workflows/check.yml
+  terraform:
     needs: check
-    runs-on: host
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - run: python3 -B -m src.pipeline.setup
+    uses: ./.gitea/workflows/terraform.yml

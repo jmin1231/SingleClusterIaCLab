@@ -1,0 +1,10 @@
+name: terraform
+
+on:
+  workflow_call:
+
+jobs:
+  apply:
+    runs-on: host
+    steps:
+      - run: echo "terraform plan and apply come with 5.3b"

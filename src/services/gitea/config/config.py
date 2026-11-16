@@ -12,4 +12,6 @@ GITEA_API = f"{GITEA_URL}/api/v1"
 GITEA_ORG = "lab"
 GITEA_REPO = "lab"
 GITEA_REPO_URL = f"{GITEA_URL}/{GITEA_ORG}/{GITEA_REPO}.git"
+GITEA_WORKFLOW = "deploy.yml"  # started by every push to main; update dispatches it when nothing is new
+COMMIT_IDENTITY = ["-c", "user.name=lab operator", "-c", "user.email=operator@lab.test"]  # update's commits
 

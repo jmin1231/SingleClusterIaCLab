@@ -3,13 +3,14 @@
 import argparse
 import fcntl
 import logging
+import subprocess
 import sys
 from collections.abc import Callable
 
 from src.host import kvm, network, ntp, preflight, toolchain, vmfw
 from src.lib import pki
 from src.lib.config import STATE_DIR
-from src.lib.log import setup_logging
+from src.lib.log import LOG_FILE as LOG_FILE_PATH, setup_logging
 from src.services.coredns import dns
 from src.services.podman import podman
 from src.services.traefik import traefik
@@ -60,8 +61,10 @@ def cmd_up() -> None:
     if INITIALIZED_MARKER.exists():
         log.info("initial infrastructure already initialized; use update")
         return
+    gitea.commit_changes()
     platform_up()
-    gitea.initial_push()
+    creds = gitea.gitea_admin(vault.login())
+    gitea.initial_push(creds)  # the push starts the first deploy.yml run
     INITIALIZED_MARKER.touch()  # last: if anything above failed, the next up carries on
 
 
@@ -69,10 +72,14 @@ def cmd_update() -> None:
     if not INITIALIZED_MARKER.exists():
         log.error("the lab is not initialized yet; run up first")
         sys.exit(1)
+    gitea.commit_changes()
     platform_up()
     creds = gitea.gitea_admin(vault.login())
-    gitea.push(creds)
-    # 3.5b: gitea.dispatch(creds) when nothing new was pushed, then log the Actions URL
+    if gitea.main_differs(creds):
+        gitea.push(creds)  # the push starts deploy.yml, like a push to the company's GitLab
+        log.info("pushed main; follow the run at %s/lab/lab/actions", gitea.GITEA_URL)
+    else:
+        gitea.dispatch(creds)  # nothing new: re-run anyway (after a reboot, or a retry)
 
 
 def cmd_teardown() -> None:
@@ -131,6 +138,14 @@ def main(argv: list[str] | None = None) -> int:
         except KeyboardInterrupt:
             log.error("%s interrupted; run it again to continue", args.command)
             return 130
+        except subprocess.CalledProcessError as err:
+            # the command printed its own reason above; the traceback goes to the log file only
+            log.error("%s stopped: '%s' exited with code %d; fix the cause and run it again",
+                      args.command, " ".join(map(str, err.cmd)), err.returncode, exc_info=True)
+            return 1
+        except Exception as err:
+            log.error("%s stopped: %s; details in %s", args.command, err, LOG_FILE_PATH, exc_info=True)
+            return 1
 
     return 0
 

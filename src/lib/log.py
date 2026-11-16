@@ -26,12 +26,15 @@ class ConsoleFormatter(logging.Formatter):
 
 
 class FileFormatter(ConsoleFormatter):
-    """Format a record as '<ISO timestamp> <prefix> message'."""
+    """Format a record as '<ISO timestamp> <prefix> message', plus the traceback if one is attached."""
 
     @override
     def format(self, record: logging.LogRecord) -> str:
         when = datetime.fromtimestamp(record.created).astimezone()
-        return f"{when.isoformat(timespec='seconds')} {super().format(record)}"
+        line = f"{when.isoformat(timespec='seconds')} {super().format(record)}"
+        if record.exc_info:
+            line += "\n" + self.formatException(record.exc_info)
+        return line
 
 
 def setup_logging() -> None:

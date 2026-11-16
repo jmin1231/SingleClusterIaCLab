@@ -9,12 +9,14 @@ import ssl
 import subprocess
 import sys
 import urllib.request, urllib.error
+from datetime import datetime
 
 from src.lib.config import BASE_DIR, LAB_ADMIN, LAB_CA_CERT
 from src.lib.system import compose
 from src.services.podman import podman
 from src.services.gitea.config.config import (
     GITEA_API, GITEA_ADMIN_KV, GITEA_RUNNER_KV, GITEA_ORG, GITEA_REPO, GITEA_REPO_URL, GITEA_URL,
+    GITEA_WORKFLOW, COMMIT_IDENTITY,
 )
 from src.services.vault import vault
 
@@ -114,7 +116,7 @@ def runner_registration_token(token: str, creds: dict) -> None:
 
 
 def push(creds: dict) -> None:
-    """Push to Gitea repo's main branch"""
+    """Push the checked-out commit to Gitea's main; once it succeeds, the pipeline builds the same commit platform_up() applied."""
     credentials = base64.b64encode(
         f"{creds['username']}:{creds['password']}".encode()
     ).decode("ascii")
@@ -129,14 +131,50 @@ def push(creds: dict) -> None:
     }
     subprocess.run(
         ["git", "-C", str(BASE_DIR),
-         "push", GITEA_REPO_URL, "refs/heads/main:refs/heads/main"],
+         "push", GITEA_REPO_URL, "HEAD:refs/heads/main"],
         env=env, check=True,
     )
 
 
-def initial_push() -> None:
+def git(*args: str) -> str:
+    """Run git in the lab checkout (as root, the infrastructure's owner); return stdout, errors reach the terminal."""
+    return subprocess.run(
+        ["git", "-C", str(BASE_DIR), *args],
+        stdout=subprocess.PIPE, text=True, check=True,
+    ).stdout.strip()
+
+
+def commit_changes() -> None:
+    """Commit every edit in the checkout (git add -A; .gitignore respected), as Gitea's next change."""
+    if not git("status", "--porcelain"):
+        log.info("no uncommitted changes")
+        return
+    git("add", "-A")
+    git(*COMMIT_IDENTITY, "commit", "-q", "-m", f"update {datetime.now():%Y-%m-%d %H:%M}")
+    log.info("committed local changes as %s", git("rev-parse", "--short", "HEAD"))
+
+
+def main_differs(creds: dict) -> bool:
+    """True if the checked-out commit and Gitea's main differ.
+
+    Usually local is ahead (a push sends it); if it is behind or diverged, the push
+    (no --force) is rejected and update stops.
+    """
+    branch = gitea_api(creds, "GET", f"repos/{GITEA_ORG}/{GITEA_REPO}/branches/main")
+    return git("rev-parse", "HEAD") != branch.get("commit", {}).get("id")
+
+
+def dispatch(creds: dict) -> None:
+    """Start one deploy.yml run on main without a push (nothing new, e.g. after a reboot)."""
+    gitea_api(creds, "POST",
+              f"repos/{GITEA_ORG}/{GITEA_REPO}/actions/workflows/{GITEA_WORKFLOW}/dispatches",
+              {"ref": "main"})
+    log.info("Started %s; follow it at %s/%s/%s/actions",
+             GITEA_WORKFLOW, GITEA_URL, GITEA_ORG, GITEA_REPO)
+
+
+def initial_push(creds: dict) -> None:
     """Push main into the still-empty lab/lab once (later pushes come from update)."""
-    creds = gitea_admin(vault.login())
     full_name = f"{GITEA_ORG}/{GITEA_REPO}"
 
     repo = gitea_api(creds, "GET", f"repos/{full_name}")
@@ -148,7 +186,8 @@ def initial_push() -> None:
         return
 
     push(creds)
-    log.info("Pushed main to %s; seeded at %s/%s", full_name, GITEA_URL, full_name)
+    log.info("Pushed main to %s; the push starts %s at %s/%s/actions",
+             full_name, GITEA_WORKFLOW, GITEA_URL, full_name)
 
 
 def up() -> None:

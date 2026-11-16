@@ -3,8 +3,9 @@
 import logging
 import subprocess
 
-from src.host.config.config import VMFW_MARKER, VMFW_NFT_SRC, VMFW_TABLES
+from src.host.config.config import VMFW_MARKER, VMFW_NFT_SRC, VMFW_PACKAGES, VMFW_TABLES
 from src.host.preflight import detect_network
+from src.lib.system import apt_install
 
 log = logging.getLogger(__name__)
 
@@ -19,7 +20,8 @@ def render_rules(network: dict) -> bytes:
 
 
 def up() -> None:
-    """Check and load the rules (one atomic swap, safe to repeat), then leave the marker for setup."""
+    """Check and load the rules (one atomic swap, safe to repeat), then leave the marker for terraform.yml."""
+    apt_install(VMFW_PACKAGES)
     network = detect_network()
     rules = render_rules(network)
 

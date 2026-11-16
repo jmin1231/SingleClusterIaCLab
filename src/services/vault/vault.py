@@ -1,4 +1,4 @@
-"""Vault: the secrets and encryption service, running in Podman on 10.250.0.1:8200."""
+"""Vault: the secrets service, running in Podman on 10.250.0.1:8200."""
 
 import json
 import logging
@@ -218,10 +218,10 @@ def up(certs_changed: bool) -> None:
 
 def down() -> None:
     """Remove the Vault container, its data, its unseal key and lab-bootstrap's AppRole credentials."""
-    if podman.check():
-        compose("vault", "down", "--volumes")
-    else:
-        log.info("Podman is not set up; no Vault container to remove")
-    VAULT_INIT_FILE.unlink(missing_ok=True)  # the keys are useless once the data is gone
+    if not podman.check():
+        log.info("Podman is not set up; Vault's data and unseal key are kept")
+        return
+    compose("vault", "down", "--volumes")
+    VAULT_INIT_FILE.unlink(missing_ok=True)  # only once the data is gone: the key is what unlocks it
     VAULT_APPROLE_FILE.unlink(missing_ok=True)
     log.info("Vault removed: container, data, unseal key and AppRole credentials")

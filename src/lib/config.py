@@ -28,17 +28,14 @@ DOCKER_HOST = "unix:///run/podman/podman.sock"
 CFSSL_DIR = BASE_DIR / "src" / "cfssl"
 PKI_DIR = STATE_DIR / "pki"
 LAB_CA = "ca"
-APP_ROOT = "app-root"
 LAB_CA_CERT = PKI_DIR / f"{LAB_CA}.pem"
 
-CERTS: dict[str, tuple[str, str, list[str], tuple[int, int]]] = {
-    # name:            (root,     profile,  hosts,                                            key owner (uid, gid))
-    "vault":           (LAB_CA,   "server", ["vault.lab.test", str(VMNET.ip), "127.0.0.1"],  (100, 1000)),
-    "gateway":         (LAB_CA,   "server", ["gitea.lab.test", "cloudstack.lab.test", "grafana.lab.test",
-                                             "prometheus.lab.test", "loki.lab.test"],        (0, 0)),
-    "app-edge":        (LAB_CA,   "server", ["app.lab.test"],                                 (0, 0)),
-    "backend-gw":      (APP_ROOT, "server", ["api.backend.lab.test"],                         (0, 0)),
-    "frontend-client": (APP_ROOT, "client", ["frontend.app.lab.test"],                        (0, 0)),
+# Every certificate is signed by LAB_CA.
+CERTS: dict[str, tuple[str, list[str], tuple[int, int]]] = {
+    # name:     (profile,  hosts,                                            key owner (uid, gid))
+    "vault":    ("server", ["vault.lab.test", str(VMNET.ip), "127.0.0.1"],  (100, 1000)),
+    "gateway":  ("server", ["gitea.lab.test"],                               (0, 0)),
+    "app-edge": ("server", ["app.lab.test"],                                 (0, 0)),
 }
 
 # --- Vault ---

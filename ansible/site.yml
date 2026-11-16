@@ -1,3 +1,13 @@
+- name: Terraform's inventory has all three VMs
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Each group has its VM
+      ansible.builtin.assert:
+        that: groups[item] | default([]) | length == 1
+        fail_msg: "group {{ item }} has no VM; is the Terraform state there?"
+      loop: [frontend, hub, backend]
+
 - name: VMs are ready
   hosts: all
   gather_facts: false

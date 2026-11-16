@@ -3,13 +3,14 @@
 import argparse
 import fcntl
 import logging
+import shutil
 import subprocess
 import sys
 from collections.abc import Callable
 
 from src.host import kvm, network, ntp, preflight, toolchain, vmfw
 from src.lib import pki
-from src.lib.config import STATE_DIR
+from src.lib.config import LAB_DIR, STATE_DIR
 from src.lib.log import setup_logging
 from src.services.coredns import dns
 from src.services.podman import podman
@@ -45,8 +46,8 @@ def platform_down() -> None:
     """Remove the host and platform services, in the order that keeps each removal possible."""
     runner.down()
     toolchain.down()
-    vmfw.down()
     kvm.down()
+    vmfw.down()
     gitea.down()
     traefik.down()
     vault.down()
@@ -64,8 +65,7 @@ def cmd_up() -> None:
     gitea.commit_changes()
     platform_up()
     creds = gitea.gitea_admin(vault.login())
-    sha = gitea.initial_push(creds)
-    run_id = gitea.wait_for_run(creds, sha) if sha else gitea.dispatch(creds)
+    run_id = gitea.start_run(creds)
     INITIALIZED_MARKER.touch()
     gitea.follow_run(creds, run_id)
 
@@ -77,19 +77,17 @@ def cmd_update() -> None:
     gitea.commit_changes()
     platform_up()
     creds = gitea.gitea_admin(vault.login())
-    if gitea.main_differs(creds):
-        run_id = gitea.wait_for_run(creds, gitea.push(creds))
-    else:
-        run_id = gitea.dispatch(creds)
-    gitea.follow_run(creds, run_id)
+    gitea.follow_run(creds, gitea.start_run(creds))
 
 
 def cmd_teardown() -> None:
-    log.info("teardown: not implemented yet")
+    log.error("teardown is not implemented yet")
+    sys.exit(1)
 
 
 def cmd_destroy() -> None:
     platform_down()
+    shutil.rmtree(LAB_DIR, ignore_errors=True)
     INITIALIZED_MARKER.unlink(missing_ok=True)
     log.info("destroy complete: everything the lab installed is removed")
 
@@ -98,7 +96,7 @@ COMMANDS: dict[str, tuple[Callable[[], None], str]] = {
     "up": (cmd_up, "build the infrastructure once (later runs: use update)"),
     "update": (cmd_update, "re-apply host changes and re-run the pipeline"),
     "teardown": (cmd_teardown, "remove the VPC and its VMs, keep the host platform"),
-    "destroy": (cmd_destroy, "destroy everything and restore the host to before"),
+    "destroy": (cmd_destroy, "remove the VMs and everything the lab installed on the host"),
 }
 
 
@@ -106,7 +104,7 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     """Parse the command line arguments."""
     parser = argparse.ArgumentParser(
         prog="bootstrap.sh",
-        description="Provision the entire infrastructure. See diagram/ for details.",
+        description="Provision the entire infrastructure. See build-order.md for details.",
     )
 
     sub = parser.add_subparsers(dest="command", metavar="<command>")

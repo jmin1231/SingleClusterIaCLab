@@ -41,8 +41,8 @@ table inet lab_vmfw
 delete table inet lab_vmfw
 
 table inet lab_vmfw {
-    # The LAN's HTTPS reaches fe-1's public address. Only on the LAN card,
-    # so Traefik on 0.0.0.0:443 still answers the host and the VMs.
+    # The LAN's HTTPS reaches fe-1's public address. Only on the LAN card;
+    # Traefik listens on 10.250.0.1:443, so it is not affected.
     chain prerouting {
         type nat hook prerouting priority dstnat; policy accept;
 

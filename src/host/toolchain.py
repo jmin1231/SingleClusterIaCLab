@@ -63,16 +63,6 @@ def ensure_terraform() -> None:
     log.info("terraform %s installed at %s", config.TERRAFORM_VERSION, terraform)
 
 
-def ensure_node() -> None:
-    """Install node from the pinned version"""
-    node = config.BIN_DIR / "node"
-    if installed_version_ok([str(node), "--version"], f"v{config.NODE_VERSION}"):
-        log.info("node %s already installed", config.NODE_VERSION)
-        return
-
-    data = download()
-
-
 def ensure_ansible() -> None:
     """Install ansible-core from Ubuntu and the pinned cloud.terraform collection, unless present."""
     if apt_install(config.ANSIBLE_PACKAGES):

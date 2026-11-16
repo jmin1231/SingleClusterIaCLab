@@ -8,10 +8,6 @@
       "server": {
         "expiry": "8760h",
         "usages": ["digital signature", "server auth"]
-      },
-      "client": {
-        "expiry": "8760h",
-        "usages": ["digital signature", "client auth"]
       }
     }
   }

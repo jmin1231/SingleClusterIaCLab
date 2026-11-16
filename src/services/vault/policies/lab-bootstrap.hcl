@@ -1,8 +1,8 @@
-# lab-bootstrap: bootstrap.sh's own identity (AppRole), used by up/update/teardown once the
+# lab-bootstrap: bootstrap.sh's own identity (AppRole), used by up and update once the
 # root token is revoked. Broad by necessity, but every path is named: no "*" alone.
 # Later phases add their paths in the step that needs them (Transit, k3s auth).
 
-# Every KV secret: seed (SSH key, Gitea admin, runner token), rotate, delete on teardown.
+# Every KV secret: the SSH key, the Gitea admin and the runner token.
 path "kv/data/*" {
   capabilities = ["create", "read", "update", "delete"]
 }

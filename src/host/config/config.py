@@ -19,6 +19,10 @@ CHRONY_CONF_DEST = Path("/etc/chrony/conf.d") / CHRONY_CONF_SRC.name
 # --- KVM and libvirt ---
 KVM_PACKAGES = ["libvirt-daemon-system", "libvirt-daemon-driver-qemu", "libvirt-clients",
                 "qemu-system-x86", "qemu-utils"]
+# What Terraform creates in libvirt (terraform/compute.tf, network.tf, storage.tf); kvm.down() removes it before the purge
+LAB_DOMAINS = ["fe-1", "tun-1", "be-1"]
+LAB_NETWORKS = ["site-a", "site-hub", "site-c", "wan"]
+LAB_POOL = "lab"
 LIBVIRT_SOCKET = "libvirtd.socket"
 LIBVIRT_URI = "qemu:///system"
 
@@ -43,6 +47,8 @@ NODE_SHA256 = "4f2b175a6d53a5c617a80dba2676238a0688cef28c6da4eba35c7d844e66fcfb"
 NODE_MEMBER = f"node-v{NODE_VERSION}-linux-x64/bin/node"  # the only file taken from the archive
 
 # --- VM firewall (vmfw) ---
+# Preinstalled on Ubuntu; installed if missing, never purged
+VMFW_PACKAGES = ["nftables"]
 VMFW_NFT_SRC = FILES / "nftables-vmfw.nft"
 VMFW_TABLES = ["bridge lab_vmfw_l2", "inet lab_vmfw"]  # must match the tables in VMFW_NFT_SRC
-VMFW_MARKER = Path("/run/lab/vmfw.loaded")  # /run empties on reboot, like the rules; setup reads it
+VMFW_MARKER = Path("/run/lab/vmfw.loaded")  # /run empties on reboot, like the rules; terraform.yml checks it

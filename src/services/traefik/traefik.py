@@ -10,7 +10,7 @@ log = logging.getLogger(__name__)
 
 
 def up(certs_changed: bool) -> None:
-    """Start Traefik; force a recreate when 2.5a issued new certificates (they are read at start)."""
+    """Start Traefik; force a recreate when pki.up() issued new certificates (they are read at start)."""
     compose("traefik", "up", "-d", *(["--force-recreate"] if certs_changed else []))
     log.info("Traefik serving HTTPS on %s:443", VMNET.ip)
 

@@ -1,4 +1,4 @@
-"""Run Gitea behind Traefik and set up its admin, org, repo and runner registration token."""
+"""Run Gitea behind Traefik, set up its admin, org, repo, runner token and Actions secrets, and push and follow pipeline runs."""
 
 import base64
 import json
@@ -16,7 +16,7 @@ from src.lib.config import BASE_DIR, LAB_ADMIN, LAB_CA_CERT
 from src.lib.system import compose
 from src.services.podman import podman
 from src.services.gitea.config.config import (
-    GITEA_API, GITEA_ADMIN_KV, GITEA_RUNNER_KV, GITEA_ORG, GITEA_REPO, GITEA_REPO_URL, GITEA_URL,
+    GITEA_API, GITEA_ADMIN_KV, GITEA_RUNNER_KV, GITEA_ORG, GITEA_REPO, GITEA_REPO_URL,
     GITEA_WORKFLOW, COMMIT_IDENTITY, RUN_LOG_LINES, RUN_POLL_SECONDS, RUN_START_TIMEOUT, RUN_TIMEOUT,
 )
 from src.services.vault import vault
@@ -213,7 +213,7 @@ def wait_for_run(creds: dict, sha: str) -> int:
         if runs.get("workflow_runs"):
             return runs["workflow_runs"][0]["id"]
         if time.monotonic() > deadline:
-            log.error("no run started; is lab-runner running?")
+            log.error("no run started for %s; does deploy.yml trigger on push to main?", sha[:7])
             sys.exit(1)
         time.sleep(RUN_POLL_SECONDS)
 
@@ -248,19 +248,11 @@ def follow_run(creds: dict, run_id: int) -> None:
     log.info("run #%s succeeded", run["run_number"])
 
 
-def initial_push(creds: dict) -> str:
-    """Push into the still-empty lab/lab once (later pushes come from update); the pushed commit, or "" if already seeded."""
-    full_name = f"{GITEA_ORG}/{GITEA_REPO}"
-
-    repo = gitea_api(creds, "GET", f"repos/{full_name}")
-    if not repo:
-        log.error("Gitea repository %s is missing; ensure_repo should have created it", full_name)
-        sys.exit(1)
-    if not repo["empty"]:
-        log.info("Gitea repository %s already has commits; nothing to push", full_name)
-        return ""
-
-    return push(creds)
+def start_run(creds: dict) -> int:
+    """Push the checked-out commit if Gitea's main differs (an empty repo has no main), else dispatch; returns the run id."""
+    if main_differs(creds):
+        return wait_for_run(creds, push(creds))
+    return dispatch(creds)
 
 
 def up() -> None:

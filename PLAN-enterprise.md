@@ -1,5 +1,8 @@
 # SingleClusterIaCLab — Build Plan
 
+> **Historical (2026-11-16).** Superseded by [`build-order.md`](build-order.md), which is the
+> working plan. Kept for design reasoning; parts of it (CloudStack, MinIO, `src/pipeline`) were dropped.
+
 One Ubuntu 24.04 host becomes a small, enterprise-shaped private cloud, built,
 updated and torn down by one script, `bootstrap.sh`:
 

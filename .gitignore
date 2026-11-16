@@ -2,6 +2,3 @@
 __pycache__/
 *.tfstate*
 terraform/.terraform/
-*.tfstate
-*.tfstate.backup
-/builds/

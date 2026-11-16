@@ -1,5 +1,5 @@
 # Installed by `bootstrap.sh up` to /etc/netplan/; `destroy` deletes it.
-# Must match BRIDGE and VMNET in src/lib/config.py, and ANCHOR in src/host/network.py.
+# Must match BRIDGE and VMNET in src/lib/config.py, and BRIDGE_ANCHOR in src/host/config/config.py.
 network:
   version: 2
   dummy-devices:

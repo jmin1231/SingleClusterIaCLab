@@ -28,6 +28,9 @@ status claims are not instructions to build those things again.
 Each step has a stable ID such as **B04.2**, files to create or extend, and an acceptance
 check. Steps within a phase are ordered unless a dependency says otherwise. Future file
 names are proposed locations, not claims that those files already exist.
+These are implementation phases, not the runtime order of `platform_up()`; for
+example, the VM firewall is loaded before any workflow can start VMs, even though
+its implementation is described alongside Terraform in B04.
 
 At the end of a working session:
 
@@ -109,6 +112,25 @@ run and a reboot recovery without unintended disk replacement**.
 4. **B04.4:** capture first apply, unchanged apply, failure-gate, and reboot evidence.
 5. **B04.5–B04.6:** finish the inventory/DNS handoff and minimal tenant teardown.
 6. Continue with **B05**, where controlled egress and Vault credentials make Ansible usable.
+
+## Phase overview
+
+| Phase | What we build |
+|---|---|
+| B00 | Python package, shell entry point, commands and shared helpers |
+| B01 | Host checks, baseline, networking, runtimes and tool installers |
+| B02 | DNS, PKI, Vault and HTTPS gateway |
+| B03 | Gitea, runner and workflow handoff |
+| B04 | Terraform VMs, persistent state, inventory and minimal removal |
+| B05 | Host/guest firewall, Squid, pipeline credentials and Ansible base |
+| B06 | WireGuard hub and spokes |
+| B07 | Registry, k3s, Flux and scoped cluster identities |
+| B08 | Istio ambient and transport/authorization policies |
+| B09 | Application images, database, API and frontend |
+| B10 | Metrics, logs, dashboards and operator consoles |
+| B11 | Integrated verification and operator documentation |
+| B12 | Complete cleanup and host restoration |
+| B13 | Deferred backup, restore and key-loss drills |
 
 ## Phase B00 — Repository and command skeleton
 
@@ -422,6 +444,18 @@ run and a reboot recovery without unintended disk replacement**.
 - **Accept:** management peers are blocked, required host services work, and permitted
   flows still work after reboot. Later cluster steps extend and retest these rules.
 
+### B05.6 — Host SSH hardening — Planned
+
+- **Files:** proposed `src/host/ssh.py`, managed sshd drop-in template, host configuration
+  and baseline/removal wiring. **Additional dependency:** B01.2 and a verified operator key.
+- **Build:** validate the operator login/key and effective sshd configuration before
+  enabling key-only access and intended user/forwarding restrictions. Keep local console
+  recovery available; omit the old CloudStack root-login exception. Validate before reload
+  and provide rollback if a new connection fails.
+- **Accept:** a new operator key-authenticated session works, password/unauthorized-user
+  attempts fail, and removal restores the previous configuration. This returned to scope
+  in the plan's November 14 decision despite its older optional-work entry.
+
 ## Phase B06 — WireGuard site-to-site path
 
 **Outcome:** frontend reaches backend only through the hub's allowed tunnel flow.
@@ -672,7 +706,7 @@ full acceptance follows B10. Do not wait until this phase to test earlier steps.
 **Legacy reference:** Phase 13 and §14, translated to libvirt. **Dependency:** B01.2,
 B04.6; extend removal with every later service. Capture evidence before destructive tests.
 
-### B12.1 — Full tenant cleanup — Partial
+### B12.1 — Full tenant cleanup — Planned
 
 - **Files:** tenant orchestration introduced in B04.6; local bootstrap/Vault helpers.
 - **Build:** serialize against CI; suspend Flux before deleting its objects; remove
@@ -726,7 +760,6 @@ is not mistaken for complete. Enable this phase when scope is expanded.
 | Conftest policy-as-code | Deferred until core delivery is proven. Add a saved plan → JSON → policy → apply-the-same-plan sequence if enabled. |
 | PR gate and protected main | Explicitly excluded for the agreed single-operator flow. |
 | Tracing/Tempo, public-image mirroring, AD/SSO, admission/signing layers | Optional extensions after capacity is measured. |
-| Host SSH hardening | Back in the plan's later security scope; add a focused step beside B05.1 once baseline and operator-key recovery exist. It is not implemented now. |
 | Broad unit-test framework and extra CLI commands | Not prerequisites. Use focused checks and acceptance evidence appropriate to each step. |
 
 ## Requirement and evidence map

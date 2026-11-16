@@ -2446,7 +2446,10 @@ to fe-1's WAN address. §15 records the cloud VPC as the production answer.
   `replace_triggered_by` into rebuilding every VM, so the job sets `TMPDIR:
   /var/lib/lab/tfstate` (persistent, `lab-runner`'s); volumes cannot be updated in
   place, so the overlay's name carries its size (`fe-1-10g.qcow2`) and a `disk_gb`
-  change replaces it instead of failing.
+  change replaces it instead of failing. The second run showed that AppArmor blocks VM disks given as
+  pool volumes (`source = { volume = … }`): `virt-aa-helper` adds only file-type disks
+  (and their backing files) to the VM's profile, so qemu could not open the base image.
+  The domain names its disks by path (`source = { file = { file = libvirt_volume.X.path } }`).
   Exit: `terraform.yml` applies the plan; with `/run/lab/vmfw.loaded` missing (as after
   a reboot), it refuses before planning (one `run:` line: `test -f /run/lab/vmfw.loaded`).
 

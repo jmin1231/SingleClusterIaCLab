@@ -114,12 +114,12 @@ resource "libvirt_domain" "vm" {
   }
 
   devices = {
+    # File paths, not pool volumes: libvirt's AppArmor helper only allows disks it sees as files.
     disks = [
       {
         source = {
-          volume = {
-            pool   = libvirt_pool.lab.name
-            volume = libvirt_volume.disk[each.key].name
+          file = {
+            file = libvirt_volume.disk[each.key].path
           }
         }
         target = {
@@ -134,9 +134,8 @@ resource "libvirt_domain" "vm" {
       {
         device = "cdrom"
         source = {
-          volume = {
-            pool   = libvirt_pool.lab.name
-            volume = libvirt_volume.seed[each.key].name
+          file = {
+            file = libvirt_volume.seed[each.key].path
           }
         }
         target = {

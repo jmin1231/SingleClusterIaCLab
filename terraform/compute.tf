@@ -72,8 +72,8 @@ resource "libvirt_cloudinit_disk" "seed" {
   name     = "${each.key}-seed"
   user_data = templatefile("${path.module}/cloud-init/user-data.yaml.tftpl", {
     hostname       = each.key
-    ssh_public_key = var.ssh_public_key
-    lab_ca_cert    = var.lab_ca_cert
+    ssh_public_key = trimspace(file(var.ssh_public_key_file))
+    lab_ca_cert    = file(var.lab_ca_cert_file)
   })
   meta_data      = yamlencode({ instance-id = each.key, local-hostname = each.key })
   network_config = templatefile("${path.module}/cloud-init/network-config.yaml.tftpl", each.value)

@@ -12,7 +12,7 @@ from src.lib.system import install_file, systemctl_ok, write_file
 from src.services.gitea.runner.config.config import (
     BINARY, BINARY_SHA256, BINARY_URL, CA, CONFIG,
     CONFIG_DIR, FILES, GITEA_RUNNER_KV, HOME, INSTANCE,
-    LAB_CA_CERT, NAME, SERVICE, SERVICE_FILE, UID, USER, VERSION,
+    LAB_CA_CERT, NAME, SERVICE, SERVICE_FILE, SSH_KV, SSH_PUB, UID, USER, VERSION,
 )
 from src.services.vault import vault
 
@@ -68,6 +68,15 @@ def ensure_config() -> bool:
     return changed
 
 
+def ensure_ssh_key(token: str) -> None:
+    """Publish the lab SSH public key (public, so 0644) where jobs read it; the private key stays in Vault."""
+    public = vault.api("GET", SSH_KV, token=token)["data"]["data"]["public_key"]
+    if write_file(public.encode(), SSH_PUB, 0o644):
+        log.info("lab SSH public key installed at %s", SSH_PUB)
+    else:
+        log.info("lab SSH public key already at %s", SSH_PUB)
+
+
 def ensure_registered(token: str) -> None:
     """Register the runner with Gitea once; the result is HOME/.runner."""
     runner_file = HOME / ".runner"
@@ -108,7 +117,9 @@ def up() -> None:
     ensure_user()
     changed = ensure_binary()
     changed |= ensure_config()
-    ensure_registered(vault.login())
+    token = vault.login()
+    ensure_ssh_key(token)
+    ensure_registered(token)
     ensure_service(changed)
 
 

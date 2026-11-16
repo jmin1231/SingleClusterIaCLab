@@ -2416,22 +2416,31 @@ to fe-1's WAN address. §15 records the cloud VPC as the production answer.
 
   ⤷ **Needs** 5.2 · **Recalls** `net.vpcs` · **Produces** `policy/*.rego`,
   `policy/fixtures/` · **Records** `policy.dir`, `policy.fixtures` · **Check** Exit
-- **5.3b The gated apply.** `terraform.yml` (called by `deploy.yml` after `check`) first checks that
-  libvirt answers (`virsh --connect qemu:///system list`) and that
-  `/run/lab/vmfw.loaded` exists (readable without root, unlike the table), so
-  no network goes up without its ACLs. Then **plan → apply** (with 5.3a deferred,
-  2026-11-15; the policy step slots in between when it returns). This is the first apply:
-  the networks go in here.
+- **5.3b The gated apply.** `terraform.yml` (called by `deploy.yml` after `check`; written
+  2026-11-16): checkout, then two named check steps, `test -f /run/lab/vmfw.loaded`
+  (readable without root, unlike the table, so no network goes up without its ACLs) and
+  `virsh --connect qemu:///system list`, then `terraform init -input=false
+  -lockfile=readonly` (the real local backend) and `terraform apply -auto-approve
+  -input=false`, which prints the plan before applying (5.3a deferred, 2026-11-15; the
+  policy step slots in between when it returns). No Vault login in the job: the only
+  inputs are files `lab-runner` can read, `/etc/lab-runner/ssh.pub` (the lab SSH
+  *public* key, published from Vault by `runner.up()`'s `ensure_ssh_key()`) and
+  `/etc/lab-runner/ca.pem`, read by Terraform with `file()` (variables
+  `ssh_public_key_file`, `lab_ca_cert_file`). The `lab-pipeline` AppRole file comes with
+  the first job that needs a real secret (phase 6, the SSH *private* key for Ansible).
+  This is the first apply, and `terraform/` already holds 5.4a's compute, so the
+  networks and the VMs go in together.
   Exit: `terraform.yml` applies the plan; with `/run/lab/vmfw.loaded` missing (as after
   a reboot), it refuses before planning (one `run:` line: `test -f /run/lab/vmfw.loaded`).
 
   ⤷ **Needs** 5.2 · **Recalls** `fw.vmfw`, `libvirt.uri` · **Produces**
-  `setup.py` (checks → plan → apply), the `setup` job · **Records** — ·
+  `.gitea/workflows/terraform.yml` (checks → apply), `ensure_ssh_key()` in
+  `runner.py` · **Records** `path.ssh-pub` (`/etc/lab-runner/ssh.pub`) ·
   **Check** Exit; N5
 - **5.4a Compute.** Per VM (§5 sizes): a qcow2 overlay on 4.0's base volume, resized
   (10/10/40 GB); a `libvirt_domain` with fixed MACs; a cloud-init disk. The lab SSH public
-  key comes from Vault (the `setup` job reads it with `lab-pipeline` and passes it as
-  `TF_VAR_ssh_public_key`; it is public, so state holding it is fine). Cloud-init:
+  key comes from Vault through bootstrap (`/etc/lab-runner/ssh.pub`, read with `file()`,
+  5.3b; it is public, so state holding it is fine). Cloud-init:
   - user `user` with the key, `lock_passwd: true`, passwordless sudo; `ssh_pwauth: false`
   - `lab.test CA` in the trust store (`ca_certs`)
   - network-config v2, matched **by MAC** (quoted: unquoted, YAML reads an all-digit MAC

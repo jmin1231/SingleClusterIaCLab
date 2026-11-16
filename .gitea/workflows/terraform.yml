@@ -7,4 +7,12 @@ jobs:
   apply:
     runs-on: host
     steps:
-      - run: echo "terraform plan and apply come with 5.3b"
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: VM firewall is loaded
+        run: test -f /run/lab/vmfw.loaded
+      - name: libvirt answers
+        run: virsh --connect qemu:///system list
+      - run: terraform -chdir=terraform init -input=false -lockfile=readonly
+      - run: terraform -chdir=terraform apply -auto-approve -input=false

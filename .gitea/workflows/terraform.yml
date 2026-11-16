@@ -6,6 +6,8 @@ on:
 jobs:
   apply:
     runs-on: host
+    env:
+      TMPDIR: /var/lib/lab/tfstate
     steps:
       - uses: actions/checkout@v4
         with:

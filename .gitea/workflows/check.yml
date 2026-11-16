@@ -4,7 +4,7 @@ on:
   workflow_call:
 
 jobs:
-  terraform:
+  validate:
     runs-on: host
     steps:
       - uses: actions/checkout@v4

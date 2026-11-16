@@ -45,7 +45,7 @@ locals {
 # Each VM's own disk
 resource "libvirt_volume" "disk" {
   for_each      = local.vms
-  name          = "${each.key}.qcow2"
+  name          = "${each.key}-${each.value.disk_gb}g.qcow2"
   pool          = libvirt_pool.lab.name
   capacity      = each.value.disk_gb
   capacity_unit = "GiB"
@@ -84,7 +84,7 @@ resource "libvirt_volume" "seed" {
   for_each = local.vms
   name     = "${each.key}-seed.iso"
   pool     = libvirt_pool.lab.name
-  target   = { format = { type = "raw" } }
+  target   = { format = { type = "iso" } }
   create   = { content = { url = libvirt_cloudinit_disk.seed[each.key].path } }
 }
 

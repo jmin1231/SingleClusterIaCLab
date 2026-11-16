@@ -2439,6 +2439,14 @@ to fe-1's WAN address. §15 records the cloud VPC as the production answer.
   the first job that needs a real secret (phase 6, the SSH *private* key for Ansible).
   This is the first apply, and `terraform/` already holds 5.4a's compute, so the
   networks and the VMs go in together.
+  First run (2026-11-16) and a read-only review of provider 0.9.9 found three things:
+  the seed volume's format must be `iso` (libvirt names it from the `.iso` extension and
+  the provider rejects the mismatch); `libvirt_cloudinit_disk` writes its ISO under
+  `$TMPDIR` (default `/tmp`, emptied at boot), and a missing ISO cascades through
+  `replace_triggered_by` into rebuilding every VM, so the job sets `TMPDIR:
+  /var/lib/lab/tfstate` (persistent, `lab-runner`'s); volumes cannot be updated in
+  place, so the overlay's name carries its size (`fe-1-10g.qcow2`) and a `disk_gb`
+  change replaces it instead of failing.
   Exit: `terraform.yml` applies the plan; with `/run/lab/vmfw.loaded` missing (as after
   a reboot), it refuses before planning (one `run:` line: `test -f /run/lab/vmfw.loaded`).
 

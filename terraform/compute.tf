@@ -5,11 +5,12 @@ locals {
       vcpu     = 1
       memory   = 1024
       disk_gb  = 10
-      network  = libvirt_network.frontend.name
-      tier_ip  = "10.0.1.10"
-      gateway  = "10.0.1.1"
+      network  = libvirt_network.site_a.name
+      vpc_ip   = "10.1.1.10"
+      wan_ip   = "198.51.100.11"
       mgmt_ip  = "10.250.0.110"
-      tier_mac = "52:54:00:01:00:10"
+      vpc_mac  = "52:54:00:01:00:10"
+      wan_mac  = "52:54:00:fb:01:10"
       mgmt_mac = "52:54:00:fa:01:10"
     }
     "tun-1" = {
@@ -17,11 +18,12 @@ locals {
       vcpu     = 1
       memory   = 1024
       disk_gb  = 10
-      network  = libvirt_network.tunnel.name
-      tier_ip  = "10.0.2.10"
-      gateway  = "10.0.2.1"
+      network  = libvirt_network.site_hub.name
+      vpc_ip   = "10.2.1.10"
+      wan_ip   = "198.51.100.12"
       mgmt_ip  = "10.250.0.111"
-      tier_mac = "52:54:00:02:00:10"
+      vpc_mac  = "52:54:00:02:00:10"
+      wan_mac  = "52:54:00:fb:02:10"
       mgmt_mac = "52:54:00:fa:02:10"
     }
     "be-1" = {
@@ -29,11 +31,12 @@ locals {
       vcpu     = 4
       memory   = 6144
       disk_gb  = 40
-      network  = libvirt_network.backend.name
-      tier_ip  = "10.0.3.10"
-      gateway  = "10.0.3.1"
+      network  = libvirt_network.site_c.name
+      vpc_ip   = "10.3.1.10"
+      wan_ip   = "198.51.100.13"
       mgmt_ip  = "10.250.0.112"
-      tier_mac = "52:54:00:03:00:10"
+      vpc_mac  = "52:54:00:03:00:10"
+      wan_mac  = "52:54:00:fb:03:10"
       mgmt_mac = "52:54:00:fa:03:10"
     }
   }
@@ -56,6 +59,10 @@ resource "libvirt_volume" "disk" {
     format = {
       type = "qcow2"
     }
+  }
+
+  lifecycle {
+    replace_triggered_by = [libvirt_volume.base, libvirt_volume.seed[each.key]]
   }
 }
 
@@ -139,15 +146,23 @@ resource "libvirt_domain" "vm" {
       }
     ]
     interfaces = [
-      { # eth0: tier
+      { # eth0: the site's private network
         model  = { type = "virtio" }
-        mac    = { address = each.value.tier_mac }
+        mac    = { address = each.value.vpc_mac }
         source = { network = { network = each.value.network } }
+        target = { dev = "${each.key}-vpc" }
       },
-      { # eth1: mgmt
+      { # eth1: wan
+        model  = { type = "virtio" }
+        mac    = { address = each.value.wan_mac }
+        source = { network = { network = libvirt_network.wan.name } }
+        target = { dev = "${each.key}-wan" }
+      },
+      { # eth2: mgmt
         model  = { type = "virtio" }
         mac    = { address = each.value.mgmt_mac }
         source = { bridge = { bridge = "cloudbr1" } }
+        target = { dev = "${each.key}-mgmt" }
       }
     ]
     serials = [
@@ -165,5 +180,10 @@ resource "libvirt_domain" "vm" {
         }
       }
     ]
+  }
+
+  # A new overlay means a new VM (the overlay keeps its name, so nothing else would tell Terraform).
+  lifecycle {
+    replace_triggered_by = [libvirt_volume.disk[each.key]]
   }
 }

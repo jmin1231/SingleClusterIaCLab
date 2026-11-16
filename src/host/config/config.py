@@ -31,7 +31,14 @@ TERRAFORM_URL = f"https://releases.hashicorp.com/terraform/{TERRAFORM_VERSION}/t
 TERRAFORM_SHA256 = "e6f16b2f0b137ee5729caa8c4e79a3bae4ee261acd198a1fcfa8584a6296605b"
 
 # --- Toolchain: Ansible ---
-ANSIBLE_PACKAGES = ["ansible-core"]               # Ubuntu's 2.16.3; cloud.terraform 4.0.0 needs >= 2.15
+ANSIBLE_PACKAGES = ["ansible-core"]
 ANSIBLE_GALAXY = Path("/usr/bin/ansible-galaxy")  # full path, so installed_version_ok can check it exists
 CLOUD_TERRAFORM_VERSION = "4.0.0"
 COLLECTIONS_DIR = Path("/usr/share/ansible/collections")  # on Ansible's default search path
+
+# --- VPC ---
+VPC_NFT_SRC = FILES / "nftables-vpc.nft"
+VPC_NFT_FILE = Path("/etc/lab/nftables-vpc.nft")
+VPC_SERVICE = "lab-vpc-nftables.service"
+VPC_SERVICE_UNIT_SRC = FILES / VPC_SERVICE
+VPC_SERVICE_UNIT_FILE = Path("/etc/systemd/system") / VPC_SERVICE

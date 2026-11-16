@@ -5,9 +5,10 @@ updated and torn down by one script, `bootstrap.sh`:
 
 - **IaaS:** Apache CloudStack on KVM, provisioned by Terraform from the stock Ubuntu 24.04 cloud image, configured at
   first boot by cloud-init (a Packer golden image is an option, §15).
-- **Network:** a VPC with three tiers (frontend, tunnel, backend), one VM each,
-  default-deny ACLs, no direct internet from any tier. The frontend reaches the
-  backend **only** through WireGuard tunnels that terminate on the tunnel tier's VM.
+- **Network:** three isolated VPCs (frontend, hub, backend), one VM each, on a simulated
+  WAN whose rules the host enforces (default deny), no direct internet from any VPC. The
+  frontend reaches the backend **only** through WireGuard site-to-site tunnels that
+  terminate on the hub VPC's VM (redesigned 2026-11-15, phase 5).
 - **Application:** an HTML frontend on its own VM, calling over end-to-end mutual TLS an
   API that runs with PostgreSQL in k3s on the backend VM, inside an Istio ambient mesh,
   with Vault as the encryption service; certificates come from cfssl on the host and
@@ -67,8 +68,8 @@ working scope:
 4. ~~MinIO (2.7)~~ **optional, skipped** (decided 2026-11-12): Terraform state is a local
    file (5.1) and Loki stores on its own volume (2.7b); IAM is shown with Vault (§15).
 5. Gitea and the runner (2.8, 2.10).
-6. Terraform through the pipeline (phase 5, to be rewritten for the libvirt provider): three isolated networks, VMs, local state in `/var/lib/lab/tfstate/`. VMs boot the stock
-   Ubuntu cloud image (4.0); phase 5 needs no egress, and Squid (2.9) is built before 6.1a (decided 2026-11-15). Host as VPC router, provider `dmacvicar/libvirt` 0.9.9 (phase 5).
+6. Terraform through the pipeline (phase 5, rewritten for the libvirt provider): three VPCs, one VM each, joined by a simulated WAN (decided 2026-11-15), local state in `/var/lib/lab/tfstate/`. VMs boot the stock
+   Ubuntu cloud image (4.0); phase 5 needs no egress, and Squid (2.9) is built before 6.1a (decided 2026-11-15). Each VM is its own VPC's gateway; the host plays the WAN and enforces isolation outside the guests; provider `dmacvicar/libvirt` 0.9.9 (phase 5).
 7. Ansible through the pipeline (6.1a's `base` role).
 8. Grafana with Prometheus (2.7b), node-exporter on the host and on the VMs, so a new
    VM appears on the dashboard.
@@ -98,7 +99,7 @@ section as the production answer. §15 is different: it compares tools and desig
 
 | What | Step | Decided | Why | What the review gets instead |
 |---|---|---|---|---|
-| CloudStack (zone, system VMs, built-in VPC, `cloudstack/cloudstack` provider) | phase 3, 5.1–5.2 | 2026-11-14 | the cutoff of 2026-11-13 was reached with no system VMs; the zone build was getting too long to own and explain; a vendored installer (as an earlier lab used) would conflict with 3.1a and rule 17 | plain KVM with the Terraform libvirt provider (`dmacvicar/libvirt`, version pinned: v0.9.0 was a breaking rewrite); R1's VPC is **mimicked** by three isolated libvirt networks (`tier-frontend`, `tier-tunnel`, `tier-backend`), with WireGuard unchanged. CloudStack's design stays in phase 3 as the production answer |
+| CloudStack (zone, system VMs, built-in VPC, `cloudstack/cloudstack` provider) | phase 3, 5.1–5.2 | 2026-11-14 | the cutoff of 2026-11-13 was reached with no system VMs; the zone build was getting too long to own and explain; a vendored installer (as an earlier lab used) would conflict with 3.1a and rule 17 | plain KVM with the Terraform libvirt provider (`dmacvicar/libvirt`, version pinned: v0.9.0 was a breaking rewrite); R1's VPC is **mimicked** by three VPCs (`site-a`, `site-hub`, `site-c`: isolated libvirt networks, one VM each) on a simulated WAN, joined only by the WireGuard site-to-site tunnels (redesigned 2026-11-15, phase 5). CloudStack's design stays in phase 3 as the production answer |
 | ~~Host firewall (nftables, default-drop)~~ **back in scope 2026-11-14 (build order item 10)** | 2.2 | 2026-11-13 | time: ~70 steps left, six days to the review | §5's port table as the design. Until then NFS, CloudStack's `:8080` and the agent port `:8250` are reachable from the LAN: answer it, don't hide it (a private VMware NAT network, a lab that lives a day or two) |
 | NFS `statd`/`lockd` port pins | 3.1a | 2026-11-13 | only needed so 2.2 could allow them; dropped with it | — |
 | Backup, restore drill, DR drill, crypto-shredding | phase 9 (R3) | 2026-11-13 | time | a walkthrough: the Vault snapshot, the database backup, the restore order, and how destroying the Transit key makes every copy unreadable (crypto-shredding). **Check** that R3 ("show key loss destroys it") may be shown as design rather than a demo |
@@ -268,9 +269,9 @@ left out, and why, is in §15.
 | Policy-as-code | Conftest/OPA on `terraform plan -json`, before every apply |
 | GitOps | Flux CD: k3s converges to `main` in Gitea; run-time Secrets are written by jobs or synced from Vault, never committed |
 | Secrets sync | Vault Secrets Operator: Vault KV → the one Kubernetes Secret a component cannot read from Vault itself |
-| Network segmentation | VPC tiers (frontend, tunnel, backend), default-deny ACLs both directions |
-| Transit / hub network | the tunnel tier: a WireGuard hub that is the only path from frontend to backend, with its own forwarding allow-list |
-| Egress control | No tier has internet; an allow-listing forward proxy (Squid) on the host |
+| Network segmentation | three VPCs (frontend, hub, backend), isolated networks; the WAN between them default-deny, enforced by the host outside the guests |
+| Transit / hub network | the hub VPC: a WireGuard hub that is the only path from frontend to backend, with its own forwarding allow-list |
+| Egress control | No VPC has internet; an allow-listing forward proxy (Squid) on the host |
 | Site-to-site VPN | WireGuard, hub-and-spoke (frontend ↔ hub ↔ backend), systemd-managed |
 | Managed Kubernetes | k3s, Secrets encrypted at rest |
 | Zero-trust service traffic | Istio ambient: STRICT mTLS (required), SPIFFE identities, mesh-wide default deny plus `AuthorizationPolicy` ALLOWs |
@@ -297,36 +298,48 @@ left out, and why, is in §15.
  │                          Vault :8200 (direct, own TLS) · CoreDNS · Squid · runner (systemd)  │
  │ CloudStack: management + MySQL + NFS + KVM agent          Packer/qemu (option)               │
  │                                                                                              │
- │  mgmt shared network (untagged, on cloudbr1 10.250.0.0/24): every VM's mgmt NIC (eth1)       │
+ │  mgmt shared network (cloudbr1 10.250.0.0/24): every VM's mgmt NIC (eth2); the host's bridge │
+ │  table drops guest ↔ guest here, so each VM reaches only the host                            │
  │  ════════════════════════════════════════════════════════════════════════════════════════    │
- │   │ fe-1 .110          │ tun-1 .111            │ be-1 .112                                   │
- │  ┌┴────────────────────┴───────────────────────┴─────────────────────────────────────────┐   │
- │  │ VPC 10.0.0.0/16   (virtual router: ACLs, source NAT, port-forward)                    │   │
- │  │  tier-frontend 10.0.1.0/24  tier-tunnel 10.0.2.0/24  tier-backend 10.0.3.0/24         │   │
- │  │   fe-1 .10 ─────UDP 51820────▶ tun-1 .10 ◀────UDP 51821───── be-1 .10 (k3s)           │   │
- │  │   wg0 10.99.0.2 ═══════════ wg0 10.99.0.1 │ wg1 10.99.1.1 ═══════════ wg1 10.99.1.2   │   │
- │  │   fe-1 ✗─────────────── no ACL path ──────────────────────────────✗ be-1              │   │
- │  └───────────────────────────────────────────────────────────────────────────────────────┘   │
+ │   │ fe-1 .110               │ tun-1 .111              │ be-1 .112                            │
+ │                                                                                              │
+ │  wan 198.51.100.0/24 (simulated internet; host .1; the host's bridge table allows only WG)   │
+ │  ════════════════════════════════════════════════════════════════════════════════════════    │
+ │   │ fe-1 .11 (eth1)         │ tun-1 .12 (eth1)        │ be-1 .13 (eth1)                      │
+ │   │  ──UDP 51820──────────▶ │ ◀──────────UDP 51821──  │                                      │
+ │  ┌┴───────────────┐        ┌┴───────────────┐        ┌┴───────────────┐                      │
+ │  │ fe-1 10.1.1.10 │        │ tun-1 10.2.1.10│        │ be-1 10.3.1.10 │  (eth0, no gateway)  │
+ │  │ site-a         │        │ site-hub       │        │ site-c (k3s)   │                      │
+ │  │ 10.1.0.0/16    │        │ 10.2.0.0/16    │        │ 10.3.0.0/16    │  isolated, no host IP│
+ │  └────────────────┘        └────────────────┘        └────────────────┘                      │
+ │   wg0 10.99.0.2 ═══════ wg0 10.99.0.1 │ wg1 10.99.1.1 ═══════ wg1 10.99.1.2  (site-to-site:  │
+ │   the tunnels carry the VPC ranges; fe-1 ✗─── no other path ───✗ be-1        VPC ranges)    │
  └──────────────────────────────────────────────────────────────────────────────────────────────┘
-   VPC public IP :443 ──port-forward──▶ fe-1:443 (Caddy → frontend)
+   HOST_IP :443 ──host DNAT──▶ fe-1 198.51.100.11:443 (Caddy → frontend)
 ```
 
 **Three planes, kept apart:**
 
-- **Data plane:** the VPC tiers. Every inter-tier flow is denied by ACL except two:
-  UDP 51820 between tier-frontend and tun-1, and UDP 51821 between tier-backend and
-  tun-1. The tiers have **no egress to the internet**. The WireGuard underlay is the
-  tier network itself, so tunnel traffic crosses the VPC router and its ACLs.
-- **Management plane:** each VM's **mgmt NIC** (its second NIC) on the shared mgmt
+- **Data plane:** three VPCs (`site-a`, `site-hub`, `site-c`), one VM each, and a
+  simulated WAN between them (redesigned 2026-11-15). Each VPC is an isolated network
+  with no host address, so nothing crosses between VPCs except over the WAN, where the
+  host allows only two flows: UDP 51820 from fe-1 to tun-1 and UDP 51821 from be-1 to
+  tun-1. The WireGuard tunnels carry the VPC ranges (site-to-site), so the application
+  talks private address to private address through the hub. **No egress to the
+  internet** from any VPC or the WAN. Each VM is its own VPC's gateway (one workload per
+  VPC); the host enforces the WAN rules outside the guests, as a cloud's hypervisor
+  enforces security groups.
+- **Management plane:** each VM's **mgmt NIC** (its third NIC, eth2) on the shared mgmt
   network, which lives on a **host-only bridge** (`cloudbr1`, no physical port), with
   a fixed address per VM (§5). The LAN cannot reach it and its DHCP cannot answer on
   it. A per-VM nftables policy lets the mgmt NIC talk **only to the host at
   `10.250.0.1`** (SSH from it; DNS, NTP, proxy, Vault, gateway and Kubernetes API
   traffic to and from it). The mgmt NIC carries no default route; the default route
-  is the tier NIC, so replies to LAN clients always leave through the VPC router they
-  came in by. **Named limit:** VM-to-VM isolation on this shared bridge is enforced
-  only by in-guest nftables, which root on a VM could flush; the enterprise answer is
-  L2 isolation of the management network (private VLANs), not built here.
+  is the WAN NIC, so replies to LAN clients leave the way they came in, through the
+  host's DNAT. VM-to-VM traffic on this shared bridge is dropped by the host's bridge
+  table (5.2), keyed on the VMs' host-side ports, so root on a VM cannot open it by
+  flushing its own nftables; the in-guest rules (6.1b) are the second layer. The
+  enterprise answer is private VLANs or a managed control-plane path (SSM).
 - **Control plane:** the host's containers. Every VM reaches the internet only
   through Squid on `10.250.0.1:3128`, against a domain allow-list.
 
@@ -349,9 +362,9 @@ left out, and why, is in §15.
 - fe-1 runs only the frontend (Podman, two containers: Caddy and the frontend). It has
   no database driver, no Vault token and no route to the backend except the tunnel; it
   holds one client certificate, which only the backend gateway accepts.
-- tun-1 is the **only** path from frontend to backend. It forwards one flow (the
-  frontend's overlay address to the backend gateway on TCP 8000) and logs and drops
-  everything else. The frontend's TLS runs inside the tunnels, so tun-1 forwards
+- tun-1 is the **only** path from frontend to backend. It forwards one flow (fe-1's
+  private address `10.1.1.10` to the backend gateway on `10.3.1.10:8000`) and logs and
+  drops everything else. The frontend's TLS runs inside the tunnels, so tun-1 forwards
   ciphertext only (T3).
 - **Every network hop is encrypted** (§6): TLS to Caddy; mutual TLS from the frontend to
   the backend gateway, end to end, carried by WireGuard fe-1 → tun-1 → be-1. Plaintext
@@ -388,29 +401,42 @@ it, and each later step adds the keys it uses, with this section's default, to
 | `LAN_GATEWAY` / upstream DNS | read from the host (the default route) / from the LAN |
 | CloudStack pod (system VM) range | on the LAN, e.g. `.180–.189` |
 | CloudStack public range (VPC source NAT and public IPs) | on the LAN, e.g. `.190–.209` |
-| `VMNET_CIDR` (mgmt shared network) | `10.250.0.0/24` on host-only bridge `cloudbr1`; router DHCP `.100–.199`; lab VMs get **fixed** addresses from that range through `cloudstack_nic`'s `ip_address` (fe-1 `.110`, tun-1 `.111`, be-1 `.112`), and each VM's userdata writes that address into a **static** netplan for eth1, so nothing depends on a lease or on the mgmt router being up; the router itself is pinned outside `.110–.112`, at `.100` (`routerip`, 3.3a) |
+| `VMNET_CIDR` (mgmt shared network) | `10.250.0.0/24` on host-only bridge `cloudbr1`; router DHCP `.100–.199`; lab VMs get **fixed** addresses (fe-1 `.110`, tun-1 `.111`, be-1 `.112`), written by cloud-init into a **static** netplan for eth2 (5.4a), so nothing depends on a lease |
 | `VMNET_HOST_IP` | `10.250.0.1`, the host's address on `cloudbr1`: every VM reaches the control plane here |
 | Container address pool (Podman) | `172.30.0.0/16` (pinned in `containers.conf`; must not overlap any range here): default network `.0.0/24`, `lab_edge` `.1.0/24`, `lab_backend` `.2.0/24`, `lab_egress` `.3.0/24` (fixed: Vault `.3.10`, Gitea `.3.11`, the only two addresses 2.2 lets out; any other container gets an address from `.3.128/25`) |
 
-**VPC `10.0.0.0/16`**
+**Three VPCs and the WAN** (redesigned 2026-11-15: three VPCs, one VM each, replace one
+VPC with three tiers). The three sites stand for three different providers (`site-a`,
+`site-hub`, `site-c`), so the WAN is the public internet between them. Each `/16` is the
+site's reserved range; only the `/24` is attached.
+VPC networks are isolated libvirt networks (bridge = network name, no host address, no
+forwarding, no DHCP, no DNS). The WAN is a simulated internet: `198.51.100.0/24` is
+TEST-NET-2 (RFC 5737), never routed onto the LAN.
 
-| Tier | CIDR | VM | Size | Role |
+| Network | Range | VM (NIC) | Size | Role |
 |---|---|---|---|---|
-| tier-frontend | `10.0.1.0/24` | `fe-1` `.10` | 1 vCPU · 1 GB · 10 GB | frontend application (Caddy + frontend container); public 443 lands here |
-| tier-tunnel | `10.0.2.0/24` | `tun-1` `.10` | 1 vCPU · 1 GB · 10 GB | WireGuard hub: the only path from frontend to backend |
-| tier-backend | `10.0.3.0/24` | `be-1` `.10` | 4 vCPU · 6 GB · 40 GB | k3s, Flux, mesh, api, database, telemetry agents (Alloy) |
+| `site-a` | `10.1.0.0/16`, subnet `10.1.1.0/24` | `fe-1` `10.1.1.10` (eth0) | 1 vCPU · 1 GB · 10 GB | frontend application (Caddy + frontend container); public 443 lands here |
+| `site-hub` | `10.2.0.0/16`, subnet `10.2.1.0/24` | `tun-1` `10.2.1.10` (eth0) | 1 vCPU · 1 GB · 10 GB | WireGuard hub: the only path from frontend to backend |
+| `site-c` | `10.3.0.0/16`, subnet `10.3.1.0/24` | `be-1` `10.3.1.10` (eth0) | 4 vCPU · 6 GB · 40 GB | k3s, Flux, mesh, api, database, telemetry agents (Alloy) |
+| `wan` | `198.51.100.0/24`, host `.1` (libvirt `route`, no NAT) | fe-1 `.11`, tun-1 `.12`, be-1 `.13` (eth1, default route via `.1`) | | WireGuard transport and fe-1's public 443 |
 | WireGuard `wg0` overlay | `10.99.0.0/24` | tun-1 `.1`, fe-1 `.2` | | frontend ↔ hub, tun-1 listens on UDP 51820 |
 | WireGuard `wg1` overlay | `10.99.1.0/24` | tun-1 `.1`, be-1 `.2` | | hub ↔ backend, tun-1 listens on UDP 51821 |
 | k3s pods / services | `10.42.0.0/16` / `10.43.0.0/16` | | | inside be-1 only |
 
+Every VM has three NICs, matched by fixed MAC (5.4a): **eth0** its VPC (no gateway),
+**eth1** the WAN (the default route), **eth2** mgmt on `cloudbr1` (no gateway, DNS
+`10.250.0.1`). Each NIC's host-side tap has a fixed name, `<vm>-vpc`, `<vm>-wan`,
+`<vm>-mgmt` (e.g. `fe-1-wan`), which the host's bridge table matches (5.2).
+
 **Application ports.** Caddy on fe-1 `:443` (public) → frontend container `:8080`
 (loopback). The frontend's `API_URL` is `https://api.backend.lab.test:8000` (the name
-is pinned to `10.99.1.2` in the container's hosts file): the backend Istio Gateway's
-mutual-TLS listener, exposed on be-1's node addresses by k3s ServiceLB. The api Service
+is pinned to be-1's private address `10.3.1.10` in the container's hosts file, reached
+through the tunnels): the backend Istio Gateway's mutual-TLS listener, exposed on be-1's
+node addresses by k3s ServiceLB. The api Service
 listens on `:8000` (metrics `:9090`), Postgres (`postgres-rw.db`) on `:5432`, all
 cluster-internal. node-exporter (host network, behind kube-rbac-proxy: HTTPS with a
-ServiceAccount token) listens on be-1's node address `10.0.3.10:9100`, on-node only
-(eth0 drops it, 6.1b).
+ServiceAccount token) listens on be-1's node address `10.3.1.10:9100`, on-node only
+(be-1's nftables drop it on every NIC, 6.1b).
 
 **Host ports.** All services listen on `0.0.0.0`, so they keep working when
 CloudStack moves `HOST_IP` onto `cloudbr0`. The host firewall is default-drop on
@@ -435,7 +461,7 @@ publish **no** host ports: they are reached only through the gateway.
 Everything else that listens on the host (CloudStack's cluster port 9090, libvirt,
 MySQL on `127.0.0.1`) is dropped from any non-local source.
 
-Other names: `app.lab.test` → the VPC public IP; `k3s.lab.test` → be-1's mgmt
+Other names: `app.lab.test` → `HOST_IP` (the host DNATs 443 to fe-1, 5.2); `k3s.lab.test` → be-1's mgmt
 address `10.250.0.112`. Both are written by the `setup` job (5.4b). The one gateway certificate carries every gateway name and no IP
 SAN; Vault's carries `vault.lab.test` and `10.250.0.1`.
 
@@ -444,7 +470,7 @@ which the LAN cannot route to, so the gateway is host-only by address as well as
 firewall.
 
 **DNS.** CoreDNS on the host is authoritative for `lab.test` and for the reverse
-zones of `VMNET_CIDR` and `10.0.0.0/16`, and forwards everything else upstream. Every
+zones of `VMNET_CIDR` and the three VPC ranges, and forwards everything else upstream. Every
 VM resolves through the host. Pods resolve through k3s's CoreDNS, which forwards to
 the node's resolver.
 
@@ -659,7 +685,7 @@ in a host Kubernetes cluster (§15).
 | VMs → Squid (3128) | plain to the proxy, TLS end to end | HTTPS passes as `CONNECT`; plain-HTTP apt is signature-verified |
 | host → VMs SSH (22) | SSH | its own encryption |
 
-*The tier path* (fe-1 → tun-1 → be-1). Every network hop is encrypted:
+*The tunnel path* (fe-1 → tun-1 → be-1). Every network hop is encrypted:
 
 | Hop | Encryption | Notes |
 |---|---|---|
@@ -728,7 +754,7 @@ observability/dashboards/    Grafana dashboards as JSON, synced to the host by t
                              `monitoring` job: kubernetes/ (the rendered mixins), lab/
                              (the three lab dashboards, 8.8b)
 packer/                      (Packer option) qemu template, autoinstall seed, provisioners
-terraform/                   provider + backend, vpc, tiers, acls, compute, ingress, outputs
+terraform/                   provider + backend, storage, network (VPCs + WAN), compute, inventory, cloud-init/
 policy/                      Conftest/OPA rules over the plan JSON
 ansible/                     roles: cloudstack (the host install: repo, packages,
                              databases, `cloudbr0` netplan, 3.1a), base, wireguard_hub,
@@ -816,7 +842,7 @@ the merged revision (`cmd.flux-wait`).
 |---|---|
 | `up` | First build and resume. `preflight` → `platform` (Phases 2–3 and the 3.5 hand-off) → dispatches `deliver.yml` and follows it. Each step resumes at the first phase whose `check()` fails. Unseals Vault when it is sealed (after a host reboot, before the pipeline can read secrets) issues any certificate missing from `state/pki/` (2.5a), and runs the renewal: re-issues the runner's `lab-pipeline` secret_id when under 7 days (the `platform` phase runs the same renewal). After the pipeline is green, its **local stage** runs as root: the Vault DR drill (9.3a–9.4, proves B2/B3; it needs the unseal key, which the runner can never read), then it prints the `verify` job's pass/fail summary |
 | `update` | For a lab already built; otherwise it refuses with "run `up` first". Applies what changed in `config/lab.toml` or the YAML, Compose and manifest files: unseals when sealed, runs the renewal, re-runs the platform phases so each converges to the current files (a changed host service is re-applied, e.g. `docker-compose up -d` recreates the changed containers), then dispatches `deliver.yml` on `main` and follows it. Changes under `clusters/` still reach k3s through git and Flux. No preflight dirty-host refusal, no DR drill |
-| `teardown` | The tenant side only: the VPC, tiers and VMs (fe-1, tun-1, be-1, so the k3s cluster goes with be-1) and the state and Vault entries that belong only to them (e.g. the break-glass kubeconfig). Keeps the host platform (control plane, Vault, Gitea, MinIO, telemetry, CloudStack, runner, VM image template), so the next `up` is quick |
+| `teardown` | The tenant side only: the VPCs, the WAN and the VMs (fe-1, tun-1, be-1, so the k3s cluster goes with be-1) and the state and Vault entries that belong only to them (e.g. the break-glass kubeconfig). Keeps the host platform (control plane, Vault, Gitea, MinIO, telemetry, CloudStack, runner, VM image template), so the next `up` is quick |
 | `destroy` | First asks: it prints what it is about to delete (the VPC and VMs, CloudStack with its `cloud` databases and all of MySQL's data, the platform, every package and user the lab added) and continues only if the operator types `destroy`; anything else, or no terminal on stdin, stops it with nothing changed (no flag skips the question). Then teardown's rows (always run: each is a no-op if `teardown` already ran), then the platform and host restore, in §14 order. Ends with a reboot (it removes the runner, so it cannot run in CI). Run again after the reboot, it asks again, finds nothing left, runs the revert checks V1–V5 and writes the pass/fail report. Every row tolerates "already gone" |
 | `--help` | Lists the four commands (run with `sudo`, like the others: the shim checks root first) |
 
@@ -2172,23 +2198,27 @@ MinIO `images/` with the gateway's `:80` route, and `secstorage.allowed.internal
   `image` job (Packer mode) · **Records** `img.template`, `cfg.golden-image`; `img.version` ·
   **Check** Exit
 
-### Phase 5 — Terraform: networks, tiers, VMs
+### Phase 5 — Terraform: VPCs, the WAN, VMs
 
-**Rewritten 2026-11-15 for the libvirt provider** (CloudStack dropped 2026-11-14). R1's VPC
-is mimicked with the **host as the VPC router**: three libvirt networks in `route` mode
-(no NAT, no DHCP), the host holding `.1` on each, and a host nftables table that plays the
-VPC's ACL lists (default deny, only R1's flows allowed). §5's tier addresses, the mgmt
-addresses and the WireGuard plan are unchanged. Phase 5 needs **no internet egress**:
+**Rewritten 2026-11-15 for the libvirt provider** (CloudStack dropped 2026-11-14), and
+**redesigned the same day to three VPCs**: each VM sits alone in its own isolated VPC
+network and is that VPC's gateway; a routed `wan` network plays the internet between
+them; the host plays the WAN provider and enforces isolation outside the guests with two
+nftables tables (routed and bridged), the way a cloud's hypervisor enforces security
+groups. This models three sites at **different providers** (decided 2026-11-15: e.g. two
+clouds and an on-prem data centre, with no shared backbone), joined by a site-to-site VPN
+over the internet through a hub; it is not one cloud's VPC: a workload and its gateway
+share one OS. Separate router VMs are the expansion path
+if a VPC ever holds more than one VM. The mgmt addresses are unchanged. Phase 5 needs **no internet egress**:
 the VMs boot the stock cloud image and cloud-init installs nothing; packages arrive in
 phase 6 through Squid (2.9), which is built before 6.1a.
 
-What changes from the VPC: the ACLs are host nftables applied by `bootstrap.sh` (root),
-not Terraform resources, because the pipeline identity is not root; so the policy gate
-(5.3a, **deferred 2026-11-15**) would check topology (which VM sits on which network, no
-network that bypasses the host), and the ACLs themselves are proven by tests from inside
-the VMs (5.4a, N1). The
-public IP becomes `HOST_IP:443`, DNATed to fe-1. §15 records the VPC as the production
-answer.
+What changes from a cloud VPC: the security-group rules are host nftables applied by
+`bootstrap.sh` (root), not Terraform resources, because the pipeline identity is not
+root; so the policy gate (5.3a, **deferred 2026-11-15**) would check topology (which VM
+sits on which network, no network that bypasses the host), and the rules themselves are
+proven by tests from inside the VMs (5.4a, N1). The public IP is `HOST_IP:443`, DNATed
+to fe-1's WAN address. §15 records the cloud VPC as the production answer.
 
 - **5.1 Provider, state and spike.** Terraform (pinned in `config/versions.toml`, 1.3),
   providers **`dmacvicar/libvirt` 0.9.9** (decided 2026-11-15: the maintained line after
@@ -2224,65 +2254,86 @@ answer.
   `lib/terraform.py` · **Records**
   `tf.backend` (path), `tf.provider-pin`, `spike.libvirt` (what 0.9.9 needed, or why
   0.8.3) · **Check** Exit
-- **5.2 Networks and the host router.** Two halves, applied by different identities:
-  - **Terraform (pipeline):** three `libvirt_network`s in `route` mode, each with a fixed
-    bridge name (the host table matches them) and the host's address, **no DHCP, DNS
-    off** (VMs resolve through CoreDNS on `10.250.0.1` over their mgmt NIC):
+- **5.2 VPCs, the WAN and the host's isolation.** Two halves, applied by different identities:
+  - **Terraform (pipeline):** four `libvirt_network`s, each with a fixed bridge name (the
+    host tables match them), **no DHCP, DNS off** (VMs resolve through CoreDNS on
+    `10.250.0.1` over their mgmt NIC):
 
-    | Network | Bridge | Host (gateway) | VM |
-    |---|---|---|---|
-    | tier-frontend | `tier-fe` | `10.0.1.1/24` | fe-1 `10.0.1.10` |
-    | tier-tunnel | `tier-tun` | `10.0.2.1/24` | tun-1 `10.0.2.10` |
-    | tier-backend | `tier-be` | `10.0.3.1/24` | be-1 `10.0.3.10` |
+    | Network | Bridge | Mode | Host address | VM |
+    |---|---|---|---|---|
+    | site-a | `site-a` | isolated (no `forward`, no `ips`) | none | fe-1 `10.1.1.10` |
+    | site-hub | `site-hub` | isolated | none | tun-1 `10.2.1.10` |
+    | site-c | `site-c` | isolated | none | be-1 `10.3.1.10` |
+    | wan | `wan` | `route`, no NAT | `198.51.100.1/24` | fe-1 `.11`, tun-1 `.12`, be-1 `.13` |
 
-    The mgmt NIC attaches straight to the existing `cloudbr1` (2.1a), so there is no
-    libvirt network for it.
-  - **Host (bootstrap, root):** `src/host/vpc.py` installs table `inet lab_vpc` as its own
-    file, `/etc/lab/nftables-vpc.nft`, loaded by `lab-vpc-nftables.service` (oneshot,
-    `RemainAfterExit=yes`; the table declared, deleted and recreated in one `nft -f`, as
-    2.2 does). Its own table, so 2.2's `inet lab` later adds the input rules without
-    touching it. Rules match the bridge names, so they exist before Terraform creates
-    the bridges. `HOST_IP` and the LAN card come from the baseline (1.2a):
-    - forward (filter priority): `ct state established,related` accept; fe-1 → tun-1
-      UDP 51820 (`iifname tier-fe ip saddr 10.0.1.10 oifname tier-tun ip daddr
-      10.0.2.10`); be-1 → tun-1 UDP 51821 (same shape from `tier-be`); LAN card →
-      `tier-fe` `10.0.1.10` TCP 443 with `ct status dnat`; then **drop anything else
-      in or out of `tier-*`**. That last pair is the default deny: nothing between
-      tier-frontend and tier-backend, and **no tier reaches the LAN or the internet**
-    - input: from `tier-*` only `established,related`; VMs reach host services only
-      over their mgmt NIC, as they could only through the mgmt network before
-    - nat prerouting: LAN card, `ip daddr HOST_IP tcp dport 443` → `dnat to
-      10.0.1.10`. It runs only on the LAN card, so Traefik (which listens on
-      `0.0.0.0:443`) still never answers the LAN
+    With no host address on a VPC network, the host cannot route into it: isolation by
+    topology. The mgmt NIC attaches straight to the existing `cloudbr1` (2.1a), so there
+    is no libvirt network for it. Each NIC's host-side tap gets a fixed name through the
+    domain's `target.dev` (5.4a): `fe-1-wan`, `fe-1-mgmt`, `tun-1-wan`, … (libvirt reserves
+    the `vnet` and `vif` prefixes).
+  - **Host (bootstrap, root):** `src/host/vpc.py` installs two tables from one file,
+    `/etc/lab/nftables-vpc.nft`, loaded atomically by `lab-vpc-nftables.service`
+    (oneshot, `RemainAfterExit=yes`, ordered `Before=network-pre.target libvirtd.service`
+    so the rules are in place before any VM starts, also after a reboot; each table
+    declared, deleted and recreated in one `nft -f`, as 2.2 does). The repo file is plain
+    nft; `vpc.py` prepends `define lan_card` / `define host_ip` from the baseline (1.2a).
+    Its own tables, so 2.2's `inet lab` later adds the host's input rules without
+    touching them. Rules match bridge and port names, so they exist before Terraform
+    creates the bridges. Scoped to the lab's bridges and ports: other libvirt and Podman
+    networks are untouched, and nothing flushes the host ruleset.
+    - **`bridge lab_vpc_l2`** (guest ↔ guest on one bridge, which never reaches the
+      host's IP rules): forward chain, `ct state established,related` accept; on `wan`:
+      ARP between the VM ports; `iifname "fe-1-wan" oifname "tun-1-wan"` UDP dport 51820;
+      `iifname "be-1-wan" oifname "tun-1-wan"` UDP dport 51821; then **drop every other
+      frame between lab ports**, IPv6 and other EtherTypes included. On `cloudbr1`: drop
+      everything between `*-mgmt` ports, ARP included; each VM still talks to the host.
+      Rules key on the **host-side port**, which a guest cannot change, so a VM that
+      spoofs another's IP or MAC gains none of that VM's paths
+    - **`inet lab_vpc`** (routed): nat prerouting, LAN card, `ip daddr HOST_IP tcp dport
+      443` → `dnat to 198.51.100.11` (it runs only on the LAN card, so Traefik, which
+      listens on `0.0.0.0:443`, still never answers the LAN, and the host's own requests
+      still reach Traefik); forward, `ct state established,related` accept, LAN card →
+      `wan` `198.51.100.11` TCP 443 with `ct status dnat`, then **drop anything else in
+      or out of `wan`**: no VM reaches the LAN or the internet, and no VM can hairpin
+      through `198.51.100.1` to reach another; input, from `wan` only
+      `established,related`, so VMs reach host services only over their mgmt NIC.
+      Routed traffic from `cloudbr1` stays 2.2's job (its "source in `VMNET_CIDR` →
+      drop" rule)
+    - `counter` on every drop: N1 and N4 read them
 
-    libvirt's `route` networks add their own accept rules; a drop in this separate base
+    libvirt's `route` network adds its own accept rules; a drop in this separate base
     chain still wins, since a packet must pass every base chain on the hook (proven by
     5.4a's N1 tests, not assumed). Spokes initiate WireGuard with `PersistentKeepalive`
     (phase 6), so tun-1's replies ride `established`.
+    **Simplified from the full design review** (`docs/three-vpc-design.md`): no per-port
+    MAC/IP/ARP-sender binding, because the allow rules key on ports; ARP spoofing toward
+    the host on `wan`/`cloudbr1` is the accepted residual (one operator, a lab that lives
+    a day or two).
   Steps 5.2 and 5.3b merge in **one** pull request, so the networks are first applied by
   the `setup` job, never by hand.
-  Exit: `nft list table inet lab_vpc` shows the rules and `lab-vpc-nftables.service` is
-  active after a reboot; `terraform plan` shows the three networks; nothing applied yet.
+  Exit: `sudo nft -c -f /etc/lab/nftables-vpc.nft` passes; `nft list tables` shows `bridge
+  lab_vpc_l2` and `inet lab_vpc` with `lan_card` and `HOST_IP` filled in;
+  `lab-vpc-nftables.service` is active after a reboot; `terraform plan` shows the four
+  networks; nothing applied yet.
 
   ⤷ **Needs** 5.1, 1.2a · **Recalls** `tf.backend`, `net.host` (`HOST_IP`, LAN card,
-  `LAN_CIDR`) · **Produces** `terraform/networks.tf`, `src/host/vpc.py`,
-  `src/host/files/nftables-vpc.nft`, `lab-vpc-nftables.service` · **Records** `net.tiers`
-  (bridges, gateways), `fw.vpc` (table, file, unit) · **Check** Exit
+  `LAN_CIDR`) · **Produces** `terraform/network.tf`, `src/host/vpc.py`,
+  `src/host/files/nftables-vpc.nft`, `lab-vpc-nftables.service` · **Records** `net.vpcs`
+  (bridges, ranges, WAN addresses, tap names), `fw.vpc` (tables, file, unit) · **Check** Exit
 - **5.3a Policy rules** (**deferred 2026-11-15**, if time permits; see **Moved later**).
   Conftest rules (OPA's Rego) over `terraform plan -json`:
-  - every `libvirt_network` is `route` mode with a `tier-*` bridge, its §5 gateway, no
-    NAT, no DHCP: **no network in `nat`, `open` or `bridge` mode**, so nothing reaches
-    the internet or bypasses the host table
-  - every VM has exactly two NICs: the first on the one tier network §5 gives it, the
-    second on bridge `cloudbr1`; **no VM on two tiers** (that would bridge frontend and
-    backend around the host)
-  - each VM's cloud-init network-config carries its §5 addresses (tier and mgmt), and
-    only the tier NIC has a default route
+  - the three `site-*` networks are isolated (no `forward`, no `ips`) and `wan` is `route`
+    with no NAT; no DHCP anywhere: **no network in `nat`, `open` or `bridge` mode**, so
+    nothing reaches the internet or bypasses the host tables
+  - every VM has exactly three NICs: its own VPC, `wan`, and bridge `cloudbr1`, each with
+    its §5 tap name; **no VM on two VPCs** (that would join them around the host)
+  - each VM's cloud-init network-config carries its §5 addresses, and only the WAN NIC
+    has a default route
   The host's ACLs are not in the plan: 5.4a's tests prove them.
   Exit: `conftest test` passes the real plan; fixture plans with a `nat` network, and
-  with fe-1 given a second NIC on tier-backend, are rejected.
+  with fe-1 given a second NIC on `site-c`, are rejected.
 
-  ⤷ **Needs** 5.2 · **Recalls** `net.tiers` · **Produces** `policy/*.rego`,
+  ⤷ **Needs** 5.2 · **Recalls** `net.vpcs` · **Produces** `policy/*.rego`,
   `policy/fixtures/` · **Records** `policy.dir`, `policy.fixtures` · **Check** Exit
 - **5.3b The gated apply.** The `setup` job (`python3 -B -m lab.setup`) first checks that
   libvirt answers (`virsh --connect qemu:///system list`) and that
@@ -2300,26 +2351,37 @@ answer.
   (10/10/40 GB); a `libvirt_domain` with fixed MACs; a cloud-init disk. The lab SSH public
   key comes from Vault (the `setup` job reads it with `lab-pipeline` and passes it as
   `TF_VAR_ssh_public_key`; it is public, so state holding it is fine). Cloud-init:
-  - user `lab` with the key, `lock_passwd: true`, passwordless sudo; `ssh_pwauth: false`
+  - user `user` with the key, `lock_passwd: true`, passwordless sudo; `ssh_pwauth: false`
   - `lab.test CA` in the trust store (`ca_certs`)
-  - network-config v2, matched **by MAC** with `set-name: eth0`/`eth1`, so the stock
-    image's PCI-slot names (`ens3`, …) never matter: eth0 = tier address, default route
-    via the host's `.1`; eth1 = mgmt address on `10.250.0.0/24`, no gateway; nameserver
-    `10.250.0.1` (on-link through eth1). All static: nothing depends on a lease
+  - network-config v2, matched **by MAC** (quoted: unquoted, YAML reads an all-digit MAC
+    as a number) with `set-name: eth0`/`eth1`/`eth2`, so the stock image's PCI-slot
+    names (`ens3`, …) never matter: eth0 = VPC address, no gateway; eth1 = WAN address,
+    default route via `198.51.100.1`; eth2 = mgmt address on `10.250.0.0/24`, no
+    gateway; nameserver `10.250.0.1` (on-link through eth2). All static: nothing depends
+    on a lease
+  - each interface's host-side tap named by `target.dev` (§5), so the host's bridge
+    table can match it
+  - disk ← base image and seed volume, domain ← disk, by `replace_triggered_by`: volumes
+    cannot be updated in place in 0.9.9, and cloud-init runs once per disk, so a new
+    image or new cloud-init rebuilds that VM (the trigger is the seed *volume*: the
+    provider recreates `libvirt_cloudinit_disk` whenever its `/tmp` ISO is gone). The
+    `setup` job strips the key and CA so user-data renders byte-identical every run
   Packages (qemu-guest-agent, chrony, nftables, wireguard-tools, podman on fe-1) come from
   the Ansible roles through Squid (6.1a).
   Exit: apply; `virsh list` shows the three VMs running; each answers SSH from the host on
-  its mgmt address; `ip -br addr` on each shows both static addresses and
-  `cloud-init status` is `done`. **N1 before the tunnel exists:** from fe-1, TCP to
-  `10.0.3.10` (any port) and to `10.0.2.10:22` fail; `curl -m5 https://1.1.1.1` fails (no
-  egress); `10.0.1.1:8200` (Vault through the tier gateway) fails; the host's
+  its mgmt address; `ip -br addr` on each shows its three static addresses and
+  `cloud-init status` is `done`; `virsh domiflist fe-1` shows the fixed tap names.
+  **N1 before the tunnel exists:** from fe-1, TCP to `10.3.1.10` and `198.51.100.13` (any
+  port) and to `198.51.100.12:22` fail; `curl -m5 https://1.1.1.1` fails (no egress);
+  `198.51.100.1:8200` (Vault through the WAN gateway) fails; the host's `lab_vpc_l2` and
   `lab_vpc` counters show the drops.
 
-  ⤷ **Needs** 5.3b, 4.0 · **Recalls** `vault.kv.ssh`, `img.base`, `net.tiers`,
+  ⤷ **Needs** 5.3b, 4.0 · **Recalls** `vault.kv.ssh`, `img.base`, `net.vpcs`,
   `path.lab-ca` · **Produces** `terraform/compute.tf`, the cloud-init templates ·
-  **Records** `vm.<name>` (tier and mgmt addresses, MACs), `ssh.access` (user, key
+  **Records** `vm.<name>` (VPC, WAN and mgmt addresses, MACs, tap names), `ssh.access` (user, key
   source) · **Check** Exit; N1
-- **5.4b Ingress, inventory and DNS.** Ingress is the host's DNAT from 5.2, so
+- **5.4b Ingress, inventory and DNS.** Ingress is the host's DNAT from 5.2 (`HOST_IP:443` →
+  fe-1 `198.51.100.11:443`), so
   `app.lab.test` → `HOST_IP`. Ansible's inventory: an `ansible_host` resource per VM
   (mgmt address, groups `frontend`, `hub`, `backend`), read through the
   `cloud.terraform.terraform_provider` inventory plugin with absolute paths (rule 8), so
@@ -2341,7 +2403,7 @@ answer.
   - DNS and NTP from `10.250.0.1`.
   - Proxy environment for apt, the shell, containerd (be-1) and Podman (fe-1):
     `http_proxy` **and** `https_proxy` = `http://proxy.lab.test:3128`, with `no_proxy`
-    covering `lab.test`, `VMNET_CIDR`, `LAN_CIDR`, the VPC, the overlay `10.99.0.0/16`,
+    covering `lab.test`, `VMNET_CIDR`, `LAN_CIDR`, the three VPC ranges, the WAN, the overlay `10.99.0.0/16`,
     the pod and service CIDRs, `.svc` and `.cluster.local`.
   - the common packages, through the proxy: qemu-guest-agent, chrony, nftables,
     wireguard-tools (podman on fe-1)
@@ -2359,29 +2421,35 @@ answer.
 - **6.1b VM firewall.** nftables, the lab's rules in their own table `inet lab` at
   priority `filter - 1` (so k3s's and flannel's iptables rules on be-1 are untouched),
   default drop both ways on every interface the role names:
-    - **eth1 (mgmt):** in from `10.250.0.1`: SSH; on be-1 also the k3s API (6443, for
+    - **eth2 (mgmt):** in from `10.250.0.1`: SSH; on be-1 also the k3s API (6443, for
       Vault's token reviews, the jobs and the break-glass kubeconfig).
-      Out to `10.250.0.1` only (eth1 is static,
-      §5, so no DHCP is needed). No default route via eth1
-    - **eth0 (tier):** only the step 5.2 flows for this VM (fe-1: TCP 443 in, UDP 51820
-      to tun-1; tun-1: UDP 51820/51821 from the spokes; be-1: UDP 51821 to tun-1). Host
-      firewalls repeat the ACLs, so one misconfigured
-      layer is not enough to open a path
+      Out to `10.250.0.1` only (eth2 is static,
+      §5, so no DHCP is needed). No default route via eth2
+    - **eth1 (WAN):** only the step 5.2 flows for this VM (fe-1: TCP 443 in, UDP 51820
+      to tun-1; tun-1: UDP 51820/51821 from the spokes; be-1: UDP 51821 to tun-1). The
+      host's tables repeat them outside the guest, so one misconfigured layer is not
+      enough to open a path
+    - **eth0 (VPC):** nothing in or out; no other machine is on the VPC network today
+    - **wg0 / wg1:** see 6.2b; no WAN or mgmt traffic may arrive or leave through a
+      tunnel, and no tunnel traffic through eth1/eth2 (container runtimes enable
+      forwarding on the spokes, so this keeps WAN and mgmt from becoming transit paths)
     - **forward (be-1 only),** after `established,related`:
       - k3s ServiceLB exposes ports by DNAT (hostPort), so those packets never reach
-        the input chain. Accept `ct status dnat iifname "wg1" ip saddr 10.99.0.2 ct
+        the input chain. Accept `ct status dnat iifname "wg1" ip saddr 10.1.1.10 ct
         original proto-dst 8000`; **drop every other DNAT'd packet**, which also
         closes the Istio gateway's status port 15021 on every node address
-      - pod traffic masqueraded out eth1, allowed only to `10.250.0.1` on 53, 123, 443
+      - pod traffic masqueraded out eth2, allowed only to `10.250.0.1` on 53, 123, 443
         (gateway: registry pulls, Flux's git and chart fetches, Alloy's remote write and
         Loki push) and 8200 (the api, VSO)
-    - node-exporter (8.8d) listens on `10.0.3.10:9100` in the host network namespace:
-      eth0's default drop refuses it from outside, and pods reach it through `cni0`
+    - node-exporter (8.8d) listens on `10.3.1.10:9100` in the host network namespace:
+      every NIC's default drop refuses it from outside, and pods reach it through `cni0`
 
   Exit: `curl` from one VM to another VM's mgmt address times out; VM →
   `10.250.0.1:8200` still succeeds; 6.1a's Exit still passes; `nft list table inet lab`
-  on each VM shows only its role's rules (N4); once 8.8d runs, `10.250.0.112:9100` and
-  `10.0.3.10:9100` time out from the host.
+  on each VM shows only its role's rules (N4); with the sender's `inet lab` table
+  flushed, VM → another VM's mgmt address still times out and the host's `lab_vpc_l2`
+  counter rises (the bridge table, 5.2); once 8.8d runs, `10.250.0.112:9100` times out
+  from the host.
 
   ⤷ **Needs** 6.1a · **Recalls** `net.vpc`, `vm.<name>`, `ansible.dropins` · **Produces**
   the nftables template in `base` · **Records** `fw.vm` (table, file, per-VM rule
@@ -2389,29 +2457,37 @@ answer.
 - **6.2a WireGuard keys and tunnels.** Three plays, in order: (1) on
   all three VMs, generate a key if none exists (the private key never leaves the VM)
   and publish the public key to Vault `kv/lab/pipeline/wg/<vm>`; (2) configure the hub
-  with both spokes' keys; (3) configure each spoke with the hub's key. The underlay is each VM's **tier** address; the overlay addresses
-  are the only `AllowedIPs`, so no Endpoint ever falls inside its own `AllowedIPs`
-  (rule 9).
+  with both spokes' keys; (3) configure each spoke with the hub's key. The underlay is
+  each VM's **WAN** address; the tunnels carry the **VPC ranges** (site-to-site) plus
+  the peer's overlay address. No WAN or mgmt range is ever in `AllowedIPs`, so no
+  Endpoint falls inside its own `AllowedIPs` (rule 9).
 
   | VM | Interface | Address | Listens | Peer | Peer Endpoint | Peer `AllowedIPs` |
   |---|---|---|---|---|---|---|
-  | fe-1 | `wg0` | `10.99.0.2/24` | — | tun-1 | `10.0.2.10:51820` | `10.99.0.1/32`, `10.99.1.0/24` |
-  | tun-1 | `wg0` | `10.99.0.1/24` | 51820 | fe-1 | (learned) | `10.99.0.2/32` |
-  | tun-1 | `wg1` | `10.99.1.1/24` | 51821 | be-1 | (learned) | `10.99.1.2/32` |
-  | be-1 | `wg1` | `10.99.1.2/24` | — | tun-1 | `10.0.2.10:51821` | `10.99.1.1/32`, `10.99.0.0/24` |
+  | fe-1 | `wg0` | `10.99.0.2/24` | — | tun-1 | `198.51.100.12:51820` | `10.99.0.1/32`, `10.2.0.0/16`, `10.3.0.0/16` |
+  | tun-1 | `wg0` | `10.99.0.1/24` | 51820 | fe-1 | (learned) | `10.99.0.2/32`, `10.1.0.0/16` |
+  | tun-1 | `wg1` | `10.99.1.1/24` | 51821 | be-1 | (learned) | `10.99.1.2/32`, `10.3.0.0/16` |
+  | be-1 | `wg1` | `10.99.1.2/24` | — | tun-1 | `198.51.100.12:51821` | `10.99.1.1/32`, `10.1.0.0/16`, `10.2.0.0/16` |
+
+  - **Preferred source:** the workload and the VPN endpoint are the same VM, so Linux
+    would pick the tunnel address as the source of fe-1's packets to `10.3.1.10` and
+    miss the hub's rule. Each spoke's routes to the remote VPC ranges carry `src` = its
+    own private address (fe-1 `10.1.1.10`, be-1 `10.3.1.10`), set with `Table = off`
+    and explicit `PostUp` routes (or a netplan route on `wg0`) so they persist and are
+    restored whenever the tunnel starts. No NAT inside the tunnels.
 
   - The spokes dial the hub (`PersistentKeepalive=25`), so the hub needs no Endpoint
     for them and spoke replacement never touches the hub's config beyond the key.
-  - `wg-quick@wg0` / `wg-quick@wg1` enabled, restart on failure; `wg-quick` installs
-    the routes for `AllowedIPs`.
+  - `wg-quick@wg0` / `wg-quick@wg1` enabled, restart on failure; on tun-1 `wg-quick`
+    installs the routes for `AllowedIPs`, on the spokes the `PostUp` routes do.
 
   Where to look when a handshake never happens, layer by layer: `wg show` (latest
-  handshake, transfer counters), the VPC ACL (UDP 51820/51821 both directions, 5.2),
-  each VM's `nft list table inet lab` counters on eth0, then whether the published
+  handshake, transfer counters), the host's `lab_vpc_l2` counters (UDP 51820/51821 on
+  `wan`, 5.2), each VM's `nft list table inet lab` counters on eth1, then whether the published
   keys in Vault match `wg show <if> public-key` on each side.
   Exit: `wg show` on tun-1 has a recent handshake with both spokes; tun-1 reaches
-  `10.99.0.2` and `10.99.1.2`; fe-1 cannot yet reach `10.99.1.2` (the hub does not
-  forward until 6.2b).
+  `10.99.0.2` and `10.99.1.2`; on fe-1, `ip route get 10.3.1.10` shows `dev wg0 src
+  10.1.1.10`; fe-1 cannot yet reach `10.3.1.10` (the hub does not forward until 6.2b).
 
   ⤷ **Needs** 6.1b · **Recalls** `vm.<name>`, `fw.vm`, `vault.mount.kv` · **Produces**
   `ansible/roles/wireguard_hub/`, `wireguard_spoke/`, `tunnel.py`, the `tunnel` job ·
@@ -2419,19 +2495,20 @@ answer.
 - **6.2b The hub's policy and the tunnel proofs.**
   - **tun-1 is the policy point.** `ip_forward=1` (be-1 has it too, for k3s, but its
     forward chain admits nothing from `wg1` except the DNAT'd 8000, 6.1b). Its
-    `inet lab` forward chain: accept `iif wg0 oif wg1 ip saddr 10.99.0.2 ip daddr
-    10.99.1.2 tcp dport 8000`; accept `established,related`; **log and drop everything
-    else** (prefix `lab-hub-drop`). No NAT: be-1 sees the frontend's real overlay address.
-  - On be-1, `wg1` input accepts only TCP 8000 from `10.99.0.2` (used by this step's
+    `inet lab` forward chain: accept `iif wg0 oif wg1 ip saddr 10.1.1.10 ip daddr
+    10.3.1.10 tcp dport 8000`; accept `established,related`; **log and drop everything
+    else** (prefix `lab-hub-drop`). No NAT: be-1 sees fe-1's real private address.
+  - On be-1, `wg1` input accepts only TCP 8000 from `10.1.1.10` (used by this step's
     test listener; once k3s runs, the real port 8000 arrives through forward, 6.1b).
-    On fe-1, `wg0` accepts only `established,related`. fe-1's packets to `10.99.1.2`
-    route via `wg0`, so the kernel picks `10.99.0.2` as their source, which is what
+    On fe-1, `wg0` accepts only `established,related`. fe-1's packets to `10.3.1.10`
+    leave `wg0` with source `10.1.1.10` (6.2a's preferred-source routes), which is what
     tun-1 and be-1 match on.
 
   Exit: a test listener on
-  be-1 (`systemd-run` a one-line HTTP server on `10.99.1.2:8000`, rule 10) answers fe-1;
-  from fe-1, `10.99.1.2:22` times out and tun-1's log shows `lab-hub-drop`; with
-  `wg0` or `wg1` down, `10.99.1.2:8000` is unreachable from fe-1 (N2).
+  be-1 (`systemd-run` a one-line HTTP server on `10.3.1.10:8000`, rule 10) answers fe-1;
+  from fe-1, `10.3.1.10:22` times out and tun-1's log shows `lab-hub-drop`; with
+  `wg0` or `wg1` down, `10.3.1.10:8000` is unreachable from fe-1 and nothing falls back
+  over the WAN (N2).
 
   ⤷ **Needs** 6.2a · **Recalls** `net.overlay`, `fw.vm` · **Produces** hub forward
   chain and spoke input rules in the WireGuard roles · **Records** `wg.hub-log`
@@ -2454,7 +2531,8 @@ run by the learner with the break-glass kubeconfig (runbook), and the API audit 
   - Flags:
     - `--disable=traefik`: the Istio Gateway is the only ingress
     - `--secrets-encryption`
-    - `--node-ip=10.0.3.10`
+    - `--node-ip=10.3.1.10` and `--flannel-iface=eth0`: the default route is the WAN NIC
+      (eth1), which flannel would otherwise pick
     - `--tls-san` = `10.250.0.112` and `k3s.lab.test`
     - `--write-kubeconfig-mode=600`
   - Default flannel CNI.
@@ -2491,7 +2569,7 @@ run by the learner with the break-glass kubeconfig (runbook), and the API audit 
     `gotk-sync.yaml`: GitRepository `lab` (`https://gitea.lab.test/lab/lab.git`, branch
     `main`, every minute) and the root Kustomization (path `./clusters/backend`,
     `prune: true`). From then on Flux manages its own sync objects from git.
-  - Path: source-controller → be-1's eth1 → `10.250.0.1:443` → the gateway → Gitea, the
+  - Path: source-controller → be-1's eth2 → `10.250.0.1:443` → the gateway → Gitea, the
     flow 6.1b already allows; `no_proxy` covers `lab.test`, so Squid is not involved; TLS
     is verified against `lab.test CA`.
   - `kustomizations.yaml` starts with `platform` (namespaces `vault-auth`,
@@ -2892,17 +2970,17 @@ run by the learner with the break-glass kubeconfig (runbook), and the API audit 
     reading `ca.crt` from the Secret: whichever the pinned Istio supports); an
     `HTTPRoute` to `api.app:8000`. ServiceLB exposes 8000 (and the status port 15021) on
     every node address by DNAT; be-1's forward chain admits only 8000, only on `wg1`,
-    only from `10.99.0.2` (6.1b).
+    only from `10.1.1.10` (6.1b).
   - **Server certificate:** issued on the host by `up`/`update` with cfssl (`lab app
     root`, profile `server`) into `kv/lab/pipeline/tls/backend-gw`; the `app` job
     reads it and writes Secret `ingress/backend-tls` (`tls.crt`, `tls.key`, `ca.crt` =
     `lab app CA`) on stdin (`gate-app`), only when the Secret is missing or differs
     from KV.
 
-  Exit: from fe-1, `openssl s_client -connect 10.99.1.2:8000 -servername
+  Exit: from fe-1, `openssl s_client -connect 10.3.1.10:8000 -servername
   api.backend.lab.test -CAfile <lab app CA>` verifies the server certificate, and
   the handshake fails without a client certificate (P5, server half); tun-1's forward
-  counter for the 8000 rule went up; from fe-1, be-1's tier and mgmt addresses on 8000
+  counter for the 8000 rule went up; from fe-1, be-1's WAN and mgmt addresses on 8000
   and 15021 time out; `istioctl ztunnel-config workloads` lists the gateway pod as TCP
   and the api and postgres pods as HBONE.
 
@@ -2918,7 +2996,7 @@ run by the learner with the break-glass kubeconfig (runbook), and the API audit 
   only when missing or different from KV.
 
   Exit: from fe-1, `curl --cert … --key … --cacert <lab app CA> --resolve
-  api.backend.lab.test:8000:10.99.1.2 https://api.backend.lab.test:8000/healthz`
+  api.backend.lab.test:8000:10.3.1.10 https://api.backend.lab.test:8000/healthz`
   answers (N2, real backend); the same with fe-1's `app-edge` certificate
   (signed by `lab.test CA`) fails the handshake (P5); during a request,
   `tcpdump -i wg0 -nn -X 'tcp port 8000'` on tun-1 shows TLS records only, no `HTTP/1.1`
@@ -2947,11 +3025,11 @@ run by the learner with the break-glass kubeconfig (runbook), and the API audit 
   generated from `.container` files, run as system units by root's Podman). Both
   containers use **`Network=host`**: no Podman port publishing, so no DNAT and no
   forward rules on fe-1, `127.0.0.1` means the host's loopback in both, and the
-  frontend's calls to `10.99.1.2` leave through `wg0`:
+  frontend's calls to `10.3.1.10` leave through `wg0` with source `10.1.1.10` (6.2a):
     - `frontend.container`: the frontend image by digest, read-only root, non-root
       (`User=`), listening on `127.0.0.1:8080` only;
       `API_URL=https://api.backend.lab.test:8000` with
-      `PodmanArgs=--add-host=api.backend.lab.test:10.99.1.2` (`AddHost=` came after
+      `PodmanArgs=--add-host=api.backend.lab.test:10.3.1.10` (`AddHost=` came after
       quadlet 4.9.3 **[verify]**); `/etc/frontend/tls` mounted read-only;
       its `ssl.SSLContext` trusts `lab app CA` only (never the system store) and
       presents the client certificate; HTML list and add form, no database driver, no
@@ -2986,7 +3064,7 @@ run by the learner with the break-glass kubeconfig (runbook), and the API audit 
   `monitoring`; Kustomization `monitoring` `dependsOn` `mesh`, `operators` (VSO) and
   `gate-monitoring`. One Alloy, `sa/alloy` (`fullnameOverride: alloy`, preset
   `deployment`: one replica, no clustering, so one node sends no duplicate logs or
-  events), does all scraping and pod-log collection and sends to the host over eth1:443.
+  events), does all scraping and pod-log collection and sends to the host over eth2:443.
   Values:
   - `destinations` (a map in 4.x): `prometheus`
     (`https://prometheus.lab.test/api/v1/write`) and `loki`
@@ -3110,7 +3188,7 @@ run by the learner with the break-glass kubeconfig (runbook), and the API audit 
   Neither holds a credential, and Flux is their only applier.
   - **node-exporter**, the chart's: `telemetryServices.node-exporter` with `deploy:
     true`, `namespaceOverride: node-agents`, `service.listenOnAllInterfaces: false` (it
-    binds the node's InternalIP `10.0.3.10` only), `kubeRBACProxy.enabled: true` (9100
+    binds the node's InternalIP `10.3.1.10` only), `kubeRBACProxy.enabled: true` (9100
     is HTTPS and every scrape needs a token allowed `/metrics`), and pod label
     `istio.io/dataplane-mode: none` (its pod IP is the node IP, which ztunnel must never
     treat as a workload). `hostMetrics.linuxHosts`: `scheme: https`, `bearerTokenFile:
@@ -3143,8 +3221,8 @@ run by the learner with the break-glass kubeconfig (runbook), and the API audit 
   an A1-style event (a `kubectl exec` into a CoreDNS pod refused as `lab-ci`, 8.2d)
   appears in Loki `{job="k3s-audit"}` within 2 minutes; `istioctl ztunnel-config
   workloads` does not list node-exporter; on be-1, `curl -k
-  https://10.0.3.10:9100/metrics` without a token gets 401; from the host,
-  `10.250.0.112:9100` and `10.0.3.10:9100` time out (N4).
+  https://10.3.1.10:9100/metrics` without a token gets 401; from the host,
+  `10.250.0.112:9100` times out (N4; the host has no route to `10.3.1.10` at all).
 
   ⤷ **Needs** 8.8a, 8.2d · **Recalls** `mon.collector`, `mon.backends`, `k8s.audit`,
   `mesh.authz`, `fw.vm`, `cmd.istioctl`, `vault.kv.k3s-admin` · **Produces** the
@@ -3337,7 +3415,7 @@ G4's hand edit by 12.1f.
   "not found". Each phase's `down()` was written with the phase; this step composes
   them and proves them once, on the full build, as the final `destroy`.
   - **13.1a `teardown` and `destroy` orchestration:** `teardown` runs §14's tenant rows
-    (the VPC, tiers and VMs, so the k3s cluster goes with be-1, and the state and Vault
+    (the VPCs, the WAN and the VMs, so the k3s cluster goes with be-1, and the state and Vault
     entries that belong only to them) and keeps the host platform. `destroy` runs
     teardown's rows, then the platform rows to 9, each phase's `down()` with the state
     it reads, then the host restore (13.1b). It needs the whole lab built and the
@@ -3414,9 +3492,9 @@ G4's hand edit by 12.1f.
    read by `cloud.terraform.terraform_provider` (not `terraform_state`), with absolute
    paths.
 9. **A WireGuard Endpoint must never fall inside its own AllowedIPs.** Route only
-   overlay addresses through the tunnel and keep the underlay (here, the tier
-   addresses) out of `AllowedIPs`; a peer that routed the whole backend subnet while
-   its endpoint sat in that subnet would loop.
+   overlay and VPC ranges through the tunnel and keep the underlay (here, the WAN
+   addresses) and mgmt out of `AllowedIPs`; a peer that routed a range while its
+   endpoint sat in that range would loop.
 10. **Long-running helpers on a VM run as transient systemd units** (`systemd-run`),
     never as processes left behind by an SSH session. Connection refused vs timeout
     tells "no listener" apart from "firewall dropped it".
@@ -3534,7 +3612,7 @@ cluster first.*
 | CNPG in an ambient STRICT mesh | 8.4a, 8.4c | the operator is outside the mesh and polls port 8000: that port alone is PERMISSIVE and allowed only from the pod CIDR; 5432 stays STRICT and api-only. Fallback: mesh `cnpg-system` too, with its webhook port excluded |
 | Telemetry to the host | 2.7b, 8.8a, 8.8b, 8.8d | Alloy buffers in its WAL, an `emptyDir` with an `ephemeral-storage` limit, so an outage longer than the WAL, or the host and the pod restarting together, leaves a gap (accepted); every meshed target needs an ALLOW, so O1 names each job |
 | The Alloy Operator and Alloy's default RBAC | 8.8a | by default the operator may write Secrets, workloads and RBAC everywhere (with `bind` and `escalate`), and Alloy and kube-state-metrics may read every Secret, the mesh CA key included; the operator is confined to `monitoring` without ClusterRoles, Alloy's ClusterRole is a read-only Flux manifest with no Secrets or ConfigMaps, kube-state-metrics drops its `secrets` and `configmaps` collectors; K1 proves Alloy cannot read `istio-system` Secrets |
-| Privileged `node-agents` | 8.8d | node-exporter (hostNetwork, hostPID, read-only host paths) and alloy-audit (UID 0, no capabilities, one read-only directory) are the only host-access pods: own namespace, no credential, no token in alloy-audit, node-exporter bound to `10.0.3.10` behind kube-rbac-proxy and dropped on eth0 (6.1b), Flux their only applier |
+| Privileged `node-agents` | 8.8d | node-exporter (hostNetwork, hostPID, read-only host paths) and alloy-audit (UID 0, no capabilities, one read-only directory) are the only host-access pods: own namespace, no credential, no token in alloy-audit, node-exporter bound to `10.3.1.10` behind kube-rbac-proxy and dropped on every NIC (6.1b), Flux their only applier |
 | Pod logs hold whatever pods print | 8.8a | Loki is as sensitive as pod stdout; the api logs no card data (S1); Grafana's console login is an admin (3.5c), so anyone with it reads every log; gitleaks-style `secretFilter` is available but off to save memory |
 | The Alloy write credential leaks | 2.7b | it only appends metrics and logs, and only from `10.250.0.112` (the allowlist runs before the password check); rotated by a new KV version with versioned usernames, so no batch is refused during the switch |
 | Egress allow-list too tight | 2.9, 6.1a, 8.x | denials are logged by Squid; grow the list from the log, never by opening the ACL |
@@ -3543,7 +3621,7 @@ cluster first.*
 | Losing the unseal key or Vault snapshot | 9 | that is total loss of encrypted data, by design; the runbook (14.4) makes offline custody of both an explicit operator duty |
 | MinIO community edition distribution | 2.7 | upstream changed how community images and binaries ship; the image is pinned by digest and kept as a `podman save` archive in `/var/lib/lab/images/`, which `destroy` keeps (2.7). If it can no longer be pulled at all, Garage or SeaweedFS (both S3-compatible, both work as a Terraform S3 backend) replace it behind the same `minio.lab.test` name |
 | The gateway is a single point of failure for every web service | 2.6 | Vault, CoreDNS, Squid and SSH never depend on it, so unseal, DNS and break-glass access survive a gateway outage; `up` and `update` name it first when it is down |
-| ServiceLB exposes the backend gateway on every node address | 8.7d | be-1's nftables admit 8000 only on `wg1` from `10.99.0.2`; P4 and Z1 test the tier and mgmt addresses too |
+| ServiceLB exposes the backend gateway on every node address | 8.7d | be-1's nftables admit 8000 only on `wg1` from `10.1.1.10`; P4 and Z1 test the WAN and mgmt addresses too |
 | PR code runs on the host with the pipeline identity | 2.10 | accepted for one operator (§15); `main` is protected, so nothing reaches `deliver` without a merge; with no `docker` group and rootless builds, it runs with `lab-runner`'s rights, not root's |
 | Podman comes from Ubuntu's universe component, paired with an older netavark (4.9.3 with 1.4.0) | 2.1b, 2.1c, 2.2 | security fixes come from the community or Ubuntu Pro, not a vendor repo; versions are pinned (`config/versions.toml`) and logged by `up`; no container port faces the LAN except through the firewall. Netavark features after 1.4 (the nftables driver, `isolate=strict`) are absent, so 2.1c proves the driver, the DNAT path and DNS before 2.2 depends on them. If it fails: Podman 5.x with netavark ≥ 1.10 (nftables driver) from a pinned third-party repository (2.1c names it); Docker is the last resort |
 | aardvark-dns and CoreDNS both want port 53 | 2.1b, 2.3a | aardvark-dns moves to `dns_bind_port` 1053; the lab's own nat rule redirects containers' TCP and UDP port 53 queries to it on every network, since netavark 1.4 does it for UDP only and never on internal networks (2.1c, 2.2) |
@@ -3570,12 +3648,12 @@ V1–V5 run in `destroy` after its reboot.
 
 | ID | Check | How |
 |---|---|---|
-| **N1** | frontend and backend tiers are isolated | fe-1 → `10.0.3.10` (be-1's tier address) on any port times out, with and without the tunnel up; the host table `inet lab_vpc` has no rule between `tier-fe` and `tier-be` (5.2) |
-| **N2** | the tunnel is the only path | fe-1 → `10.99.1.2:8000` (mTLS with the frontend's client certificate) succeeds and tun-1's forward counter rises; with `wg0` (fe-1) or `wg1` (tun-1) down it times out; `ip route get 10.99.1.2` on fe-1 shows `dev wg0` |
-| **N3** | no internet from tiers | direct `curl https://example.com` fails; through the proxy → 403 and logged |
-| **N4** | mgmt NIC reaches only the host | VM → another VM's mgmt address times out; VM → `10.250.0.1:8200` succeeds; from the host, be-1's `10.250.0.112:9100` and `10.0.3.10:9100` (node-exporter) time out |
+| **N1** | the VPCs are isolated | without the tunnel, fe-1 → be-1's private `10.3.1.10` and WAN `198.51.100.13` time out on any port, and `lab_vpc_l2`'s drop counter rises; a VM sending another VM's traffic through `198.51.100.1` is dropped by `inet lab_vpc`; with the tunnel up, only 6.2b's flow passes; the bridges `site-*` carry no host address (`ip -br addr`) |
+| **N2** | the tunnel is the only path | fe-1 → `10.3.1.10:8000` (mTLS with the frontend's client certificate) succeeds and tun-1's forward counter rises; with `wg0` (fe-1) or `wg1` (tun-1) down it times out, with no fallback over the WAN; `ip route get 10.3.1.10` on fe-1 shows `dev wg0 src 10.1.1.10` |
+| **N3** | no internet from the VPCs | direct `curl https://example.com` fails; through the proxy → 403 and logged |
+| **N4** | mgmt NIC reaches only the host | VM → another VM's mgmt address times out, also with the sender's `inet lab` table flushed (the host's bridge table drops it); VM → `10.250.0.1:8200` succeeds; from the host, be-1's `10.250.0.112:9100` (node-exporter) times out |
 | **N5** | Terraform runs least-privilege | the `setup` job runs as `lab-runner`, not root (`id`), and cannot change the host's ACLs (`nft list table inet lab_vpc` as `lab-runner` is denied); `libvirt` membership is root-equivalent and accepted (2.10) |
-| **N6** | the hub forwards one flow only | fe-1 → `10.99.1.2:22` and `:5432` time out and tun-1 logs `lab-hub-drop` |
+| **N6** | the hub forwards one flow only | fe-1 → `10.3.1.10:22` and `:5432` time out and tun-1 logs `lab-hub-drop` |
 | **H2** | CloudStack platform healthy | `/client/api` returns 200; the KVM host is `Up`; SSVM and CPVM are `Running`; every system VM and router `cmk` lists as `Running` has a running domain of the same instance name in `virsh --readonly list` |
 | **E1** | field-level encryption | `psql` shows `vault:v<n>:…` (any key version); API returns `**** 4242` |
 | **E2** | key rotation | rotate → new ciphertext carries the new version (`vault:v2:…` on first run); the older ciphertext still decrypts (`verify`: on a scratch Transit key) |
@@ -3638,7 +3716,7 @@ those options.
 Each line runs that phase's `down()`. The state each step reads is listed so that no
 step depends on something already deleted. Every row tolerates "already gone".
 
-- `teardown` runs rows −1 to 6: the tenant side (the VPC, tiers and VMs, so the k3s
+- `teardown` runs rows −1 to 6: the tenant side (the VPCs, the WAN and the VMs, so the k3s
   cluster goes with be-1) and the Vault and `state/` entries that belong only to it. The
   host platform and the VM image template stay, so the next `up` is quick.
 - `destroy` first asks for confirmation (§8: the operator types `destroy`), then runs
@@ -3692,7 +3770,7 @@ kept (2.7).
 | Database TLS inside the mesh | the mesh's mTLS, plus CNPG's server TLS with `sslmode=require` | `sslmode=verify-full` against CNPG's CA: CNPG's CA lives in ns `db`, so the api would need a copy kept in sync; the mesh already authenticates postgres by SPIFFE ID |
 | Secrets into k3s | Vault Secrets Operator for the one Secret CNPG needs; the api reads Vault directly | External Secrets Operator: equivalent, but VSO is Vault's own and speaks its Kubernetes auth natively; the api through a synced Secret: one more copy of the password, and it already logs in to Vault for Transit |
 | Database storage | k3s `local-path` (reclaim `Delete`) | a `Retain` StorageClass or CSI volumes with snapshots: production databases; here the data is restorable from 9.1a's backups |
-| VPN topology | one VPC, three tiers, WireGuard hub (tun-1) between frontend and backend | two VPCs joined by a site-to-site tunnel between their public IPs: the shape of two real sites, but a second router pair for no extra lesson here. CloudStack's built-in VPC site-to-site IPsec VPN: the managed-gateway answer, but known to be fragile and debugged inside system VMs. Tailscale/Headscale: for many ephemeral nodes with tag ACLs |
+| VPN topology | **changed 2026-11-15:** three VPCs, WireGuard hub (tun-1) between frontend and backend, the tunnels carrying the VPC ranges (site-to-site, see VPC topology) | one VPC with three tiers and the hub between them (the design before): a tunnel inside one network, not between sites. Two VPCs joined directly between their public IPs: no hub, so no single policy point. CloudStack's built-in VPC site-to-site IPsec VPN: the managed-gateway answer, but known to be fragile and debugged inside system VMs. Tailscale/Headscale: for many ephemeral nodes with tag ACLs |
 | Mesh | Istio ambient | Linkerd: simpler install, but sidecars per pod and edge-only open-source releases |
 | CNI | k3s flannel | Cilium: its flow visibility is covered by ztunnel's deny logs for meshed traffic |
 | Cluster ingress | one Istio Gateway, `backend` (mutual TLS, reachable only from the tunnel) | k3s's Traefik (disabled), NGINX Gateway Fabric: a second controller outside the mesh's identity model; a separate operator gateway: not needed since Grafana moved to the host (2026-11-09) |
@@ -3719,7 +3797,8 @@ kept (2.7).
 | Behind the gateway | plain HTTP on an internal Podman network and loopback | re-encrypting to every backend: needed when the network behind the gateway is shared or untrusted; here it never leaves the host |
 | SSH host trust | per-job `known_hosts` with `accept-new` | Vault's SSH CA signing host and user certificates, so host keys are verified and no static key exists: the production answer, out of scope |
 | istiod CA name constraints | none: Istio's built-in root is self-signed and trusted only inside the mesh (8.3a) | a `cluster.local`-constrained istiod intermediate under a lab-controlled mesh root: defence in depth for the upgrade path |
-| Management network isolation | in-guest nftables on a shared host-only bridge | private VLANs or per-VM L2 isolation, so a VM's root cannot reach another VM's mgmt NIC: needs Open vSwitch PVLAN support in CloudStack |
+| Management network isolation | the host's `bridge lab_vpc_l2` table drops guest ↔ guest frames on `cloudbr1`, keyed on host-side ports, so a VM's root cannot reach another VM's mgmt NIC (5.2); in-guest nftables as a second layer | private VLANs or per-VM L2 isolation (Open vSwitch PVLANs); in a cloud, no shared mgmt network at all: SSM and VPC endpoints |
+| VPC topology | **redesigned 2026-11-15:** three VPCs (`site-a`, `site-hub`, `site-c`), one VM each, each VM its VPC's gateway; a routed `wan` plays the internet; the host's bridge and inet tables enforce the WAN rules outside the guests; WireGuard site-to-site carries the VPC ranges through the hub | one VPC with three tiers and the host as its router (the design before): isolation was only drop rules on a shared router. A router VM per VPC: closest to CloudStack's virtual router, keeps a compromised workload from rewriting its own boundary and keeps k3s's rules apart from the edge; +3 VMs, the path if a VPC ever holds more than one VM. Network namespaces as routers: light, but imperative and invisible to Terraform. Across providers (what the lab mimics): site-to-site VPN over the internet, often IPsec to each provider's managed VPN gateway (AWS VPN, Cloud VPN); within one cloud: inter-region peering or Transit Gateway on the provider's backbone, security groups enforced by the hypervisor |
 | Privileged access | SSH to the host as Ubuntu ships it, from `LAN_CIDR` only (2.2); CloudStack adds the KVM host as root with a key limited by `from=` to the host's own address (3.1c) | key-only SSH hardening (the option below); AD logins (above), Teleport/Boundary with an SSH CA and session recording: the production answer, out of scope |
 | Host SSH hardening | **option, not in the core build** (moved out of 2.2 on 2026-11-10; about one M session, folds into 2.2): config key `OPERATOR_LOGIN`, which preflight requires to be a local non-root user with a usable key in the file `sshd -T -C user=<login>` names (owned by the user, not group- or world-writable); a drop-in `/etc/ssh/sshd_config.d/00-lab.conf` (sorts before cloud-init's `50-cloud-init.conf`; sshd keeps the first value) with `PasswordAuthentication no`, `KbdInteractiveAuthentication no`, `PermitRootLogin prohibit-password`, `AllowUsers <OPERATOR_LOGIN> root@<HOST_IP>` (the second for 3.1c; `user@host` avoids a `Match` block), `X11Forwarding no`, `AllowAgentForwarding no`, `PermitTunnel no`, `AllowStreamLocalForwarding no`, `AllowTcpForwarding local` (`ssh -D`, `-L`, `-J` work; `-R` does not); a per-source nftables meter on new tcp 22 connections (`limit rate over 10/minute burst 10 packets`); lockout guards: the key check re-runs, `install -d -m 0755 /run/sshd` then `sshd -t` (a failure removes the file), then `systemctl try-reload-or-restart ssh`, the applying session kept open. Check H1: `ssh -o PreferredAuthentications=none` as `OPERATOR_LOGIN`, root and an unknown user lists only `publickey`; root and a temporary keyed user from the LAN are refused. `destroy` removes the drop-in (rule 26 names it) and reloads. Further tightenings: refuse stray `AllowUsers`/`AllowGroups`/`Match` lines elsewhere in the sshd config (sshd adds up `AllowUsers` from every file); a timed undo (`systemd-run --on-active=5min` removes the drop-in unless confirmed from a new session) | the core build keeps Ubuntu's SSH defaults to stay on the core functions; the risk accepted is password logins from `LAN_CIDR` if the host allows them |
 | Linting | **option, not in the core build** (moved out of the scaffold step on 2026-11-10; about one M session): a `lint` job in `pr.yml` running ruff, mypy, shellcheck (`bootstrap.sh`), yamllint, ansible-lint and tflint, each only over the file types that exist so far, failing when files of a type exist but its linter is missing; ruff, mypy, yamllint and ansible-lint hash-pinned in a dev requirements file this option adds, shellcheck and tflint pinned in `config/versions.toml` | not needed for the core functions; `terraform plan` + policy, `trivy config`, kubeconform and the no-Secrets rule still gate every PR (10.1) |
@@ -3751,7 +3830,7 @@ kept (2.7).
 | gate (Kustomization) | an empty Flux Kustomization whose health checks wait for a job's run-time Secrets; what needs them `dependsOn` it |
 | `fib saddr type local` | nftables match: the packet's source address is one of the host's own |
 | HBONE | Istio ambient's tunnel: mTLS HTTP CONNECT on port 15008 between ztunnels |
-| hub (tun-1) | the tunnel tier's VM; terminates both WireGuard tunnels and forwards one allowed flow |
+| hub (tun-1) | `site-hub`'s VM; terminates both WireGuard tunnels and forwards one allowed flow |
 | k8s-monitoring | Grafana's Helm chart that deploys Alloy, the Alloy Operator, kube-state-metrics and node-exporter and writes Alloy's configuration from feature switches |
 | kubernetes-mixin | the community's recording rules and dashboards for Kubernetes (with the node-mixin for node-exporter), rendered from jsonnet |
 | local stage (`up`) | what `up` runs as root on the host once the pipeline is green: the Vault DR drill (B3, B2), which needs the unseal key the runner can never read, then the `verify` job's pass/fail summary |

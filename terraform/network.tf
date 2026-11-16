@@ -1,53 +1,44 @@
-resource "libvirt_network" "frontend" {
-  name      = "tier-frontend"
+resource "libvirt_network" "site_a" {
+  name      = "site-a"
   autostart = true
 
-  forward = {
-    mode = "route"
-  }
-
   bridge = {
-    name = "tier-fe"
+    name = "site-a"
   }
-
-  ips = [
-    {
-      address = "10.0.1.1"
-      prefix  = 24
-    }
-  ]
 
   dns = {
     enable = "no"
   }
 }
 
-resource "libvirt_network" "tunnel" {
-  name      = "tier-tunnel"
+resource "libvirt_network" "site_hub" {
+  name      = "site-hub"
   autostart = true
 
-  forward = {
-    mode = "route"
-  }
-
   bridge = {
-    name = "tier-tun"
+    name = "site-hub"
   }
-
-  ips = [
-    {
-      address = "10.0.2.1"
-      prefix  = 24
-    }
-  ]
 
   dns = {
     enable = "no"
   }
 }
 
-resource "libvirt_network" "backend" {
-  name      = "tier-backend"
+resource "libvirt_network" "site_c" {
+  name      = "site-c"
+  autostart = true
+
+  bridge = {
+    name = "site-c"
+  }
+
+  dns = {
+    enable = "no"
+  }
+}
+
+resource "libvirt_network" "wan" {
+  name      = "wan"
   autostart = true
 
   forward = {
@@ -55,12 +46,12 @@ resource "libvirt_network" "backend" {
   }
 
   bridge = {
-    name = "tier-be"
+    name = "wan"
   }
 
   ips = [
     {
-      address = "10.0.3.1"
+      address = "198.51.100.1"
       prefix  = 24
     }
   ]

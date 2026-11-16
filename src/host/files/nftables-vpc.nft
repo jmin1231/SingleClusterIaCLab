@@ -1,0 +1,72 @@
+# --- Switched: VM <-> VM inside one bridge (the "security groups") ---
+# Frames between two taps on the same bridge never reach IP routing,
+# so only a bridge-family table sees them.
+table bridge lab_vpc_l2
+delete table bridge lab_vpc_l2
+
+table bridge lab_vpc_l2 {
+    set wan_taps {
+        type ifname
+        elements = { "fe-1-wan", "tun-1-wan", "be-1-wan" }
+    }
+    set mgmt_taps {
+        type ifname
+        elements = { "fe-1-mgmt", "tun-1-mgmt", "be-1-mgmt" }
+    }
+
+    chain forward {
+        type filter hook forward priority filter; policy accept;
+
+        # mgmt: no VM-to-VM at all; each VM still talks to the host
+        iifname @mgmt_taps oifname @mgmt_taps counter drop
+
+        # wan: ARP only between each spoke and the hub
+        iifname "fe-1-wan" oifname "tun-1-wan" ether type arp accept
+        iifname "tun-1-wan" oifname "fe-1-wan" ether type arp accept
+        iifname "be-1-wan" oifname "tun-1-wan" ether type arp accept
+        iifname "tun-1-wan" oifname "be-1-wan" ether type arp accept
+
+        # wan: WireGuard only, spoke -> hub and the hub's replies
+        # (stateless: conntrack in a bridge table needs nf_conntrack_bridge)
+        iifname "fe-1-wan" oifname "tun-1-wan" ether type ip udp dport 51820 accept
+        iifname "tun-1-wan" oifname "fe-1-wan" ether type ip udp sport 51820 accept
+        iifname "be-1-wan" oifname "tun-1-wan" ether type ip udp dport 51821 accept
+        iifname "tun-1-wan" oifname "be-1-wan" ether type ip udp sport 51821 accept
+
+        # wan: anything else between VMs (fe-1 <-> be-1, IPv6, other ports)
+        iifname @wan_taps oifname @wan_taps counter drop
+    }
+}
+
+# --- Routed: anything through the host's IP layer (the "internet gateway") ---
+table inet lab_vpc
+delete table inet lab_vpc
+
+table inet lab_vpc {
+    # The LAN's HTTPS reaches fe-1's public address. Only on the LAN card,
+    # so Traefik on 0.0.0.0:443 still answers the host and the VMs.
+    chain prerouting {
+        type nat hook prerouting priority dstnat; policy accept;
+
+        iifname $lan_card ip daddr $host_ip tcp dport 443 dnat ip to 198.51.100.11
+    }
+
+    # No VM reaches the LAN or the internet, and none relays through 198.51.100.1.
+    chain forward {
+        type filter hook forward priority filter; policy accept;
+
+        ct state established,related accept
+        iifname $lan_card oifname "wan" ip daddr 198.51.100.11 tcp dport 443 ct status dnat accept
+
+        iifname "wan" counter drop
+        oifname "wan" counter drop
+    }
+
+    # VMs reach host services only over mgmt, never over the wan.
+    chain input {
+        type filter hook input priority filter; policy accept;
+
+        iifname "wan" ct state established,related accept
+        iifname "wan" counter drop
+    }
+}

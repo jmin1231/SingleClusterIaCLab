@@ -2,16 +2,21 @@ version: 2
 ethernets:
     eth0:
         match:
-            macaddress: "${tier_mac}"
+            macaddress: "${vpc_mac}"
         set-name: eth0
-        addresses: [${tier_ip}/24]
-        routes:
-            - to: default
-              via: ${gateway}
+        addresses: [${vpc_ip}/24]
     eth1:
         match:
-            macaddress: "${mgmt_mac}"
+            macaddress: "${wan_mac}"
         set-name: eth1
+        addresses: [${wan_ip}/24]
+        routes:
+            - to: default
+              via: 198.51.100.1
+    eth2:
+        match:
+            macaddress: "${mgmt_mac}"
+        set-name: eth2
         addresses: [${mgmt_ip}/24]
         nameservers:
             addresses: [10.250.0.1]

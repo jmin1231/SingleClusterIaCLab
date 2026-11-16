@@ -846,16 +846,16 @@ the merged revision (`cmd.flux-wait`).
 
 | Command | Runs |
 |---|---|
-| `up` | First build, and resume after a failed first build (redesigned 2026-11-16). If `state/initialized` exists it logs "initial infrastructure already initialized; use `update`" and stops, changing nothing (no Gitea or Vault needed for the check). Otherwise `platform_up()` (every host and platform module's `up()`, each converging, so a re-run continues where a failed one broke) → commit any edits → seed `lab/lab` if still empty (the push starts `deploy.yml`'s first build) → write `state/initialized` → print the Actions URL. It does not follow the run: the operator watches it in Gitea (3.5a) |
-| `update` | The one command for every change (redesigned 2026-11-16). For a lab already initialized (`state/initialized`); otherwise it refuses. `platform_up()` applies host changes from the local checkout (and after a reboot reloads the VM firewall and unseals Vault). It first commits the checkout's edits, then pushes `main` to Gitea's `main`, and the push starts `deploy.yml` (with nothing new it dispatches one run instead); its first job, `check` (`terraform fmt`/`validate`), stops the run before anything is applied if the change is malformed. It prints the Actions URL and exits; watching the run is the only manual part (3.5b) |
+| `up` | First build, and resume after a failed first build (redesigned 2026-11-16). If `state/initialized` exists it logs "initial infrastructure already initialized; use `update`" and stops, changing nothing (no Gitea or Vault needed for the check). Otherwise `platform_up()` (every host and platform module's `up()`, each converging, so a re-run continues where a failed one broke) → commit any edits → seed `lab/lab` if still empty (the push starts `deploy.yml`'s first build; an already seeded repo is dispatched instead) → write `state/initialized` → follow the run in the terminal (each job's state, then success, or the failed job's log tail and exit 1) (3.5a, 3.5b) |
+| `update` | The one command for every change (redesigned 2026-11-16). For a lab already initialized (`state/initialized`); otherwise it refuses. `platform_up()` applies host changes from the local checkout (and after a reboot reloads the VM firewall and unseals Vault). It first commits the checkout's edits, then pushes `main` to Gitea's `main`, and the push starts `deploy.yml` (with nothing new it dispatches one run instead); its first job, `check` (`terraform fmt`/`validate`), stops the run before anything is applied if the change is malformed. It then follows the run in the terminal, like `up`, so no Gitea UI is needed (3.5b) |
 | `teardown` | The tenant side only: the VPCs, the WAN and the VMs (fe-1, tun-1, be-1, so the k3s cluster goes with be-1) and the state and Vault entries that belong only to them (e.g. the break-glass kubeconfig). Keeps the host platform (control plane, Vault, Gitea, MinIO, telemetry, CloudStack, runner, VM image template), so the next `up` is quick |
 | `destroy` | First asks: it prints what it is about to delete (the VPC and VMs, CloudStack with its `cloud` databases and all of MySQL's data, the platform, every package and user the lab added) and continues only if the operator types `destroy`; anything else, or no terminal on stdin, stops it with nothing changed (no flag skips the question). Then teardown's rows (always run: each is a no-op if `teardown` already ran), then `platform_down()` (the platform and host restore, in §14 order), which also removes `state/initialized`. Ends with a reboot (it removes the runner, so it cannot run in CI). Run again after the reboot, it asks again, finds nothing left, runs the revert checks V1–V5 and writes the pass/fail report. Every row tolerates "already gone" |
 | `--help` | Lists the four commands (run with `sudo`, like the others: the shim checks root first) |
 
 **Errors (rule, 2026-11-16): no Python traceback on the console.** `main()` catches every
 failure of a command: a failed subprocess prints its own message, then one `[x] <command>
-stopped: '<cmd>' exited with code N; fix the cause and run it again` line; any other error
-one `[x] <command> stopped: <reason>; details in state/bootstrap.log` line. The traceback
+failed: <program> exited with N` line; any other error one `[x] <command> failed:
+<reason>` line (messages kept short, 2026-11-16). The traceback
 goes to `state/bootstrap.log` only, exit code 1 (130 on Ctrl-C). Modules raise or exit with
 a message; they do not wrap each call in `try/except`. Expected conditions (repo missing,
 not initialized) keep their own `log.error` + `sys.exit(1)`.
@@ -2112,11 +2112,20 @@ switching**.
      "main"}`), so `update` alone also recovers after a reboot (the VMs have `autostart =
      false`) or re-runs a build that failed for a reason outside Git. Exactly one run
      either way
-  5. print the Actions URL and exit; watching the run in Gitea is the only manual part
-
-  Deferred (2026-11-16, user's idea): ask Gitea's API for the latest `deploy` run's
-  status, so `update` can report it or refuse while a run is still in progress. It must
-  not refuse after a *failed* run: `update` is the only way to push the fix.
+  5. follow the run in the terminal (2026-11-16: the reviewer may only have SSH, not the
+     Gitea UI). Finding it: a dispatch returns its run id directly
+     (`?return_run_details=true` → `workflow_run_id`); after a push, `wait_for_run()`
+     asks for the run with that exact commit (`GET …/actions/runs?head_sha=<sha>&event=push
+     &branch=main`), so another run in between is never mistaken for ours; none within
+     60 s is an error. Watching: `follow_run(creds, run_id)` polls that one run every 10
+     s until it completes, at most 70 min (a run stuck `queued` because the runner is
+     offline never reaches the runner's 1 h job timeout), then prints each job's result,
+     the last 30 lines of a failed job's log (`GET …/actions/jobs/{id}/logs`; "log not
+     available" when it is missing or the download fails, so the summary still prints), and `run #N succeeded`
+     (exit 0) or the run's URL and exit 1. Ctrl-C is `main()`'s usual exit 130; the run
+     carries on in Gitea. On `up`, a seed push that starts no run fails before `state/initialized` is
+     written, so the next `up` (repo already seeded) dispatches instead. It never refuses
+     to start after a failed run: `update` is how the fix is pushed.
 
   Built in order: `push(creds)` in `cmd_update` first; then Node 24 in the toolchain (1.3,
   for `actions/checkout@v4`), `deploy.yml` calling `check.yml` and a stub

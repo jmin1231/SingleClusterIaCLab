@@ -10,7 +10,7 @@ from collections.abc import Callable
 from src.host import kvm, network, ntp, preflight, toolchain, vmfw
 from src.lib import pki
 from src.lib.config import STATE_DIR
-from src.lib.log import LOG_FILE as LOG_FILE_PATH, setup_logging
+from src.lib.log import setup_logging
 from src.services.coredns import dns
 from src.services.podman import podman
 from src.services.traefik import traefik
@@ -21,7 +21,7 @@ from src.services.gitea.runner import runner
 log = logging.getLogger(__name__)
 
 LOCK_FILE = STATE_DIR / "run.lock"
-INITIALIZED_MARKER = STATE_DIR / "initialized"  # written last by the first up; the lab exists from then on
+INITIALIZED_MARKER = STATE_DIR / "initialized"
 
 
 def platform_up() -> None:
@@ -64,8 +64,10 @@ def cmd_up() -> None:
     gitea.commit_changes()
     platform_up()
     creds = gitea.gitea_admin(vault.login())
-    gitea.initial_push(creds)  # the push starts the first deploy.yml run
-    INITIALIZED_MARKER.touch()  # last: if anything above failed, the next up carries on
+    sha = gitea.initial_push(creds)
+    run_id = gitea.wait_for_run(creds, sha) if sha else gitea.dispatch(creds)
+    INITIALIZED_MARKER.touch()
+    gitea.follow_run(creds, run_id)
 
 
 def cmd_update() -> None:
@@ -76,10 +78,10 @@ def cmd_update() -> None:
     platform_up()
     creds = gitea.gitea_admin(vault.login())
     if gitea.main_differs(creds):
-        gitea.push(creds)  # the push starts deploy.yml, like a push to the company's GitLab
-        log.info("pushed main; follow the run at %s/lab/lab/actions", gitea.GITEA_URL)
+        run_id = gitea.wait_for_run(creds, gitea.push(creds))
     else:
-        gitea.dispatch(creds)  # nothing new: re-run anyway (after a reboot, or a retry)
+        run_id = gitea.dispatch(creds)
+    gitea.follow_run(creds, run_id)
 
 
 def cmd_teardown() -> None:
@@ -136,15 +138,14 @@ def main(argv: list[str] | None = None) -> int:
         try:
             func()
         except KeyboardInterrupt:
-            log.error("%s interrupted; run it again to continue", args.command)
+            log.error("%s interrupted", args.command)
             return 130
         except subprocess.CalledProcessError as err:
             # the command printed its own reason above; the traceback goes to the log file only
-            log.error("%s stopped: '%s' exited with code %d; fix the cause and run it again",
-                      args.command, " ".join(map(str, err.cmd)), err.returncode, exc_info=True)
+            log.error("%s failed: %s exited with %d", args.command, err.cmd[0], err.returncode, exc_info=True)
             return 1
         except Exception as err:
-            log.error("%s stopped: %s; details in %s", args.command, err, LOG_FILE_PATH, exc_info=True)
+            log.error("%s failed: %s", args.command, err, exc_info=True)
             return 1
 
     return 0

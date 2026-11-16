@@ -8,6 +8,7 @@ import re
 import ssl
 import subprocess
 import sys
+import time
 import urllib.request, urllib.error
 from datetime import datetime
 
@@ -16,15 +17,15 @@ from src.lib.system import compose
 from src.services.podman import podman
 from src.services.gitea.config.config import (
     GITEA_API, GITEA_ADMIN_KV, GITEA_RUNNER_KV, GITEA_ORG, GITEA_REPO, GITEA_REPO_URL, GITEA_URL,
-    GITEA_WORKFLOW, COMMIT_IDENTITY,
+    GITEA_WORKFLOW, COMMIT_IDENTITY, RUN_LOG_LINES, RUN_POLL_SECONDS, RUN_START_TIMEOUT, RUN_TIMEOUT,
 )
 from src.services.vault import vault
 
 log = logging.getLogger(__name__)
 
 
-def gitea_api(creds: dict, method: str, path: str, body: dict | None = None) -> dict:
-    """Call Gitea's API as the admin over HTTPS (lab CA); a GET that 404s returns {}."""
+def gitea_api(creds: dict, method: str, path: str, body: dict | None = None, raw: bool = False) -> dict | str:
+    """Call Gitea's API as the admin over HTTPS (lab CA); a GET that 404s returns {}; raw=True returns the text."""
     credentials = base64.b64encode(
         f"{creds['username']}:{creds['password']}".encode()
     ).decode("ascii")
@@ -46,6 +47,8 @@ def gitea_api(creds: dict, method: str, path: str, body: dict | None = None) -> 
         if method == "GET" and err.code == 404:
             return {}
         raise
+    if raw:
+        return data.decode(errors="replace")
     return json.loads(data) if data else {}
 
 
@@ -115,8 +118,8 @@ def runner_registration_token(token: str, creds: dict) -> None:
     log.info("Stored the runner registration token in Vault")
 
 
-def push(creds: dict) -> None:
-    """Push the checked-out commit to Gitea's main; once it succeeds, the pipeline builds the same commit platform_up() applied."""
+def push(creds: dict) -> str:
+    """Push the checked-out commit to Gitea's main and return it; the pipeline then builds the commit platform_up() applied."""
     credentials = base64.b64encode(
         f"{creds['username']}:{creds['password']}".encode()
     ).decode("ascii")
@@ -134,6 +137,9 @@ def push(creds: dict) -> None:
          "push", GITEA_REPO_URL, "HEAD:refs/heads/main"],
         env=env, check=True,
     )
+    sha = git("rev-parse", "HEAD")
+    log.info("pushed %s to Gitea's main; the push starts %s", sha[:7], GITEA_WORKFLOW)
+    return sha
 
 
 def git(*args: str) -> str:
@@ -164,17 +170,67 @@ def main_differs(creds: dict) -> bool:
     return git("rev-parse", "HEAD") != branch.get("commit", {}).get("id")
 
 
-def dispatch(creds: dict) -> None:
-    """Start one deploy.yml run on main without a push (nothing new, e.g. after a reboot)."""
-    gitea_api(creds, "POST",
-              f"repos/{GITEA_ORG}/{GITEA_REPO}/actions/workflows/{GITEA_WORKFLOW}/dispatches",
-              {"ref": "main"})
-    log.info("Started %s; follow it at %s/%s/%s/actions",
-             GITEA_WORKFLOW, GITEA_URL, GITEA_ORG, GITEA_REPO)
+def dispatch(creds: dict) -> int:
+    """Start one deploy.yml run on main without a push (nothing new, e.g. after a reboot); returns its id."""
+    details = gitea_api(
+        creds, "POST",
+        f"repos/{GITEA_ORG}/{GITEA_REPO}/actions/workflows/{GITEA_WORKFLOW}/dispatches?return_run_details=true",
+        {"ref": "main"},
+    )
+    log.info("nothing new to push; started %s on main", GITEA_WORKFLOW)
+    return details["workflow_run_id"]
 
 
-def initial_push(creds: dict) -> None:
-    """Push main into the still-empty lab/lab once (later pushes come from update)."""
+def wait_for_run(creds: dict, sha: str) -> int:
+    """The id of the run the push of sha to main started; exit 1 if none starts in time.
+
+    Only deploy.yml triggers on push, and main never held sha before this push,
+    so the run with this commit and event is ours, whatever else runs meanwhile.
+    """
+    query = f"head_sha={sha}&event=push&branch=main&limit=1"
+    deadline = time.monotonic() + RUN_START_TIMEOUT
+    while True:
+        runs = gitea_api(creds, "GET", f"repos/{GITEA_ORG}/{GITEA_REPO}/actions/runs?{query}")
+        if runs.get("workflow_runs"):
+            return runs["workflow_runs"][0]["id"]
+        if time.monotonic() > deadline:
+            log.error("no run started; is lab-runner running?")
+            sys.exit(1)
+        time.sleep(RUN_POLL_SECONDS)
+
+
+def follow_run(creds: dict, run_id: int) -> None:
+    """Wait for the run to finish and print each job's result; for a failure, the end of its log, then exit 1."""
+    url = f"repos/{GITEA_ORG}/{GITEA_REPO}/actions/runs/{run_id}"
+    run = gitea_api(creds, "GET", url)
+    log.info("run #%s started; waiting for it to finish: %s", run["run_number"], run["html_url"])
+    deadline = time.monotonic() + RUN_TIMEOUT
+    while run["status"] != "completed":
+        if time.monotonic() > deadline:
+            log.error("run #%s timed out; is lab-runner running?", run["run_number"])
+            sys.exit(1)
+        time.sleep(RUN_POLL_SECONDS)
+        run = gitea_api(creds, "GET", url)
+
+    for job in gitea_api(creds, "GET", f"{url}/jobs").get("jobs", []):
+        log.info("  %s: %s", job["name"], job["conclusion"])
+        if job["conclusion"] == "failure":
+            try:
+                text = gitea_api(creds, "GET", f"repos/{GITEA_ORG}/{GITEA_REPO}/actions/jobs/{job['id']}/logs", raw=True)
+            except OSError:
+                text = None
+            lines = text.splitlines()[-RUN_LOG_LINES:] if isinstance(text, str) else ["(log not available)"]
+            for line in lines:
+                print(f"    {line}", file=sys.stderr)
+
+    if run["conclusion"] != "success":
+        log.error("run #%s failed", run["run_number"])
+        sys.exit(1)
+    log.info("run #%s succeeded", run["run_number"])
+
+
+def initial_push(creds: dict) -> str:
+    """Push into the still-empty lab/lab once (later pushes come from update); the pushed commit, or "" if already seeded."""
     full_name = f"{GITEA_ORG}/{GITEA_REPO}"
 
     repo = gitea_api(creds, "GET", f"repos/{full_name}")
@@ -183,11 +239,9 @@ def initial_push(creds: dict) -> None:
         sys.exit(1)
     if not repo["empty"]:
         log.info("Gitea repository %s already has commits; nothing to push", full_name)
-        return
+        return ""
 
-    push(creds)
-    log.info("Pushed main to %s; the push starts %s at %s/%s/actions",
-             full_name, GITEA_WORKFLOW, GITEA_URL, full_name)
+    return push(creds)
 
 
 def up() -> None:

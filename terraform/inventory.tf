@@ -5,5 +5,7 @@ resource "ansible_host" "vm" {
   variables = {
     ansible_host = each.value.mgmt_ip
     ansible_user = "user"
+    vpc_ip       = each.value.vpc_ip
+    wan_ip       = each.value.wan_ip
   }
 }

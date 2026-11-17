@@ -8,8 +8,8 @@
         fail_msg: "group {{ item }} has no VM; is the Terraform state there?"
       loop: [frontend, hub, backend]
 
-- name: Every VM is ready and has the common setup
+- name: Every VM is ready, has the common setup and its WireGuard tunnels
   hosts: all
   gather_facts: false
-  roles: [ready, common]
+  roles: [ready, common, wireguard]
   become: true

@@ -499,7 +499,7 @@ Acceptance: after `update` (the VMs are rebuilt once), `ssh fe-1 hostname` print
 Verified: run #13 rebuilt the VMs; `ssh fe-1 hostname` prints fe-1. From fe-1, Squid: archive.ubuntu.com via proxy 200,
 example.com via proxy 403, ftp:// via proxy 403, CONNECT to :22 403, direct HTTPS times out (exit 28).
 
-### B08.2 Common role (In progress)
+### B08.2 Common role (Verified 2026-11-17, run #14)
 Files: `ansible/roles/common/tasks/main.yml`, `ansible/group_vars/all.yml` (`proxy_url`, `common_packages`)
 
 | Task | Does | Uses |
@@ -509,13 +509,18 @@ Files: `ansible/roles/common/tasks/main.yml`, `ansible/group_vars/all.yml` (`pro
 
 `site.yml`: the `hosts: all` play gets `become: true` and roles `[ready, common]`.
 Acceptance: `apt-config dump` shows the proxy and `wg --version` works on all three VMs.
+Verified: run #14; on fe-1, tun-1, be-1 the proxy lines are in `apt-config dump`, `90lab-proxy` is root:root 644,
+wireguard-tools 1.0.20210914 installed. Still to see: a second run reports changed=0.
 
 Considered and skipped (2026-11-17):
 - NTP in the VMs: kvm-clock follows the host, which chrony keeps synced; measured offset under 0.6 s; nothing in a
   1-2 day lab depends on sub-second time. Production: an NTP client on every VM (CIS baseline).
 - DNS check task: cloud-init owns DNS and `gitea.lab.test` already resolves on eth2.
 
-### B08.3 VM firewall inside the guests (Next, plan item 6.1b)
+### B08.3 VM firewall inside the guests (Deferred 2026-11-17, plan item 6.1b)
+Deferred: every direct fe-1 to be-1 path is already blocked on the host (tested from fe-1: mgmt 10.250.0.112, wan
+198.51.100.13 and site-c 10.3.1.10 all unreachable). Traffic inside WireGuard is invisible to the host, so if a
+port or direction limit is wanted, it goes on tun-1's forward chain in the wireguard role, not on every VM.
 Proposed files: `ansible/roles/base/tasks/firewall.yml`, `ansible/roles/base/templates/nftables.conf.j2`,
 `ansible/group_vars/{frontend,hub,backend}.yml`
 
@@ -531,14 +536,15 @@ Acceptance: from the host, `nc -zv 10.250.0.112 22` works, while any port not in
 Create `ansible/roles/wireguard/` (an empty local directory is not tracked by git). Source for addressing and routing:
 docs/three-vpc-design.md section 5.
 
-Proposed files: `ansible/roles/wireguard/{tasks/main.yml,handlers/main.yml,templates/wg.conf.j2}`, `ansible/group_vars/all.yml` (`wg_links`)
+Interface data: `ansible/host_vars/{fe-1,tun-1,be-1}.yml` (`wg_interfaces`).
+Proposed role files: `ansible/roles/wireguard/{tasks/main.yml,handlers/main.yml,templates/wg.conf.j2}`.
 
 | Item | Does | Connects to |
 |---|---|---|
 | `inventory.tf` | Add `vpc_ip` and `wan_ip` to `ansible_host.variables` | B06 locals.vms |
-| `wg_links` data | `[{spoke: fe-1, iface: wg0, port: 51820, hub_addr: 10.99.0.1/24, spoke_addr: 10.99.0.2/24}, {spoke: be-1, iface: wg1, port: 51821, hub_addr: 10.99.1.1/24, spoke_addr: 10.99.1.2/24}]`, hub tun-1 | ports must match nftables-vmfw.nft; peers' AllowedIPs include the other end's /32 |
-| key task | `wg genkey` into `/etc/wireguard/<iface>.key` (0600, `creates:`), `wg pubkey`, then set_fact `wg_pub` | |
-| template | Hub: one `[Interface]` per link with ListenPort = port, peer AllowedIPs = spoke vpc subnet. Spoke: Endpoint = `hostvars['tun-1'].wan_ip:port`, AllowedIPs = the other site's subnet | hostvars, no Vault needed |
+| `wg_interfaces` data | Each host declares its local `name`, `address` (CIDR), `peer`, and `allowed_ips`; hub entries have `listen_port`, spoke entries have `endpoint_port` | ports must match nftables-vmfw.nft; AllowedIPs selects outgoing destinations and accepts incoming sources for that peer |
+| key task | `wg genkey` into `/etc/wireguard/<name>.key` (0600, `creates:`), `wg pubkey`, then set_fact `wg_pub` indexed by interface name; collect all hosts' keys before rendering | both ends use the same interface name |
+| template | One config per local interface: `Address = address`, optional `ListenPort = listen_port`; peer key from `hostvars[item.peer].wg_pub[item.name]`, `AllowedIPs = allowed_ips`; render Endpoint = `hostvars[item.peer].wan_ip:endpoint_port` only when `endpoint_port` exists | hostvars, no Vault needed |
 | hub forward | sysctl `net.ipv4.ip_forward=1`. Guest nft forward allows only 10.1.1.10 to 10.3.1.10 tcp 8000 | B08.3 |
 | service | `wg-quick@<iface>` enabled, restarted by a handler | |
 | site.yml | Add a play `hosts: hub:frontend:backend` with roles `[wireguard]` | |

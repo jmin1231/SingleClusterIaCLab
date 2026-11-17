@@ -1,0 +1,20 @@
+# Managed by Ansible (roles/wireguard); edits on the VM are overwritten.
+[Interface]
+Address = {{ item.address }}
+{% if item.listen_port is defined %}
+ListenPort = {{ item.listen_port }}
+{% endif %}
+PostUp = wg set %i private-key /etc/wireguard/private.key
+{% if item.endpoint_port is defined %}
+{% for net in item.allowed_ips %}
+PostUp = ip route replace {{ net }} dev %i src {{ vpc_ip }}
+{% endfor %}
+{% endif %}
+
+[Peer]
+PublicKey = {{ hostvars[item.peer].wg_public_key.stdout }}
+AllowedIPs = {{ item.allowed_ips | join(', ') }}
+{% if item.endpoint_port is defined %}
+Endpoint = {{ hostvars[item.peer].wan_ip }}:{{ item.endpoint_port }}
+PersistentKeepalive = 25
+{% endif %}

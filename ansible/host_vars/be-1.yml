@@ -1,0 +1,10 @@
+# Backend: connect to tun-1's WAN address on port 51821.
+wg_interfaces:
+  - name: wg1
+    address: 10.99.1.2/24
+    peer: tun-1
+    endpoint_port: 51821
+    allowed_ips:
+      - 10.99.1.1/32  # hub tunnel IP
+      - 10.1.0.0/16  # frontend VPC through the hub
+      - 10.2.0.0/16  # hub VPC

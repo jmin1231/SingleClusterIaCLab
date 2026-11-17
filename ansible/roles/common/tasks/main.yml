@@ -1,0 +1,16 @@
+- name: apt uses the lab proxy
+  ansible.builtin.copy:
+    dest: /etc/apt/apt.conf.d/90lab-proxy
+    content: |
+      Acquire::http::Proxy "{{ proxy_url }}";
+      Acquire::https::Proxy "{{ proxy_url }}";
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Ensure packages are installed
+  ansible.builtin.apt:
+    name: "{{ common_packages }}"
+    state: present
+    update_cache: true
+    cache_valid_time: 3600

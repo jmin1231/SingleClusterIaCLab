@@ -8,7 +8,8 @@
         fail_msg: "group {{ item }} has no VM; is the Terraform state there?"
       loop: [frontend, hub, backend]
 
-- name: VMs are ready
+- name: Every VM is ready and has the common setup
   hosts: all
   gather_facts: false
-  roles: [ready]
+  roles: [ready, common]
+  become: true

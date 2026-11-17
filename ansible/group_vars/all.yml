@@ -1,0 +1,4 @@
+# Lab-wide values for every VM (group "all"); roles read them, so a change is made here once.
+
+proxy_url: http://proxy.lab.test:3128
+common_packages: [nftables, wireguard-tools]

@@ -463,7 +463,7 @@ Status: ready play Verified (run #8, against VMs that had already booted). Asser
 
 ## B08 Next (in this order)
 
-### B08.1 Squid egress proxy (Implemented, not yet run)
+### B08.1 Squid egress proxy (Verified 2026-11-17, run #12)
 The VMs have no internet: wan is route mode, and vmfw drops wan egress. All package installs go
 through Squid.
 
@@ -488,7 +488,7 @@ and vmfw now also drops forwarding to/from `cloudbr1`, `site-a`, `site-hub`, `si
 otherwise leave via the host through 10.250.0.1; the tier networks are isolated, so their names are only a guard). Extra acceptance: `curl -x … http://example.com`
 returns 403, and the new vmfw drop counters exist (`nft list chain inet lab_vmfw forward`).
 
-### B08.1b Operator SSH access (Implemented, not yet run)
+### B08.1b Operator SSH access (Verified 2026-11-17, run #13)
 `src/host/ssh_access.py`: `up()` creates `~/.ssh/lab_operator` for the sudo user once (ssh-keygen run as that user)
 and installs `src/host/files/60-lab-ssh.conf` to `/etc/ssh/ssh_config.d/` (aliases fe-1, tun-1, be-1 on the mgmt IPs);
 `public_key()` derives the public key with `ssh-keygen -y`; `down()` removes only the aliases and keeps the key.
@@ -496,19 +496,24 @@ and installs `src/host/files/60-lab-ssh.conf` to `/etc/ssh/ssh_config.d/` (alias
 `compute.tf` splits it into `ssh_public_keys` and the user-data template loops over it. Wired in `platform_up` before
 `runner.up` and in `platform_down` after `runner.down`.
 Acceptance: after `update` (the VMs are rebuilt once), `ssh fe-1 hostname` prints fe-1 as the normal user.
+Verified: run #13 rebuilt the VMs; `ssh fe-1 hostname` prints fe-1. From fe-1, Squid: archive.ubuntu.com via proxy 200,
+example.com via proxy 403, ftp:// via proxy 403, CONNECT to :22 403, direct HTTPS times out (exit 28).
 
-### B08.2 Base role (Next)
-Proposed files: `ansible/roles/base/{tasks/main.yml,handlers/main.yml,templates/timesyncd-lab.conf.j2}`, `ansible/group_vars/all.yml`
+### B08.2 Common role (In progress)
+Files: `ansible/roles/common/tasks/main.yml`, `ansible/group_vars/all.yml` (`proxy_url`, `common_packages`)
 
 | Task | Does | Uses |
 |---|---|---|
-| apt proxy | `/etc/apt/apt.conf.d/90lab-proxy`: `Acquire::http::Proxy "http://proxy.lab.test:3128";` | B08.1 |
-| NTP | `/etc/systemd/timesyncd.conf.d/lab.conf` with `NTP=10.250.0.1`, handler restarts systemd-timesyncd | B02.3 chrony |
-| DNS check | `resolvectl query gitea.lab.test` must succeed (DNS is already set by cloud-init network-config) | B03.1 |
-| packages | `apt` with `base_packages` from group_vars (nftables, wireguard-tools) | proxy |
+| apt proxy | `/etc/apt/apt.conf.d/90lab-proxy`: `Acquire::http::Proxy` and `Acquire::https::Proxy` = `{{ proxy_url }}` (Implemented; content tested on fe-1 with `apt-get -c`) | B08.1 |
+| packages | `apt` installs `common_packages` (nftables, wireguard-tools) | proxy |
 
-`site.yml`: change `hosts: all` roles to `[ready, base]`.
-Acceptance: `timedatectl timesync-status` shows server 10.250.0.1, and `apt-get update` works on all three VMs.
+`site.yml`: the `hosts: all` play gets `become: true` and roles `[ready, common]`.
+Acceptance: `apt-config dump` shows the proxy and `wg --version` works on all three VMs.
+
+Considered and skipped (2026-11-17):
+- NTP in the VMs: kvm-clock follows the host, which chrony keeps synced; measured offset under 0.6 s; nothing in a
+  1-2 day lab depends on sub-second time. Production: an NTP client on every VM (CIS baseline).
+- DNS check task: cloud-init owns DNS and `gitea.lab.test` already resolves on eth2.
 
 ### B08.3 VM firewall inside the guests (Next, plan item 6.1b)
 Proposed files: `ansible/roles/base/tasks/firewall.yml`, `ansible/roles/base/templates/nftables.conf.j2`,

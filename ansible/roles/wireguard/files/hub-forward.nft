@@ -1,0 +1,15 @@
+#!/usr/sbin/nft -f
+# Managed by Ansible (roles/wireguard), tun-1 only: the hub forwards just fe-1 -> be-1 tcp 8000 and its replies.
+# Addresses must match vpc_ip in terraform/compute.tf and the tunnel interfaces in host_vars/tun-1.yml.
+
+flush ruleset
+
+table inet lab_hub {
+    chain forward {
+        type filter hook forward priority filter; policy drop;
+        ct state invalid drop
+        ct state established,related accept
+        iifname "wg0" oifname "wg1" ip saddr 10.1.1.10 ip daddr 10.3.1.10 tcp dport 8000 ct state new accept
+        counter comment "dropped forward"
+    }
+}

@@ -10,7 +10,7 @@ import sys
 import time
 from pathlib import Path
 
-from src.host.config.config import BRIDGE_ANCHOR, BRIDGE_UP_TIMEOUT, NETPLAN_FILE, NETPLAN_SRC
+from src.host.config.config import BRIDGE_ANCHOR, BRIDGE_UP_TIMEOUT, LAB_DOMAINS, NETPLAN_FILE, NETPLAN_SRC
 from src.lib.config import BRIDGE, VMNET
 from src.lib.system import install_file, ip_json
 
@@ -35,6 +35,15 @@ def check() -> bool:
                for addr in link["addr_info"])
 
 
+def reattach_taps() -> None:
+    """Put the running VMs' mgmt taps back on cloudbr1; netplan apply rebuilds the bridge without them."""
+    links = {link["ifname"]: link for link in ip_json("link", "show")}
+    for tap in (f"{vm}-mgmt" for vm in LAB_DOMAINS):  # terraform/compute.tf names them <vm>-mgmt
+        if tap in links and links[tap].get("master") != BRIDGE:
+            subprocess.run(["ip", "link", "set", tap, "master", BRIDGE], check=True)
+            log.info("reattached %s to %s", tap, BRIDGE)
+
+
 def up() -> None:
     """Install the lab's netplan file and create cloudbr1; a re-run changes nothing."""
     conflicts = vmnet_conflicts()  # ignores cloudbr1's own route, so a re-run passes
@@ -43,6 +52,7 @@ def up() -> None:
         sys.exit(1)
 
     if not install_file(NETPLAN_SRC, NETPLAN_FILE, 0o600) and check():
+        reattach_taps()  # also repairs taps a crashed run or an outside netplan apply left detached
         log.info("%s is already up with %s", BRIDGE, VMNET)
         return
     subprocess.run(["netplan", "apply"], check=True)
@@ -55,6 +65,7 @@ def up() -> None:
                       BRIDGE, VMNET, BRIDGE_UP_TIMEOUT)
             sys.exit(1)
         time.sleep(1)
+    reattach_taps()
     log.info("%s is up with %s", BRIDGE, VMNET)
 
 

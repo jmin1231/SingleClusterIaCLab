@@ -49,7 +49,9 @@ table inet lab_vmfw {
         iifname $lan_card ip daddr $host_ip tcp dport 443 dnat ip to 198.51.100.11
     }
 
-    # No VM reaches the LAN or the internet, and none relays through 198.51.100.1.
+    # No VM reaches the LAN or the internet, and none relays through the host: not via
+    # 198.51.100.1 (wan), 10.250.0.1 (mgmt) or a tier gateway (tier to tier would skip WireGuard).
+    # Package downloads go through Squid, which is host traffic (input/output), not forwarded.
     chain forward {
         type filter hook forward priority filter; policy accept;
 
@@ -58,6 +60,8 @@ table inet lab_vmfw {
 
         iifname "wan" counter drop
         oifname "wan" counter drop
+        iifname { "cloudbr1", "site-a", "site-hub", "site-c" } counter drop
+        oifname { "cloudbr1", "site-a", "site-hub", "site-c" } counter drop
     }
 
     # VMs reach host services only over mgmt, never over the wan.

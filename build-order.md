@@ -48,7 +48,7 @@ gitea.start_run(creds): main_differs ? wait_for_run(creds, push(creds)) : dispat
 
 platform_up (each step is idempotent; an unchanged step does nothing)
    1 preflight.up   check_host, log_network > detect_network > system.ip_json
-   2 network.up     vmnet_conflicts, system.install_file(netplan), netplan apply, check
+   2 network.up     vmnet_conflicts, system.install_file(netplan), netplan apply, check, reattach_taps
    3 ntp.up         system.apt_install, install_file(chrony-lab.conf), systemctl
    4 podman.up      repo, system.apt_install, socket_ready
    5 kvm.up         system.apt_install, libvirtd.socket, virsh list
@@ -463,7 +463,7 @@ Status: ready play Verified (run #8, against VMs that had already booted). Asser
 
 ## B08 Next (in this order)
 
-### B08.1 Squid egress proxy (Next)
+### B08.1 Squid egress proxy (Implemented, not yet run)
 The VMs have no internet: wan is route mode, and vmfw drops wan egress. All package installs go
 through Squid.
 
@@ -478,6 +478,15 @@ Proposed files: `src/services/squid/{__init__.py,squid.py,compose.yaml,conf/squi
 | Corefile | Add `10.250.0.1 proxy.lab.test` to the hosts line | | |
 
 Acceptance: on fe-1, `curl -x http://proxy.lab.test:3128 -I http://archive.ubuntu.com` returns 200, and `curl -I https://example.com` fails without the proxy.
+
+Implemented 2026-11-17, not yet run: `src/services/squid/` (image `ubuntu/squid:7.2-26.04_edge` digest-pinned, contains
+squid 7.7-0ubuntu0.26.04.2 (checked in /usr/share/rocks/dpkg.query); a Rockcraft image: runs as `_daemon_` UID 584792,
+binary `squid-gnutls`, so the entrypoint runs it directly, `cap_drop: ALL` with no additions, `pid_filename none`; own
+config path `/etc/squid-lab`, FTP denied for CVE-2026-47729, file access log at `/var/log/squid/access.log` in the
+container, a squid.conf hash in the compose env recreates the container on change), `proxy.lab.test` in the Corefile,
+and vmfw now also drops forwarding to/from `cloudbr1`, `site-a`, `site-hub`, `site-c` (a changed guest route could
+otherwise leave via the host, or go tier to tier and skip WireGuard). Extra acceptance: `curl -x … http://example.com`
+returns 403, and the new vmfw drop counters exist (`nft list chain inet lab_vmfw forward`).
 
 ### B08.2 Base role (Next)
 Proposed files: `ansible/roles/base/{tasks/main.yml,handlers/main.yml,templates/timesyncd-lab.conf.j2}`, `ansible/group_vars/all.yml`
@@ -529,7 +538,7 @@ Done 2026-11-16 evening (Implemented, not yet run): `kvm.remove_lab_vms` before 
 
 | Still to do | File | Connects to |
 |---|---|---|
-| Root-owned `.git` after commit_changes: Implemented 2026-11-17, not yet run (`git()` runs as SUDO_UID:SUDO_GID; `bootstrap.sh` refuses to start without SUDO_UID) | `gitea.py`, `bootstrap.sh` | `.git` stays the user's |
+| Root-owned `.git` after commit_changes: Done 2026-11-17 (update e5cf4a0, no root-owned files in .git) (`git()` runs as SUDO_UID:SUDO_GID; `bootstrap.sh` refuses to start without SUDO_UID) | `gitea.py`, `bootstrap.sh` | `.git` stays the user's |
 | Optional `teardown` (VMs only, keep the platform): `teardown.yml` with `workflow_dispatch`, TMPDIR, `terraform init` + `destroy -auto-approve`; `dispatch(creds, workflow=GITEA_WORKFLOW)`; `cmd_teardown` = `follow_run(creds, dispatch(creds, "teardown.yml"))` | `.gitea/workflows/teardown.yml`, `gitea.py`, `src/__main__.py` | runner, tfstate |
 | The rehearsal itself | | |
 
@@ -593,9 +602,9 @@ Left:
 
 | Issue | Where | Fix when |
 |---|---|---|
-| Root runs `git add/commit`, so `.git/index` and objects become root-owned and the user's next commit fails | `gitea.commit_changes` | Implemented 2026-11-17 (B08.5), not yet run |
+| Root runs `git add/commit`, so `.git/index` and objects become root-owned and the user's next commit fails | `gitea.commit_changes` | Done 2026-11-17 (B08.5) |
 | `podman.down` wipes all rootful containers on the host | `podman.py` | Accept: the lab owns the host (README) |
-| Any change to the netplan file (even a comment) runs `netplan apply`, which rebuilds `cloudbr1` and leaves the running VMs' `*-mgmt` taps detached (run #9). Workaround: `ip link set <vm>-mgmt master cloudbr1` | `network.up` | Next: reattach `*-mgmt` taps after `netplan apply` |
+| Any change to the netplan file (even a comment) runs `netplan apply`, which rebuilds `cloudbr1` and leaves the running VMs' `*-mgmt` taps detached (run #9). Workaround: `ip link set <vm>-mgmt master cloudbr1` | `network.up` | Implemented 2026-11-17, not yet run: `network.reattach_taps()` on every `network.up` (after `netplan apply` and on the early return) |
 | Runner `VERSION` bump ignored (any existing binary is accepted) | `runner.ensure_binary` | Optional |
 | cloud-init exit 2 with `status: done` passes `ready` | `roles/ready` | Accept: exit 2 means warnings; a failure prints `status: error` |
 | `write_file` does not re-apply the mode when the content is unchanged | `system.py` | Accept |

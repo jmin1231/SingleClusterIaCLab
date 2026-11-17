@@ -14,6 +14,7 @@ from src.lib.config import LAB_DIR, STATE_DIR
 from src.lib.log import setup_logging
 from src.services.coredns import dns
 from src.services.podman import podman
+from src.services.squid import squid
 from src.services.traefik import traefik
 from src.services.vault import vault
 from src.services.gitea import gitea
@@ -35,6 +36,7 @@ def platform_up() -> None:
     vmfw.up()
     toolchain.up()
     dns.up()
+    squid.up()
     certs_changed = pki.up()
     vault.up(certs_changed)
     traefik.up(certs_changed)
@@ -52,6 +54,7 @@ def platform_down() -> None:
     traefik.down()
     vault.down()
     pki.down()
+    squid.down()
     dns.down()
     podman.down()
     ntp.down()

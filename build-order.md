@@ -485,8 +485,17 @@ binary `squid-gnutls`, so the entrypoint runs it directly, `cap_drop: ALL` with 
 config path `/etc/squid-lab`, FTP denied for CVE-2026-47729, file access log at `/var/log/squid/access.log` in the
 container, a squid.conf hash in the compose env recreates the container on change), `proxy.lab.test` in the Corefile,
 and vmfw now also drops forwarding to/from `cloudbr1`, `site-a`, `site-hub`, `site-c` (a changed guest route could
-otherwise leave via the host, or go tier to tier and skip WireGuard). Extra acceptance: `curl -x … http://example.com`
+otherwise leave via the host through 10.250.0.1; the tier networks are isolated, so their names are only a guard). Extra acceptance: `curl -x … http://example.com`
 returns 403, and the new vmfw drop counters exist (`nft list chain inet lab_vmfw forward`).
+
+### B08.1b Operator SSH access (Implemented, not yet run)
+`src/host/ssh_access.py`: `up()` creates `~/.ssh/lab_operator` for the sudo user once (ssh-keygen run as that user)
+and installs `src/host/files/60-lab-ssh.conf` to `/etc/ssh/ssh_config.d/` (aliases fe-1, tun-1, be-1 on the mgmt IPs);
+`public_key()` derives the public key with `ssh-keygen -y`; `down()` removes only the aliases and keeps the key.
+`runner.ensure_ssh_key()` writes both public keys (pipeline from Vault, operator) to `/etc/lab-runner/ssh.pub`;
+`compute.tf` splits it into `ssh_public_keys` and the user-data template loops over it. Wired in `platform_up` before
+`runner.up` and in `platform_down` after `runner.down`.
+Acceptance: after `update` (the VMs are rebuilt once), `ssh fe-1 hostname` prints fe-1 as the normal user.
 
 ### B08.2 Base role (Next)
 Proposed files: `ansible/roles/base/{tasks/main.yml,handlers/main.yml,templates/timesyncd-lab.conf.j2}`, `ansible/group_vars/all.yml`

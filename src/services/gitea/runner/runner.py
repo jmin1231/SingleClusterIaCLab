@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import urllib.request
 
+from src.host import ssh_access
 from src.lib.system import install_file, systemctl_ok, write_file
 from src.services.gitea.runner.config.config import (
     BINARY, BINARY_SHA256, BINARY_URL, CA, CONFIG,
@@ -69,12 +70,14 @@ def ensure_config() -> bool:
 
 
 def ensure_ssh_key(token: str) -> None:
-    """Publish the lab SSH public key (public, so 0644) where jobs read it; the private key stays in Vault."""
-    public = vault.vault_api("GET", SSH_KV, token=token)["data"]["data"]["public_key"]
-    if write_file(public.encode(), SSH_PUB, 0o644):
-        log.info("lab SSH public key installed at %s", SSH_PUB)
+    """Publish the VMs' authorized keys (public, so 0644) where Terraform reads them, one per line:
+    the pipeline key (its private half stays in Vault) and the operator key (ssh_access)."""
+    pipeline = vault.vault_api("GET", SSH_KV, token=token)["data"]["data"]["public_key"].strip()
+    keys = f"{pipeline}\n{ssh_access.public_key()}\n"
+    if write_file(keys.encode(), SSH_PUB, 0o644):
+        log.info("VM SSH public keys (pipeline, operator) installed at %s", SSH_PUB)
     else:
-        log.info("lab SSH public key already at %s", SSH_PUB)
+        log.info("VM SSH public keys already at %s", SSH_PUB)
 
 
 def ensure_registered(token: str) -> None:

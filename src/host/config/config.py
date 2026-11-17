@@ -52,3 +52,8 @@ VMFW_PACKAGES = ["nftables"]
 VMFW_NFT_SRC = FILES / "nftables-vmfw.nft"
 VMFW_TABLES = ["bridge lab_vmfw_l2", "inet lab_vmfw"]  # must match the tables in VMFW_NFT_SRC
 VMFW_MARKER = Path("/run/lab/vmfw.loaded")  # /run empties on reboot, like the rules; terraform.yml checks it
+
+# --- Operator SSH access (ssh_access) ---
+SSH_CONFIG_SRC = FILES / "60-lab-ssh.conf"
+SSH_CONFIG_FILE = Path("/etc/ssh/ssh_config.d") / SSH_CONFIG_SRC.name  # /etc/ssh/ssh_config includes *.conf from here
+OPERATOR_KEY_NAME = "lab_operator"  # ~/.ssh/<name> of the user who ran sudo; must match IdentityFile in SSH_CONFIG_SRC

@@ -5,7 +5,7 @@ variable "base_image_url" {
 }
 
 variable "ssh_public_key_file" {
-  description = "lab SSH public key for the VMs (bootstrap publishes it from Vault)"
+  description = "the VMs' authorized SSH public keys, one per line: pipeline and operator (bootstrap publishes them)"
   type        = string
   default     = "/etc/lab-runner/ssh.pub"
 }

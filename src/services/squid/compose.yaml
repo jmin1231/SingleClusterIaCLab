@@ -9,8 +9,6 @@ services:
     environment:
       SQUID_CONF_HASH: ${SQUID_CONF_HASH:-}  # set by squid.up(): a changed squid.conf recreates the container
     volumes:
-      - ./conf:/etc/squid-lab:ro  # its own path: the image's /etc/squid still has mime.conf and error pages
-    # The image's default is pebble -> entrypoint.sh -> /etc/squid/squid.conf; run the binary directly instead.
-    # squid-gnutls is the Squid binary in this image; -N foreground, -d 1 startup errors to podman logs.
+      - ./conf:/etc/squid-lab:ro
     entrypoint: ["squid-gnutls", "-N", "-d", "1", "-f", "/etc/squid-lab/squid.conf"]
-    cap_drop: [ALL]  # the image runs as _daemon_ (UID 584792), never root, so no capability is needed
+    cap_drop: [ALL]

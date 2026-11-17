@@ -8,7 +8,7 @@ import subprocess
 import sys
 from collections.abc import Callable
 
-from src.host import kvm, network, ntp, preflight, toolchain, vmfw
+from src.host import kvm, network, ntp, preflight, ssh_access, toolchain, vmfw
 from src.lib import pki
 from src.lib.config import LAB_DIR, STATE_DIR
 from src.lib.log import setup_logging
@@ -41,12 +41,14 @@ def platform_up() -> None:
     vault.up(certs_changed)
     traefik.up(certs_changed)
     gitea.up()
+    ssh_access.up()
     runner.up()
 
 
 def platform_down() -> None:
     """Remove the host and platform services, in the order that keeps each removal possible."""
     runner.down()
+    ssh_access.down()
     toolchain.down()
     kvm.down()
     vmfw.down()

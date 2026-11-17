@@ -6,7 +6,9 @@ users:
       sudo: "ALL=(ALL) NOPASSWD: ALL"
       lock_passwd: true
       ssh_authorized_keys:
-        - ${ssh_public_key}
+%{ for key in ssh_public_keys ~}
+        - ${key}
+%{ endfor ~}
 
 ssh_pwauth: false
 disable_root: true

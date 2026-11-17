@@ -4,6 +4,7 @@ import base64
 import json
 import logging
 import os
+import pwd
 import re
 import ssl
 import subprocess
@@ -162,10 +163,15 @@ def push(creds: dict) -> str:
 
 
 def git(*args: str) -> str:
-    """Run git in the lab checkout (as root, the infrastructure's owner); return stdout, errors reach the terminal."""
+    """Run git in the lab checkout as the user who ran sudo, so .git stays theirs; return stdout, errors reach the terminal.
+
+    bootstrap.sh refuses to start without SUDO_UID. HOME is theirs too: sudo sets it to /root, which they cannot read.
+    """
+    uid, gid = int(os.environ["SUDO_UID"]), int(os.environ["SUDO_GID"])
     return subprocess.run(
         ["git", "-C", str(BASE_DIR), *args],
         stdout=subprocess.PIPE, text=True, check=True,
+        user=uid, group=gid, env={**os.environ, "HOME": pwd.getpwuid(uid).pw_dir},
     ).stdout.strip()
 
 

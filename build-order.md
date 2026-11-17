@@ -529,7 +529,7 @@ Done 2026-11-16 evening (Implemented, not yet run): `kvm.remove_lab_vms` before 
 
 | Still to do | File | Connects to |
 |---|---|---|
-| Fix root-owned `.git` after commit_changes | `gitea.py` | chown `.git` to SUDO_UID:SUDO_GID |
+| Root-owned `.git` after commit_changes: Implemented 2026-11-17, not yet run (`git()` runs as SUDO_UID:SUDO_GID; `bootstrap.sh` refuses to start without SUDO_UID) | `gitea.py`, `bootstrap.sh` | `.git` stays the user's |
 | Optional `teardown` (VMs only, keep the platform): `teardown.yml` with `workflow_dispatch`, TMPDIR, `terraform init` + `destroy -auto-approve`; `dispatch(creds, workflow=GITEA_WORKFLOW)`; `cmd_teardown` = `follow_run(creds, dispatch(creds, "teardown.yml"))` | `.gitea/workflows/teardown.yml`, `gitea.py`, `src/__main__.py` | runner, tfstate |
 | The rehearsal itself | | |
 
@@ -593,7 +593,7 @@ Left:
 
 | Issue | Where | Fix when |
 |---|---|---|
-| Root runs `git add/commit`, so `.git/index` and objects become root-owned and the user's next commit fails | `gitea.commit_changes` | B08.5 |
+| Root runs `git add/commit`, so `.git/index` and objects become root-owned and the user's next commit fails | `gitea.commit_changes` | Implemented 2026-11-17 (B08.5), not yet run |
 | `podman.down` wipes all rootful containers on the host | `podman.py` | Accept: the lab owns the host (README) |
 | Any change to the netplan file (even a comment) runs `netplan apply`, which rebuilds `cloudbr1` and leaves the running VMs' `*-mgmt` taps detached (run #9). Workaround: `ip link set <vm>-mgmt master cloudbr1` | `network.up` | Next: reattach `*-mgmt` taps after `netplan apply` |
 | Runner `VERSION` bump ignored (any existing binary is accepted) | `runner.ensure_binary` | Optional |

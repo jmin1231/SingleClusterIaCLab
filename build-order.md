@@ -63,10 +63,10 @@ platform_up (each step is idempotent; an unchanged step does nothing)
   11 traefik.up(certs_changed)   compose (creates network lab-backend)
   12 gitea.up       compose, vault.login, gitea_admin, ensure_org, ensure_repo,
                     runner_registration_token, pipeline_secrets > vault.approle_credentials
-  13 runner.up      ensure_user, ensure_binary, ensure_config, vault.login,
+  13 runner.up      ensure_home, ensure_binary, ensure_config, vault.login,
                     ensure_ssh_key, ensure_registered, ensure_service
 
-Pipeline (Gitea Actions, runs-on: host, user lab-runner)
+Pipeline (Gitea Actions, runs-on: host, as root since 2026-11-18)
   push to main | workflow_dispatch
     deploy.yml (concurrency lab-deploy)
       check.yml      terraform init -backend=false, fmt -check, validate
@@ -79,7 +79,7 @@ Order rules that the code depends on:
 | Rule | Why |
 |---|---|
 | network before ntp and dns | chrony and CoreDNS bind 10.250.0.1 on cloudbr1 |
-| kvm before runner | `ensure_user` runs `usermod -aG libvirt lab-runner`; the group exists only after libvirt is installed |
+| kvm before runner | Terraform in the runner's jobs needs libvirt (the runner runs as root since 2026-11-18) |
 | dns before gitea and runner | `gitea_api`, `push` and `gitea-runner register` use `https://gitea.lab.test`, which the host resolves only through CoreDNS (netplan `~lab.test`). `vault_api` uses the IP, but ansible.yml's vault-action uses `vault.lab.test` |
 | podman before dns, vault, traefik, gitea | `system.compose` talks to the Podman socket |
 | vmfw before any pipeline run | terraform.yml refuses to start VMs without `/run/lab/vmfw.loaded` |
@@ -145,7 +145,7 @@ Status: Verified.
 ### B01.3 Shared settings and helpers
 Files: `src/lib/config.py`, `src/lib/system.py`. Every package directory under `src/` has an empty `__init__.py`.
 
-`config.py` holds: paths (BASE_DIR, STATE_DIR, LAB_DIR, SERVICES_DIR), the bridge (BRIDGE, VMNET), apt and Compose (APT_ENV, COMPOSE = `/usr/libexec/docker/cli-plugins/docker-compose`, DOCKER_HOST), PKI (CFSSL_DIR, PKI_DIR, LAB_CA, LAB_CA_CERT, CERTS), Vault (VAULT_PORT, VAULT_ADDR, VAULT_INIT_FILE, VAULT_POLICY_DIR, VAULT_APPROLE_FILE), LAB_ADMIN (used only by gitea.py) and RUNNER_UID (used only by the runner config).
+`config.py` holds: paths (BASE_DIR, STATE_DIR, LAB_DIR, SERVICES_DIR), the bridge (BRIDGE, VMNET), apt and Compose (APT_ENV, COMPOSE = `/usr/libexec/docker/cli-plugins/docker-compose`, DOCKER_HOST), PKI (CFSSL_DIR, PKI_DIR, LAB_CA, LAB_CA_CERT, CERTS), Vault (VAULT_PORT, VAULT_ADDR, VAULT_INIT_FILE, VAULT_POLICY_DIR, VAULT_APPROLE_FILE), LAB_ADMIN (used only by gitea.py).
 
 | Function | Purpose | Called by / calls | Touches |
 |---|---|---|---|
@@ -357,7 +357,7 @@ Files: `src/services/gitea/runner/{runner.py,config/config.py,files/config.yaml,
 
 | Function | Purpose | Called by / calls | Touches |
 |---|---|---|---|
-| `ensure_user() -> None` | User lab-runner (uid 1990) in group libvirt | up | `/var/lib/lab/runner` |
+| `ensure_home() -> None` | Runner data directory, root 0700 (was `ensure_user()`: user lab-runner uid 1990, until 2026-11-18) | up | `/var/lib/lab/runner` |
 | `ensure_binary() -> bool` | gitea-runner 6.0.0, sha256-checked | up / write_file | `/usr/local/bin/gitea-runner` |
 | `ensure_config() -> bool` | Install config.yaml and the CA copy | up / install_file | `/etc/lab-runner/{config.yaml,ca.pem}` |
 | `ensure_ssh_key(token) -> None` | Public key from Vault for Terraform | up / vault_api, write_file | `/etc/lab-runner/ssh.pub` |
@@ -639,13 +639,13 @@ Item 3 plan (layout A: separate Postgres and PostgREST pods, namespace `db`):
 - [x] `kubernetes/apps/db/postgrest.yaml` (verified `30e11b3`: CRUD from fe-1 via wg0, 5432 and 22 blocked): Deployment (`PGRST_DB_URI` with `$(AUTHENTICATOR_PASSWORD)`, schemas `todo`, anon role `web_anon`), Service LoadBalancer :8000
 - [x] `fluxcd` role: wait until `lab-apps` lastAppliedRevision = `main@sha1:$GITHUB_SHA` (verified `e1db038`; livenessProbe dropped from PostgREST); from fe-1 `curl http://10.3.1.10:8000/items` (done `59c5f2a`)
 
-Item 4 plan (container build + Trivy, decided 2026-11-18: registry pull, IaC scan report-only):
-- [ ] Host: subuid/subgid range for `lab-runner` (`runner.py`) so rootless `podman build` works; Trivy pinned in `toolchain.py` (binary + sha256)
-- [ ] Bootstrap: Gitea tokens in Vault: pipeline `write:package`, fe-1 `read:package` (same pattern as `flux_token()`)
+Item 4 plan (container build + Trivy; 2026-11-18: runner runs as root, image path to fe-1 still open: tarball vs registry):
+- [x] Host: Trivy 0.76.2 pinned in `toolchain.py` (binary + sha256). Installed
+- [ ] Host: runner as root (`lab-runner.service` User=root; `ensure_home()` replaces `ensure_user()`; `down()` removes the old `lab-runner` user). Decided because rootless builds hit three alvistack/Podman 6 issues: no subuid range, no `uidmap`, and `/usr/share/containers/storage.conf` forcing root `graphroot` on every non-root user. Trade-off: jobs run as root on the host (Q&A)
 - [ ] `frontend/`: Dockerfile (pinned nginx base) + `index.html` (CRUD page) + `nginx.conf` (`/api/` → `http://10.3.1.10:8000/`)
-- [ ] `image.yml` (deploy.yml: check → image → terraform → ansible): `podman build` tag = commit SHA → `trivy image --exit-code 1 --severity CRITICAL --ignore-unfixed` (gate) → `trivy config .` (report only) → `podman push gitea.lab.test/lab/frontend:<sha>`
-- [ ] vmfw: fe-1 → 443 (Traefik/Gitea registry), like the be-1 rule
-- [ ] `frontend` role on fe-1: podman, lab CA in `/etc/containers/certs.d/gitea.lab.test/`, login with the read token, run `<sha>` as a systemd service (quadlet) on 443 with the `app-edge` cert from Vault
+- [ ] `check.yml`: `trivy config .` (report only)
+- [ ] `image.yml` (deploy.yml: check → image → terraform → ansible): `podman build` tag = commit SHA → `trivy image --exit-code 1 --severity CRITICAL --ignore-unfixed` (gate) → deliver (tarball or push)
+- [ ] `frontend` role on fe-1: podman (Ubuntu 4.9, quadlet keys from the 4.9 set only), run the image on 443 with the `app-edge` cert from Vault
 
 ## B09 Later
 
@@ -694,7 +694,7 @@ Left:
 | `state/pki/{app-root,backend-gw,frontend-client}*` | Leftover local files, gitignored. Delete by hand, or they go with the next destroy |
 | `docs/three-vpc-design.md` | Keep for B08.3/B08.4. Rename vpc-east/hub/west to site-a/site-hub/site-c, and lab_vpc to lab_vmfw |
 | `docs/diagram/**` | Keep (review deliverable). Redraw the HLD for cloudbr1, site-*, wan and the pipeline. Fix addressing in request-flow and backend-k3s when preparing B09.5 |
-| Optional | `bootstrap.sh` ensure_python: just check and die. Move `RUNNER_UID` and `LAB_ADMIN` to their module configs |
+| Optional | `bootstrap.sh` ensure_python: just check and die. Move `LAB_ADMIN` to its module config (`RUNNER_UID` removed 2026-11-18) |
 
 ---
 

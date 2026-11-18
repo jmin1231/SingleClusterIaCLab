@@ -3,6 +3,7 @@
 import hashlib
 import logging
 import lzma
+import os
 import pwd
 import shutil
 import subprocess
@@ -18,30 +19,11 @@ from src.services.vault import vault
 log = logging.getLogger(__name__)
 
 
-def ensure_user() -> None:
-    """Create the lab-runner system user (libvirt group, subuid/subgid range for rootless podman); a re-run changes nothing."""
-    try:
-        pwd.getpwnam(config.USER)
-        log.info("user %s already exists", config.USER)
-    except KeyError:
-        config.HOME.parent.mkdir(parents=True, exist_ok=True)
-        subprocess.run(
-            ["useradd", "--system", "--uid", str(config.UID), "--user-group",
-             "--home-dir", str(config.HOME), "--create-home", "--shell", "/usr/sbin/nologin", config.USER],
-            check=True,
-        )
-        log.info("user %s created", config.USER)
-
-    subprocess.run(["usermod", "-aG", "libvirt", config.USER], check=True)
-
-    if any(line.startswith(f"{config.USER}:") for line in config.SUBUID_FILE.read_text().splitlines()):
-        log.info("user %s already has a subuid range", config.USER)
-        return
-    subprocess.run(
-        ["usermod", "--add-subuids", config.SUBID_RANGE, "--add-subgids", config.SUBID_RANGE, config.USER],
-        check=True,
-    )
-    log.info("user %s got subuid/subgid range %s for rootless podman", config.USER, config.SUBID_RANGE)
+def ensure_home() -> None:
+    """Create the runner's data directory (registration file, job workdirs); jobs run as root."""
+    config.HOME.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chown(config.HOME, 0, 0)
+    config.HOME.chmod(0o700)
 
 
 def ensure_binary() -> bool:
@@ -100,11 +82,7 @@ def ensure_registered(token: str) -> None:
              "--token-file", "/dev/stdin"],
             input=reg_token, text=True, check=True,
         )
-        # register leaves a root-owned lock; the daemon recreates it as lab-runner
-        (config.HOME / ".runner.lock").unlink(missing_ok=True)
         log.info("runner registered with %s as %s", config.INSTANCE, config.NAME)
-    # Every run: the daemon runs as lab-runner and must own its credential
-    shutil.chown(runner_file, config.USER, config.USER)
     runner_file.chmod(0o600)
     
 
@@ -124,7 +102,7 @@ def ensure_service(changed: bool) -> None:
 
 def up() -> None:
     """Install, register and start the runner; a re-run changes nothing."""
-    ensure_user()
+    ensure_home()
     changed = ensure_binary()
     changed |= ensure_config()
     token = vault.login()
@@ -134,17 +112,18 @@ def up() -> None:
 
 
 def down() -> None:
-    """Stop the runner and remove its service, config, binary, user and home."""
+    """Stop the runner and remove its service, config, binary and data directory."""
     if config.SERVICE_FILE.exists():
         subprocess.run(["systemctl", "disable", "--now", config.SERVICE], check=True)
         config.SERVICE_FILE.unlink()
         subprocess.run(["systemctl", "daemon-reload"], check=True)
     shutil.rmtree(config.CONFIG_DIR, ignore_errors=True)
     config.BINARY.unlink(missing_ok=True)
+    shutil.rmtree(config.HOME, ignore_errors=True)
     try:
-        pwd.getpwnam(config.USER)
+        pwd.getpwnam(config.OLD_USER)
     except KeyError:
         pass
     else:
-        subprocess.run(["userdel", "-r", config.USER], check=True)
-    log.info("runner service, config, binary and user %s removed", config.USER)
+        subprocess.run(["userdel", config.OLD_USER], check=True)
+    log.info("runner service, config, binary and data directory removed")

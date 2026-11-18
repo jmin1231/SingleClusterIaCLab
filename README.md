@@ -47,7 +47,7 @@ Pipeline (`.gitea/workflows/deploy.yml`): `check` (terraform fmt, validate) → 
 | Vault unseal key, bootstrap AppRole | `/var/lib/lab/vault-init.json`, `/var/lib/lab/approle.json` (root, 0600) |
 | Lab SSH key, Gitea admin, runner token | Vault `kv/lab/pipeline/ssh`, `kv/lab/bootstrap/*` |
 | Pipeline's Vault login | Gitea Actions secrets `VAULT_ROLE_ID`, `VAULT_SECRET_ID` |
-| Terraform state | `/var/lib/lab/tfstate` (lab-runner, 0700) |
+| Terraform state | `/var/lib/lab/tfstate` (root, 0700) |
 | Log of every run | `state/bootstrap.log` |
 
 Web UIs: `https://gitea.lab.test`, `https://vault.lab.test:8200`.

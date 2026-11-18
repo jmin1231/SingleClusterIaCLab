@@ -1,7 +1,5 @@
 from pathlib import Path
 
-from src.lib import config
-
 FILES = Path(__file__).resolve().parent.parent / "files"
 
 # gitea-runner release (only the .xz has a published sha256)
@@ -11,10 +9,7 @@ BINARY_SHA256 = "11e23c3a760afa7cf6572255e7204d7e581902e83494c45f7b260d5634c498f
 BINARY = Path("/usr/local/bin/gitea-runner")
 
 # Host service
-USER = "lab-runner"
-UID = config.RUNNER_UID
-SUBID_RANGE = "200000-265535"  # rootless podman; must not overlap other users in /etc/subuid
-SUBUID_FILE = Path("/etc/subuid")
+OLD_USER = "lab-runner"  # the runner ran as this user until 2026-11-18; down() removes it if present
 HOME = Path("/var/lib/lab/runner")
 CONFIG_DIR = Path("/etc/lab-runner")
 CONFIG = CONFIG_DIR / "config.yaml"

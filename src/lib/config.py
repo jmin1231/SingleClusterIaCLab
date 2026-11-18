@@ -45,5 +45,3 @@ VAULT_INIT_FILE = LAB_DIR / "vault-init.json"
 VAULT_POLICY_DIR = SERVICES_DIR / "vault" / "policies"
 VAULT_APPROLE_FILE = LAB_DIR / "approle.json"
 
-# CI runner's user
-RUNNER_UID = 1990

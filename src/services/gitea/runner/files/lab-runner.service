@@ -4,11 +4,12 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-User=lab-runner
-Group=lab-runner
+User=root
+Group=root
 WorkingDirectory=/var/lib/lab/runner
-# Terraform's state (terraform/provider.tf) and TMPDIR (terraform.yml): systemd creates it owned by lab-runner
-StateDirectory=lab/tfstate
+# /var/lib/lab/tfstate: Terraform's state (terraform/provider.tf) and TMPDIR (terraform.yml)
+# /var/lib/lab/images: the frontend image tarball, image.yml writes it and the frontend role copies it to fe-1
+StateDirectory=lab/tfstate lab/images
 StateDirectoryMode=0700
 ExecStart=/usr/local/bin/gitea-runner daemon --config /etc/lab-runner/config.yaml
 Restart=on-failure

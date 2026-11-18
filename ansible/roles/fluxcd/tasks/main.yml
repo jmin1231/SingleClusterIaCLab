@@ -67,3 +67,15 @@
   retries: 30
   delay: 10
   changed_when: false
+
+- name: Flux applied this commit to the app
+  ansible.builtin.command:
+    cmd: >-
+      k3s kubectl -n flux-system wait kustomization/lab-apps
+      --for=jsonpath={.status.lastAppliedRevision}=main@sha1:{{ lookup('env', 'GITHUB_SHA') }}
+      --timeout=10s
+  register: app_applied
+  until: app_applied.rc == 0
+  retries: 30
+  delay: 10
+  changed_when: false

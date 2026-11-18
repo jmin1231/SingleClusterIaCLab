@@ -38,10 +38,6 @@ spec:
             httpGet:
               path: /ready
               port: admin
-          livenessProbe:
-            httpGet:
-              path: /live
-              port: admin
           resources:
             requests:
               cpu: 50m

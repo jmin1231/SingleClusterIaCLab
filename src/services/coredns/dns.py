@@ -4,7 +4,7 @@ import logging
 
 from src.services.podman import podman
 from src.host.preflight import detect_network
-from src.lib.config import VMNET
+from src.lib import config
 from src.lib.system import compose
 
 log = logging.getLogger(__name__)
@@ -14,7 +14,7 @@ def up() -> None:
     """Start CoreDNS, or leave it alone if it's already running unchanged."""
     host_ip = detect_network()["host_ip"]
     compose("coredns", "up", "-d", env={"HOST_IP": host_ip})
-    log.info("CoreDNS answering lab.test on %s and %s", VMNET.ip, host_ip)
+    log.info("CoreDNS answering lab.test on %s and %s", config.VMNET.ip, host_ip)
 
 
 def down() -> None:

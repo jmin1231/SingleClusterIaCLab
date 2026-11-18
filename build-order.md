@@ -346,6 +346,7 @@ Files: `src/services/gitea/{gitea.py,compose.yaml,config/config.py}`
 | `ensure_repo(creds) -> None` | Private, empty repo `lab/lab`, default branch main | up / gitea_api | repos/lab/lab |
 | `runner_registration_token(token, creds) -> None` | Store a registration token once | up / gitea_api, vault_api | `kv/data/lab/bootstrap/gitea-runner` |
 | `pipeline_secrets(token, creds) -> None` | lab-pipeline creds as repo Actions secrets, if missing | up / gitea_api, vault.approle_credentials | secrets VAULT_ROLE_ID, VAULT_SECRET_ID |
+| `flux_token(token, creds) -> None` | Read-only labadmin token (`read:repository`) for Flux, stored once (B08.7 item 2; Implemented, never run) | up / gitea_api, vault_api | `kv/data/lab/pipeline/gitea-flux` |
 | `up() -> None` | compose up --wait, then the seeding above | platform_up / compose, vault.login | container gitea |
 | `down() -> None` | `compose gitea down --volumes` | platform_down / podman.check, compose | |
 
@@ -607,6 +608,24 @@ fe-1 only `10.3.1.10:8000` passes the hub.
 | 3 | App: PostgreSQL (ClusterIP only, init SQL: `items` table, `web_anon` role with CRUD grants), PostgREST (LoadBalancer :8000) | `k8s/app/*.yaml` | hub filter tcp 8000 |
 | 4 | Frontend on fe-1: nginx TLS with `app-edge` (cert + key from Vault), `index.html` CRUD page, `/api/` → `http://10.3.1.10:8000/` | `ansible/roles/frontend/`, bootstrap stores app-edge in Vault kv | LAN :443 DNAT → fe-1 |
 | 5 | Acceptance: CRUD in a browser; from fe-1 `nc 10.3.1.10 5432` and `ssh 10.3.1.10` fail; tun-1 port-8000 counter rises | | |
+
+Status (2026-11-18): item 1 Verified (commit `a52a51d`, pipeline green): `ansible/roles/fluxcd` installs the CLI,
+runs `flux check --pre`, writes `flux install --export --components=source-controller,kustomize-controller` to
+`/var/lib/rancher/k3s/server/manifests/flux.yaml`, and waits for both Deployments. No `flux bootstrap` (it needs a
+write token and its push to Gitea would retrigger the pipeline).
+
+**RESUME HERE: item 2, Flux → Gitea.**
+- [x] `GITEA_FLUX_KV = "kv/data/lab/pipeline/gitea-flux"` in `gitea/config/config.py` (`lab-pipeline` can already read it)
+- [x] `flux_token(token, creds)` in `gitea.py`, called in `up()`: a labadmin token, scope `read:repository`, name
+  `flux`, stored as `{username, token}`. Implemented, never run. Gotcha: if a run dies between the POST and the
+  Vault write, the next POST fails (name taken): delete the `flux` token in Gitea and run again.
+- [ ] Run `sudo ./bootstrap.sh update`; check `vault kv get kv/lab/pipeline/gitea-flux` has both fields
+- [ ] `ansible.yml`: add `kv/data/lab/pipeline/gitea-flux token | FLUX_GIT_TOKEN` to the vault-action `secrets:`, and
+  pass `FLUX_GIT_TOKEN` as `env:` on the playbook step
+- [ ] `fluxcd` role: `copy` a Secret (username, password = token, `ca.crt` = lab CA) into the k3s manifests folder
+  with `no_log: true`, using `lookup('env', 'FLUX_GIT_TOKEN')`
+- [ ] `GitRepository` (`https://gitea.lab.test/lab/lab.git`, branch `main`) + `Kustomization` (`./k8s/app`) in the
+  same folder; check `k3s kubectl -n flux-system get gitrepository` is Ready (the pod must resolve and reach Gitea)
 
 ## B09 Later
 

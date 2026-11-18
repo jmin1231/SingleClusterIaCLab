@@ -1,7 +1,6 @@
 from pathlib import Path
 
-from src.lib.config import LAB_CA_CERT, RUNNER_UID
-from src.services.gitea.config.config import GITEA_RUNNER_KV
+from src.lib import config
 
 FILES = Path(__file__).resolve().parent.parent / "files"
 
@@ -13,7 +12,7 @@ BINARY = Path("/usr/local/bin/gitea-runner")
 
 # Host service
 USER = "lab-runner"
-UID = RUNNER_UID
+UID = config.RUNNER_UID
 HOME = Path("/var/lib/lab/runner")
 CONFIG_DIR = Path("/etc/lab-runner")
 CONFIG = CONFIG_DIR / "config.yaml"

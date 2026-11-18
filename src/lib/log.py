@@ -5,7 +5,7 @@ import sys
 from datetime import datetime
 from typing import override
 
-from src.lib.config import STATE_DIR
+from src.lib import config
 
 PREFIX: dict[int, str] = {
     logging.INFO: "[+]",
@@ -13,7 +13,7 @@ PREFIX: dict[int, str] = {
     logging.ERROR: "[x]",
 }
 
-LOG_FILE = STATE_DIR / "bootstrap.log"
+LOG_FILE = config.STATE_DIR / "bootstrap.log"
 
 
 class ConsoleFormatter(logging.Formatter):

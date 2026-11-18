@@ -9,12 +9,10 @@ import subprocess
 import urllib.request
 
 from src.host import ssh_access
+from src.lib import config as lab_config
 from src.lib.system import install_file, systemctl_ok, write_file
-from src.services.gitea.runner.config.config import (
-    BINARY, BINARY_SHA256, BINARY_URL, CA, CONFIG,
-    CONFIG_DIR, FILES, GITEA_RUNNER_KV, HOME, INSTANCE,
-    LAB_CA_CERT, NAME, SERVICE, SERVICE_FILE, SSH_KV, SSH_PUB, UID, USER, VERSION,
-)
+from src.services.gitea.config import config as gitea_config
+from src.services.gitea.runner.config import config
 from src.services.vault import vault
 
 log = logging.getLogger(__name__)
@@ -23,47 +21,47 @@ log = logging.getLogger(__name__)
 def ensure_user() -> None:
     """Create the lab-runner system user for libvirt and Terraform; a re-run changes nothing."""
     try:
-        pwd.getpwnam(USER)
-        log.info("user %s already exists", USER)
+        pwd.getpwnam(config.USER)
+        log.info("user %s already exists", config.USER)
     except KeyError:
-        HOME.parent.mkdir(parents=True, exist_ok=True)
+        config.HOME.parent.mkdir(parents=True, exist_ok=True)
         subprocess.run(
-            ["useradd", "--system", "--uid", str(UID), "--user-group",
-             "--home-dir", str(HOME), "--create-home", "--shell", "/usr/sbin/nologin", USER],
+            ["useradd", "--system", "--uid", str(config.UID), "--user-group",
+             "--home-dir", str(config.HOME), "--create-home", "--shell", "/usr/sbin/nologin", config.USER],
             check=True,
         )
-        log.info("user %s created", USER)
+        log.info("user %s created", config.USER)
 
-    subprocess.run(["usermod", "-aG", "libvirt", USER], check=True)
+    subprocess.run(["usermod", "-aG", "libvirt", config.USER], check=True)
 
 
 def ensure_binary() -> bool:
     """Ensure gitea runner binary exists"""
-    if BINARY.exists():
+    if config.BINARY.exists():
         log.info("gitea runner already installed")
         return False
 
     # Download the binary and compare the sha
-    data = urllib.request.urlopen(BINARY_URL, timeout=60).read()
-    if hashlib.sha256(data).hexdigest() != BINARY_SHA256:
-        raise RuntimeError(f"{BINARY_URL}: sha256 mismatch")
+    data = urllib.request.urlopen(config.BINARY_URL, timeout=60).read()
+    if hashlib.sha256(data).hexdigest() != config.BINARY_SHA256:
+        raise RuntimeError(f"{config.BINARY_URL}: sha256 mismatch")
 
     # Install the binary
     binary = lzma.decompress(data)
-    changed = write_file(binary, BINARY, 0o755)
+    changed = write_file(binary, config.BINARY, 0o755)
 
-    log.info("gitea-runner %s installed", VERSION)
+    log.info("gitea-runner %s installed", config.VERSION)
     return changed
 
 
 def ensure_config() -> bool:
     """Install the runner config and the lab CA into /etc/lab-runner; returns True if either changed."""
-    CONFIG_DIR.mkdir(mode=0o755, exist_ok=True)
-    changed = install_file(FILES / "config.yaml", CONFIG, 0o644)
-    changed |= install_file(LAB_CA_CERT, CA, 0o644)
+    config.CONFIG_DIR.mkdir(mode=0o755, exist_ok=True)
+    changed = install_file(config.FILES / "config.yaml", config.CONFIG, 0o644)
+    changed |= install_file(lab_config.LAB_CA_CERT, config.CA, 0o644)
 
     if changed:
-        log.info("runner config and lab CA installed in %s", CONFIG_DIR)
+        log.info("runner config and lab CA installed in %s", config.CONFIG_DIR)
     else:
         log.info("runner config and lab CA are already up to date")
     return changed
@@ -72,47 +70,47 @@ def ensure_config() -> bool:
 def ensure_ssh_key(token: str) -> None:
     """Publish the VMs' authorized keys (public, so 0644) where Terraform reads them, one per line:
     the pipeline key (its private half stays in Vault) and the operator key (ssh_access)."""
-    pipeline = vault.vault_api("GET", SSH_KV, token=token)["data"]["data"]["public_key"].strip()
+    pipeline = vault.vault_api("GET", config.SSH_KV, token=token)["data"]["data"]["public_key"].strip()
     keys = f"{pipeline}\n{ssh_access.public_key()}\n"
-    if write_file(keys.encode(), SSH_PUB, 0o644):
-        log.info("VM SSH public keys (pipeline, operator) installed at %s", SSH_PUB)
+    if write_file(keys.encode(), config.SSH_PUB, 0o644):
+        log.info("VM SSH public keys (pipeline, operator) installed at %s", config.SSH_PUB)
     else:
-        log.info("VM SSH public keys already at %s", SSH_PUB)
+        log.info("VM SSH public keys already at %s", config.SSH_PUB)
 
 
 def ensure_registered(token: str) -> None:
     """Register the runner with Gitea once; the result is HOME/.runner."""
-    runner_file = HOME / ".runner"
+    runner_file = config.HOME / ".runner"
     if runner_file.exists():
         log.info("runner already registered (%s exists)", runner_file)
     else:
-        reg_token = vault.vault_api("GET", GITEA_RUNNER_KV, token=token)["data"]["data"]["token"]
+        reg_token = vault.vault_api("GET", gitea_config.GITEA_RUNNER_KV, token=token)["data"]["data"]["token"]
         subprocess.run(
-            [str(BINARY), "register", "--no-interactive",
-             "--config", str(CONFIG), "--instance", INSTANCE, "--name", NAME,
+            [str(config.BINARY), "register", "--no-interactive",
+             "--config", str(config.CONFIG), "--instance", config.INSTANCE, "--name", config.NAME,
              "--token-file", "/dev/stdin"],
             input=reg_token, text=True, check=True,
         )
         # register leaves a root-owned lock; the daemon recreates it as lab-runner
-        (HOME / ".runner.lock").unlink(missing_ok=True)
-        log.info("runner registered with %s as %s", INSTANCE, NAME)
+        (config.HOME / ".runner.lock").unlink(missing_ok=True)
+        log.info("runner registered with %s as %s", config.INSTANCE, config.NAME)
     # Every run: the daemon runs as lab-runner and must own its credential
-    shutil.chown(runner_file, USER, USER)
+    shutil.chown(runner_file, config.USER, config.USER)
     runner_file.chmod(0o600)
     
 
 def ensure_service(changed: bool) -> None:
     """Install the unit, enable and start the runner; restart it if its binary, config or unit changed."""
-    if install_file(FILES / f"{SERVICE}.service", SERVICE_FILE, 0o644):
+    if install_file(config.FILES / f"{config.SERVICE}.service", config.SERVICE_FILE, 0o644):
         subprocess.run(["systemctl", "daemon-reload"], check=True)
         changed = True
 
-    subprocess.run(["systemctl", "enable", SERVICE], check=True)
-    if changed or not systemctl_ok("is-active", SERVICE):
-        subprocess.run(["systemctl", "restart", SERVICE], check=True)
-        log.info("%s (re)started", SERVICE)
+    subprocess.run(["systemctl", "enable", config.SERVICE], check=True)
+    if changed or not systemctl_ok("is-active", config.SERVICE):
+        subprocess.run(["systemctl", "restart", config.SERVICE], check=True)
+        log.info("%s (re)started", config.SERVICE)
     else:
-        log.info("%s is already running", SERVICE)
+        log.info("%s is already running", config.SERVICE)
 
 
 def up() -> None:
@@ -128,16 +126,16 @@ def up() -> None:
 
 def down() -> None:
     """Stop the runner and remove its service, config, binary, user and home."""
-    if SERVICE_FILE.exists():
-        subprocess.run(["systemctl", "disable", "--now", SERVICE], check=True)
-        SERVICE_FILE.unlink()
+    if config.SERVICE_FILE.exists():
+        subprocess.run(["systemctl", "disable", "--now", config.SERVICE], check=True)
+        config.SERVICE_FILE.unlink()
         subprocess.run(["systemctl", "daemon-reload"], check=True)
-    shutil.rmtree(CONFIG_DIR, ignore_errors=True)
-    BINARY.unlink(missing_ok=True)
+    shutil.rmtree(config.CONFIG_DIR, ignore_errors=True)
+    config.BINARY.unlink(missing_ok=True)
     try:
-        pwd.getpwnam(USER)
+        pwd.getpwnam(config.USER)
     except KeyError:
         pass
     else:
-        subprocess.run(["userdel", "-r", USER], check=True)
-    log.info("runner service, config, binary and user %s removed", USER)
+        subprocess.run(["userdel", "-r", config.USER], check=True)
+    log.info("runner service, config, binary and user %s removed", config.USER)

@@ -13,10 +13,7 @@ import urllib.request
 from pathlib import Path
 
 from src.services.podman import podman
-from src.lib.config import (
-    LAB_CA_CERT, LAB_DIR,
-    VAULT_ADDR, VAULT_APPROLE_FILE, VAULT_INIT_FILE, VAULT_POLICY_DIR,
-)
+from src.lib import config
 from src.lib.system import compose
 
 log = logging.getLogger(__name__)
@@ -28,12 +25,12 @@ def vault_api(method: str, path: str, body: dict | None = None, token: str | Non
     A GET of something that does not exist returns {}; every other HTTP error raises.
     """
     req = urllib.request.Request(
-        f"{VAULT_ADDR}/v1/{path}",
+        f"{config.VAULT_ADDR}/v1/{path}",
         method=method,
         data=json.dumps(body).encode() if body is not None else None,
         headers={'X-Vault-Token': token} if token is not None else {}
     )
-    ctx = ssl.create_default_context(cafile=LAB_CA_CERT)
+    ctx = ssl.create_default_context(cafile=config.LAB_CA_CERT)
     try:
         with urllib.request.urlopen(req, context=ctx, timeout=10) as resp:
             data = resp.read()
@@ -47,24 +44,24 @@ def vault_api(method: str, path: str, body: dict | None = None, token: str | Non
 def init() -> None:
     """Initialize Vault once; the unseal key and root token go to vault-init.json (0600, never overwritten)."""
     initialized = vault_api("GET", "sys/init")["initialized"]
-    if initialized and VAULT_INIT_FILE.exists():
+    if initialized and config.VAULT_INIT_FILE.exists():
         log.info("Vault is already initialized")
         return
     if initialized:
-        log.error("Vault is initialized but %s is missing: the unseal key is lost", VAULT_INIT_FILE)
+        log.error("Vault is initialized but %s is missing: the unseal key is lost", config.VAULT_INIT_FILE)
         sys.exit(1)
-    if VAULT_INIT_FILE.exists():
-        log.error("%s exists but Vault is new: it belongs to an older Vault; move it away and re-run", VAULT_INIT_FILE)
+    if config.VAULT_INIT_FILE.exists():
+        log.error("%s exists but Vault is new: it belongs to an older Vault; move it away and re-run", config.VAULT_INIT_FILE)
         sys.exit(1)
 
     keys = vault_api("PUT", "sys/init", {"secret_shares": 1, "secret_threshold": 1})
-    LAB_DIR.mkdir(0o755, parents=True, exist_ok=True)
-    fd = os.open(VAULT_INIT_FILE, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    config.LAB_DIR.mkdir(0o755, parents=True, exist_ok=True)
+    fd = os.open(config.VAULT_INIT_FILE, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, "w") as file:
         json.dump(keys, file)
         file.flush()
         os.fsync(file.fileno())
-    log.info("Vault initialized; unseal key and root token in %s", VAULT_INIT_FILE)
+    log.info("Vault initialized; unseal key and root token in %s", config.VAULT_INIT_FILE)
 
 
 def mount(token: str, path: str, body: dict) -> None:
@@ -119,7 +116,7 @@ def ssh_key(token: str) -> None:
 
 def policy(token: str) -> None:
     """Upload every policies/*.hcl as the Vault policy named after the file; skip unchanged ones."""
-    for file in sorted(VAULT_POLICY_DIR.glob("*.hcl")):
+    for file in sorted(config.VAULT_POLICY_DIR.glob("*.hcl")):
         path = f"sys/policies/acl/{file.stem}"
         text = file.read_text()
 
@@ -170,7 +167,7 @@ def approle(token: str, role: str, creds_file: Path, owner: tuple[int, int]) -> 
     log.info("AppRole %s created; credentials in %s", role, creds_file)
 
 
-def login(creds_file: Path = VAULT_APPROLE_FILE) -> str:
+def login(creds_file: Path = config.VAULT_APPROLE_FILE) -> str:
     """Log in with an AppRole credentials file written by approle(); returns a token (1 h).
 
     The default is lab-bootstrap's file; CI jobs log in through Gitea secrets instead.
@@ -199,21 +196,21 @@ def up(certs_changed: bool) -> None:
     compose("vault", "up", "-d", "--wait", "--wait-timeout", "60",
             *(["--force-recreate"] if certs_changed else []))
     init()
-    keys = json.loads(VAULT_INIT_FILE.read_text())
+    keys = json.loads(config.VAULT_INIT_FILE.read_text())
     unseal(keys["keys_base64"][0])
 
-    if not VAULT_APPROLE_FILE.exists():  # first run: the root token's last job
+    if not config.VAULT_APPROLE_FILE.exists():  # first run: the root token's last job
         root = keys["root_token"]
         policy(root)  # AppRole lab-bootstrap's tokens get policy lab-bootstrap
         enable_approle(root)
-        approle(root, "lab-bootstrap", VAULT_APPROLE_FILE, (0, 0))
+        approle(root, "lab-bootstrap", config.VAULT_APPROLE_FILE, (0, 0))
     token = login()
     revoke_root(keys["root_token"])  # only once login() works, so a broken AppRole never locks us out
 
     mount(token, "kv", {"type": "kv", "options": {"version": "2"}})
     policy(token)
     ssh_key(token)
-    log.info("Vault ready on %s", VAULT_ADDR)
+    log.info("Vault ready on %s", config.VAULT_ADDR)
 
 
 def down() -> None:
@@ -222,6 +219,6 @@ def down() -> None:
         log.info("Podman is not set up; Vault's data and unseal key are kept")
         return
     compose("vault", "down", "--volumes")
-    VAULT_INIT_FILE.unlink(missing_ok=True)  # only once the data is gone: the key is what unlocks it
-    VAULT_APPROLE_FILE.unlink(missing_ok=True)
+    config.VAULT_INIT_FILE.unlink(missing_ok=True)  # only once the data is gone: the key is what unlocks it
+    config.VAULT_APPROLE_FILE.unlink(missing_ok=True)
     log.info("Vault removed: container, data, unseal key and AppRole credentials")

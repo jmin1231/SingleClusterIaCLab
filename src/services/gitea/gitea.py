@@ -13,13 +13,10 @@ import time
 import urllib.request, urllib.error
 from datetime import datetime
 
-from src.lib.config import BASE_DIR, LAB_ADMIN, LAB_CA_CERT
+from src.lib import config as lab_config
 from src.lib.system import compose
+from src.services.gitea.config import config
 from src.services.podman import podman
-from src.services.gitea.config.config import (
-    GITEA_API, GITEA_ADMIN_KV, GITEA_RUNNER_KV, GITEA_ORG, GITEA_REPO, GITEA_REPO_URL,
-    GITEA_WORKFLOW, COMMIT_IDENTITY, RUN_LOG_LINES, RUN_POLL_SECONDS, RUN_START_TIMEOUT, RUN_TIMEOUT,
-)
 from src.services.vault import vault
 
 log = logging.getLogger(__name__)
@@ -32,7 +29,7 @@ def gitea_api(creds: dict, method: str, path: str, body: dict | None = None, raw
     ).decode("ascii")
 
     request = urllib.request.Request(
-        f"{GITEA_API}/{path}",
+        f"{config.GITEA_API}/{path}",
         method=method,
         data=json.dumps(body).encode() if body is not None else None,
         headers={
@@ -40,7 +37,7 @@ def gitea_api(creds: dict, method: str, path: str, body: dict | None = None, raw
                 "Content-Type": "application/json"
         }
     )
-    ctx = ssl.create_default_context(cafile=LAB_CA_CERT)
+    ctx = ssl.create_default_context(cafile=lab_config.LAB_CA_CERT)
     try:
         with urllib.request.urlopen(request, context=ctx, timeout=10) as resp:
             data = resp.read()
@@ -55,14 +52,14 @@ def gitea_api(creds: dict, method: str, path: str, body: dict | None = None, raw
 
 def gitea_admin(token: str) -> dict:
     """Create Gitea's admin once, store its password in Vault, and return the credentials."""
-    saved = vault.vault_api("GET", GITEA_ADMIN_KV, token=token)
+    saved = vault.vault_api("GET", config.GITEA_ADMIN_KV, token=token)
     if saved:
-        log.info("Gitea admin %s already exists", LAB_ADMIN)
+        log.info("Gitea admin %s already exists", lab_config.LAB_ADMIN)
         return saved["data"]["data"]
 
     result = subprocess.run(
         ["podman", "exec", "gitea", "gitea", "admin", "user", "create",
-         "--admin", "--username", LAB_ADMIN, "--email", f"{LAB_ADMIN}@lab.test",
+         "--admin", "--username", lab_config.LAB_ADMIN, "--email", f"{lab_config.LAB_ADMIN}@lab.test",
          "--random-password", "--must-change-password=false"],
         capture_output=True, text=True, check=True,
     )
@@ -70,36 +67,36 @@ def gitea_admin(token: str) -> dict:
     if not password:
         log.error("Could not find the generated password in Gitea's output; user %s may now "
                   "exist without a stored password (delete it with 'gitea admin user delete')",
-                  LAB_ADMIN)
+                  lab_config.LAB_ADMIN)
         sys.exit(1)
 
-    creds = {"username": LAB_ADMIN, "password": password.group(1)}
-    vault.vault_api("POST", GITEA_ADMIN_KV, {"data": creds}, token=token)
-    log.info("Created Gitea admin %s; password stored in Vault", LAB_ADMIN)
+    creds = {"username": lab_config.LAB_ADMIN, "password": password.group(1)}
+    vault.vault_api("POST", config.GITEA_ADMIN_KV, {"data": creds}, token=token)
+    log.info("Created Gitea admin %s; password stored in Vault", lab_config.LAB_ADMIN)
     return creds
 
 
 def ensure_org(creds: dict) -> None:
     """Find or create the public lab organization."""
-    org = gitea_api(creds, "GET", f"orgs/{GITEA_ORG}")
+    org = gitea_api(creds, "GET", f"orgs/{config.GITEA_ORG}")
     if org:
-        log.info("Gitea organization %s already exists", GITEA_ORG)
+        log.info("Gitea organization %s already exists", config.GITEA_ORG)
         return
 
-    gitea_api(creds, "POST", "orgs", {"username": GITEA_ORG, "visibility": "public"})
-    log.info("Created public Gitea organization %s", GITEA_ORG)
+    gitea_api(creds, "POST", "orgs", {"username": config.GITEA_ORG, "visibility": "public"})
+    log.info("Created public Gitea organization %s", config.GITEA_ORG)
 
 
 def ensure_repo(creds: dict) -> None:
     """Find or create the private lab/lab repository."""
-    full_name = f"{GITEA_ORG}/{GITEA_REPO}"
+    full_name = f"{config.GITEA_ORG}/{config.GITEA_REPO}"
     repo = gitea_api(creds, "GET", f"repos/{full_name}")
     if repo:
         log.info("Gitea repository %s already exists", full_name)
         return
 
-    gitea_api(creds, "POST", f"orgs/{GITEA_ORG}/repos", {
-        "name": GITEA_REPO,
+    gitea_api(creds, "POST", f"orgs/{config.GITEA_ORG}/repos", {
+        "name": config.GITEA_REPO,
         "private": True,
         "auto_init": False,
         "default_branch": "main",
@@ -109,19 +106,19 @@ def ensure_repo(creds: dict) -> None:
 
 def runner_registration_token(token: str, creds: dict) -> None:
     """Store an instance-wide runner registration token in Vault once."""
-    if vault.vault_api("GET", GITEA_RUNNER_KV, token=token):
+    if vault.vault_api("GET", config.GITEA_RUNNER_KV, token=token):
         log.info("Gitea runner token already exists in vault")
         return
 
     response = gitea_api(creds, "POST", "admin/actions/runners/registration-token")
-    vault.vault_api("POST", GITEA_RUNNER_KV,
+    vault.vault_api("POST", config.GITEA_RUNNER_KV,
               {"data": {"token": response["token"]}}, token=token)
     log.info("Stored the runner registration token in Vault")
 
 
 def pipeline_secrets(token: str, creds: dict) -> None:
     """Store lab-pipeline's AppRole Login as gitea secrets"""
-    url = f"repos/{GITEA_ORG}/{GITEA_REPO}/actions/secrets"
+    url = f"repos/{config.GITEA_ORG}/{config.GITEA_REPO}/actions/secrets"
 
     results = []
     for secret in gitea_api(creds, "GET", url):
@@ -138,6 +135,20 @@ def pipeline_secrets(token: str, creds: dict) -> None:
     log.info("Gitea Action Secrets stored")
 
 
+def flux_token(token: str, creds: dict) -> None:
+    """Store a read-only Gitea token for Flux in Vault once."""
+    if vault.vault_api("GET", config.GITEA_FLUX_KV, token=token):
+        log.info("Flux's Gitea token already exists in Vault")
+        return
+
+    response = gitea_api(creds, "POST", f"users/{lab_config.LAB_ADMIN}/tokens",
+                         {"name": "flux", "scopes": ["read:repository"]})
+    vault.vault_api("POST", config.GITEA_FLUX_KV,
+                    {"data": {"username": lab_config.LAB_ADMIN, "token": response["sha1"]}},
+                    token=token)
+    log.info("Stored Flux's read-only Gitea token in Vault")
+
+
 def push(creds: dict) -> str:
     """Push the checked-out commit to Gitea's main and return it; the pipeline then builds the commit platform_up() applied."""
     credentials = base64.b64encode(
@@ -146,19 +157,19 @@ def push(creds: dict) -> str:
 
     env = {
         **os.environ,
-        "GIT_SSL_CAINFO": str(LAB_CA_CERT),
+        "GIT_SSL_CAINFO": str(lab_config.LAB_CA_CERT),
         "GIT_TERMINAL_PROMPT": "0",
         "GIT_CONFIG_COUNT": "1",
         "GIT_CONFIG_KEY_0": "http.extraHeader",
         "GIT_CONFIG_VALUE_0": f"Authorization: Basic {credentials}",
     }
     subprocess.run(
-        ["git", "-C", str(BASE_DIR),
-         "push", GITEA_REPO_URL, "HEAD:refs/heads/main"],
+        ["git", "-C", str(lab_config.BASE_DIR),
+         "push", config.GITEA_REPO_URL, "HEAD:refs/heads/main"],
         env=env, check=True,
     )
     sha = git("rev-parse", "HEAD")
-    log.info("pushed %s to Gitea's main; the push starts %s", sha[:7], GITEA_WORKFLOW)
+    log.info("pushed %s to Gitea's main; the push starts %s", sha[:7], config.GITEA_WORKFLOW)
     return sha
 
 
@@ -169,7 +180,7 @@ def git(*args: str) -> str:
     """
     uid, gid = int(os.environ["SUDO_UID"]), int(os.environ["SUDO_GID"])
     return subprocess.run(
-        ["git", "-C", str(BASE_DIR), *args],
+        ["git", "-C", str(lab_config.BASE_DIR), *args],
         stdout=subprocess.PIPE, text=True, check=True,
         user=uid, group=gid, env={**os.environ, "HOME": pwd.getpwuid(uid).pw_dir},
     ).stdout.strip()
@@ -181,7 +192,7 @@ def commit_changes() -> None:
         log.info("no uncommitted changes")
         return
     git("add", "-A")
-    git(*COMMIT_IDENTITY, "commit", "-q", "-m", f"update {datetime.now():%Y-%m-%d %H:%M}")
+    git(*config.COMMIT_IDENTITY, "commit", "-q", "-m", f"update {datetime.now():%Y-%m-%d %H:%M}")
     log.info("committed local changes as %s", git("rev-parse", "--short", "HEAD"))
 
 
@@ -191,7 +202,7 @@ def main_differs(creds: dict) -> bool:
     Usually local is ahead (a push sends it); if it is behind or diverged, the push
     (no --force) is rejected and update stops.
     """
-    branch = gitea_api(creds, "GET", f"repos/{GITEA_ORG}/{GITEA_REPO}/branches/main")
+    branch = gitea_api(creds, "GET", f"repos/{config.GITEA_ORG}/{config.GITEA_REPO}/branches/main")
     return git("rev-parse", "HEAD") != branch.get("commit", {}).get("id")
 
 
@@ -199,10 +210,10 @@ def dispatch(creds: dict) -> int:
     """Start one deploy.yml run on main without a push (nothing new, e.g. after a reboot); returns its id."""
     details = gitea_api(
         creds, "POST",
-        f"repos/{GITEA_ORG}/{GITEA_REPO}/actions/workflows/{GITEA_WORKFLOW}/dispatches?return_run_details=true",
+        f"repos/{config.GITEA_ORG}/{config.GITEA_REPO}/actions/workflows/{config.GITEA_WORKFLOW}/dispatches?return_run_details=true",
         {"ref": "main"},
     )
-    log.info("nothing new to push; started %s on main", GITEA_WORKFLOW)
+    log.info("nothing new to push; started %s on main", config.GITEA_WORKFLOW)
     return details["workflow_run_id"]
 
 
@@ -213,38 +224,38 @@ def wait_for_run(creds: dict, sha: str) -> int:
     so the run with this commit and event is ours, whatever else runs meanwhile.
     """
     query = f"head_sha={sha}&event=push&branch=main&limit=1"
-    deadline = time.monotonic() + RUN_START_TIMEOUT
+    deadline = time.monotonic() + config.RUN_START_TIMEOUT
     while True:
-        runs = gitea_api(creds, "GET", f"repos/{GITEA_ORG}/{GITEA_REPO}/actions/runs?{query}")
+        runs = gitea_api(creds, "GET", f"repos/{config.GITEA_ORG}/{config.GITEA_REPO}/actions/runs?{query}")
         if runs.get("workflow_runs"):
             return runs["workflow_runs"][0]["id"]
         if time.monotonic() > deadline:
             log.error("no run started for %s; does deploy.yml trigger on push to main?", sha[:7])
             sys.exit(1)
-        time.sleep(RUN_POLL_SECONDS)
+        time.sleep(config.RUN_POLL_SECONDS)
 
 
 def follow_run(creds: dict, run_id: int) -> None:
     """Wait for the run to finish and print each job's result; for a failure, the end of its log, then exit 1."""
-    url = f"repos/{GITEA_ORG}/{GITEA_REPO}/actions/runs/{run_id}"
+    url = f"repos/{config.GITEA_ORG}/{config.GITEA_REPO}/actions/runs/{run_id}"
     run = gitea_api(creds, "GET", url)
     log.info("run #%s started; waiting for it to finish: %s", run["run_number"], run["html_url"])
-    deadline = time.monotonic() + RUN_TIMEOUT
+    deadline = time.monotonic() + config.RUN_TIMEOUT
     while run["status"] != "completed":
         if time.monotonic() > deadline:
             log.error("run #%s timed out; is lab-runner running?", run["run_number"])
             sys.exit(1)
-        time.sleep(RUN_POLL_SECONDS)
+        time.sleep(config.RUN_POLL_SECONDS)
         run = gitea_api(creds, "GET", url)
 
     for job in gitea_api(creds, "GET", f"{url}/jobs").get("jobs", []):
         log.info("  %s: %s", job["name"], job["conclusion"])
         if job["conclusion"] == "failure":
             try:
-                text = gitea_api(creds, "GET", f"repos/{GITEA_ORG}/{GITEA_REPO}/actions/jobs/{job['id']}/logs", raw=True)
+                text = gitea_api(creds, "GET", f"repos/{config.GITEA_ORG}/{config.GITEA_REPO}/actions/jobs/{job['id']}/logs", raw=True)
             except OSError:
                 text = None
-            lines = text.splitlines()[-RUN_LOG_LINES:] if isinstance(text, str) else ["(log not available)"]
+            lines = text.splitlines()[-config.RUN_LOG_LINES:] if isinstance(text, str) else ["(log not available)"]
             for line in lines:
                 print(f"    {line}", file=sys.stderr)
 
@@ -262,7 +273,7 @@ def start_run(creds: dict) -> int:
 
 
 def up() -> None:
-    """Start Gitea, wait for its healthcheck, then ensure admin, org, repo and runner token; a re-run changes nothing."""
+    """Start Gitea, wait for its healthcheck, then ensure admin, org, repo, runner token, pipeline secrets and Flux token; a re-run changes nothing."""
     compose("gitea", "up", "-d", "--wait", "--wait-timeout", "120")
     token = vault.login()
     creds = gitea_admin(token)
@@ -270,6 +281,7 @@ def up() -> None:
     ensure_repo(creds)
     runner_registration_token(token, creds)
     pipeline_secrets(token, creds)
+    flux_token(token, creds)
     log.info("Gitea ready at https://gitea.lab.test")
 
 

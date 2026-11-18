@@ -9,8 +9,7 @@ import sys
 from collections.abc import Callable
 
 from src.host import kvm, network, ntp, preflight, ssh_access, toolchain, vmfw
-from src.lib import pki
-from src.lib.config import LAB_DIR, STATE_DIR
+from src.lib import config, pki
 from src.lib.log import setup_logging
 from src.services.coredns import dns
 from src.services.podman import podman
@@ -22,8 +21,8 @@ from src.services.gitea.runner import runner
 
 log = logging.getLogger(__name__)
 
-LOCK_FILE = STATE_DIR / "run.lock"
-INITIALIZED_MARKER = STATE_DIR / "initialized"
+LOCK_FILE = config.STATE_DIR / "run.lock"
+INITIALIZED_MARKER = config.STATE_DIR / "initialized"
 
 
 def platform_up() -> None:
@@ -92,7 +91,7 @@ def cmd_teardown() -> None:
 
 def cmd_destroy() -> None:
     platform_down()
-    shutil.rmtree(LAB_DIR, ignore_errors=True)
+    shutil.rmtree(config.LAB_DIR, ignore_errors=True)
     INITIALIZED_MARKER.unlink(missing_ok=True)
     log.info("destroy complete: everything the lab installed is removed")
 

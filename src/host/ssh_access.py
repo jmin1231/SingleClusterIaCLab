@@ -9,7 +9,7 @@ import pwd
 import subprocess
 from pathlib import Path
 
-from src.host.config.config import OPERATOR_KEY_NAME, SSH_CONFIG_FILE, SSH_CONFIG_SRC
+from src.host.config import config
 from src.lib.system import install_file
 
 log = logging.getLogger(__name__)
@@ -18,7 +18,7 @@ log = logging.getLogger(__name__)
 def operator_key() -> Path:
     """The private key in the sudo user's ~/.ssh."""
     home = pwd.getpwuid(int(os.environ["SUDO_UID"])).pw_dir
-    return Path(home) / ".ssh" / OPERATOR_KEY_NAME
+    return Path(home) / ".ssh" / config.OPERATOR_KEY_NAME
 
 
 def public_key() -> str:
@@ -42,13 +42,13 @@ def up() -> None:
                        check=True, user=uid, group=gid)
         log.info("created operator SSH key %s", key)
 
-    if install_file(SSH_CONFIG_SRC, SSH_CONFIG_FILE, 0o644):
-        log.info("SSH aliases fe-1, tun-1, be-1 installed at %s", SSH_CONFIG_FILE)
+    if install_file(config.SSH_CONFIG_SRC, config.SSH_CONFIG_FILE, 0o644):
+        log.info("SSH aliases fe-1, tun-1, be-1 installed at %s", config.SSH_CONFIG_FILE)
     else:
-        log.info("SSH aliases already at %s", SSH_CONFIG_FILE)
+        log.info("SSH aliases already at %s", config.SSH_CONFIG_FILE)
 
 
 def down() -> None:
     """Remove the host aliases; keep the operator key, a personal key the next up reuses."""
-    SSH_CONFIG_FILE.unlink(missing_ok=True)
+    config.SSH_CONFIG_FILE.unlink(missing_ok=True)
     log.info("SSH aliases removed; operator key kept at %s (delete by hand if unwanted)", operator_key())

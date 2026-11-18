@@ -6,7 +6,7 @@ import os
 import subprocess
 from pathlib import Path
 
-from src.lib.config import APT_ENV, COMPOSE, DOCKER_HOST, SERVICES_DIR
+from src.lib import config
 
 log = logging.getLogger(__name__)
 
@@ -34,18 +34,18 @@ def apt_install(packages: list[str]) -> bool:
     if not missing:
         return False
     log.info("installing %s", ", ".join(missing))
-    subprocess.run(["apt-get", "-qq", "update"], check=True, env=APT_ENV)
+    subprocess.run(["apt-get", "-qq", "update"], check=True, env=config.APT_ENV)
     # No recommends: docker-compose-v2 would otherwise pull in docker.io and start a Docker daemon
     subprocess.run(["apt-get", "install", "-y", "-qq", "--no-install-recommends",
                     "-o", "DPkg::Lock::Timeout=120", *missing],
-                   check=True, env=APT_ENV)
+                   check=True, env=config.APT_ENV)
     return True
 
 
 def apt_purge(packages: list[str]) -> None:
     """Purge `packages` (their files and config), without prompts."""
     subprocess.run(["apt-get", "purge", "-y", "-qq", "-o", "DPkg::Lock::Timeout=120", *packages],
-                   check=True, env=APT_ENV)
+                   check=True, env=config.APT_ENV)
 
 
 def systemctl_ok(verb: str, unit: str) -> bool:
@@ -71,9 +71,9 @@ def install_file(src: Path, dst: Path, mode: int) -> bool:
 
 def compose(service: str, *args: str, env: dict[str, str] | None = None) -> None:
     """docker-compose -f services/<service>/compose.yaml <args>"""
-    result_env = {**os.environ, "DOCKER_HOST": DOCKER_HOST, **(env or {})}
+    result_env = {**os.environ, "DOCKER_HOST": config.DOCKER_HOST, **(env or {})}
     subprocess.run(
-        [COMPOSE, "-f", SERVICES_DIR / service / "compose.yaml", *args],
+        [config.COMPOSE, "-f", config.SERVICES_DIR / service / "compose.yaml", *args],
         env=result_env,
         check=True,
     )

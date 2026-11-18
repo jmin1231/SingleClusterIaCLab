@@ -3,6 +3,7 @@
 # --- Vault (KV v2 API paths) ---
 GITEA_ADMIN_KV = "kv/data/lab/bootstrap/gitea-admin"
 GITEA_RUNNER_KV = "kv/data/lab/bootstrap/gitea-runner"
+GITEA_FLUX_KV = "kv/data/lab/pipeline/gitea-flux"
 
 # --- API and GIT URL ---
 GITEA_URL = "https://gitea.lab.test"
@@ -13,7 +14,7 @@ GITEA_ORG = "lab"
 GITEA_REPO = "lab"
 GITEA_REPO_URL = f"{GITEA_URL}/{GITEA_ORG}/{GITEA_REPO}.git"
 GITEA_WORKFLOW = "deploy.yml"
-# Following a run from the terminal (the reviewer may only have SSH, not the Gitea UI)
+
 RUN_POLL_SECONDS = 10
 RUN_START_TIMEOUT = 60
 RUN_TIMEOUT = 70 * 60

@@ -4,7 +4,7 @@ import hashlib
 import logging
 from pathlib import Path
 
-from src.lib.config import VMNET
+from src.lib import config
 from src.lib.system import compose
 from src.services.podman import podman
 
@@ -17,7 +17,7 @@ def up() -> None:
     """Start Squid; a changed squid.conf recreates the container, an unchanged one leaves it alone."""
     conf_hash = hashlib.sha256(SQUID_CONF.read_bytes()).hexdigest()
     compose("squid", "up", "-d", env={"SQUID_CONF_HASH": conf_hash})
-    log.info("Squid proxying the allowlist on %s:3128", VMNET.ip)
+    log.info("Squid proxying the allowlist on %s:3128", config.VMNET.ip)
 
 
 def down() -> None:

@@ -3,7 +3,7 @@
 import logging
 
 from src.services.podman import podman
-from src.lib.config import VMNET
+from src.lib import config
 from src.lib.system import compose
 
 log = logging.getLogger(__name__)
@@ -12,7 +12,7 @@ log = logging.getLogger(__name__)
 def up(certs_changed: bool) -> None:
     """Start Traefik; force a recreate when pki.up() issued new certificates (they are read at start)."""
     compose("traefik", "up", "-d", *(["--force-recreate"] if certs_changed else []))
-    log.info("Traefik serving HTTPS on %s:443", VMNET.ip)
+    log.info("Traefik serving HTTPS on %s:443", config.VMNET.ip)
 
 
 def down() -> None:

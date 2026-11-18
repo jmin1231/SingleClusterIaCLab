@@ -641,11 +641,12 @@ Item 3 plan (layout A: separate Postgres and PostgREST pods, namespace `db`):
 
 Item 4 plan (container build + Trivy; 2026-11-18: runner runs as root, image path to fe-1 still open: tarball vs registry):
 - [x] Host: Trivy 0.76.2 pinned in `toolchain.py` (binary + sha256). Installed
-- [ ] Host: runner as root (`lab-runner.service` User=root; `ensure_home()` replaces `ensure_user()`; `down()` removes the old `lab-runner` user). Decided because rootless builds hit three alvistack/Podman 6 issues: no subuid range, no `uidmap`, and `/usr/share/containers/storage.conf` forcing root `graphroot` on every non-root user. Trade-off: jobs run as root on the host (Q&A)
-- [ ] `frontend/`: Dockerfile (pinned nginx base) + `index.html` (CRUD page) + `nginx.conf` (`/api/` → `http://10.3.1.10:8000/`)
-- [ ] `check.yml`: `trivy config .` (report only)
-- [ ] `image.yml` (deploy.yml: check → image → terraform → ansible): `podman build` tag = commit SHA → `trivy image --exit-code 1 --severity CRITICAL --ignore-unfixed` (gate) → deliver (tarball or push)
-- [ ] `frontend` role on fe-1: podman (Ubuntu 4.9, quadlet keys from the 4.9 set only), run the image on 443 with the `app-edge` cert from Vault
+- [x] Host: runner as root, verified `9efb1db` (`lab-runner.service` User=root, `StateDirectory=lab/tfstate lab/images`; `ensure_home()` replaces `ensure_user()`; `down()` removes the old `lab-runner` user). Decided because rootless builds hit three alvistack/Podman 6 issues: no subuid range, no `uidmap`, and `/usr/share/containers/storage.conf` forcing root `graphroot` on every non-root user. Trade-off: jobs run as root on the host (Q&A)
+- [x] `frontend/` (2026-11-18, Python instead of nginx + JS): `app.py` (Flask: GET /, POST /add, /update/<id>, /delete/<id>, calls PostgREST server-side via urllib, `API_URL`), `templates/items.html` (autoescaped), `requirements.txt` (8 pinned packages), multi-stage `Dockerfile` (Chainguard python `latest-dev` pip stage → distroless `latest`, Python 3.15.2, gunicorn TLS on 443 with `/etc/app/tls/tls.{crt,key}`). Tested: CRUD against live PostgREST via tunnel; Trivy 0 vulns (wolfi + 8 python-pkg)
+- [ ] `vault.py` `app_edge_cert()` + `ansible.yml` APP_EDGE_CERT/APP_EDGE_KEY (written, not run)
+- [ ] `check.yml`: `trivy config --skip-dirs terraform/.terraform .` (report only, written; preview: terraform clean, Dockerfile only DS-0026 after `USER 65532`, ~15 securityContext findings per k8s manifest)
+- [ ] `image.yml` (deploy.yml: check → image → terraform → ansible, written): `podman build` tag = commit SHA → `podman save -o /var/lib/lab/images/frontend.tar` → `trivy image --input` **report only** (user's choice 2026-11-18, no gate): table in the log + `trivy-image.{txt,json}` uploaded as artifact `trivy-image-report` (upload-artifact@v4, 7 days)
+- [ ] `frontend` role on fe-1: podman (Ubuntu 4.9, quadlet keys from the 4.9 set only), sysctl `net.ipv4.ip_unprivileged_port_start=443` (Chainguard runs non-root), copy + `podman load` the tar, quadlet `Network=host` on 443, `app-edge` cert mounted at `/etc/app/tls` (key readable by uid 65532)
 
 ## B09 Later
 

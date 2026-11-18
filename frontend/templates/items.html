@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Lab Todo</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 40rem; margin: 2rem auto; padding: 0 1rem; }
+    form, li { display: flex; gap: .5rem; align-items: center; }
+    li form:first-child { flex: 1; }
+    input { flex: 1; padding: .4rem; }
+    ul { list-style: none; padding: 0; }
+    li { padding: .4rem 0; border-bottom: 1px solid #ddd; }
+    small { color: #666; }
+    .error { color: #b00; }
+  </style>
+</head>
+<body>
+  <h1>Lab Todo</h1>
+  <form method="post" action="/add">
+    <input name="name" placeholder="New item" required>
+    <button>Add</button>
+  </form>
+  {% if error %}<p class="error">{{ error }}</p>{% endif %}
+  <ul>
+    {% for item in items %}
+    <li>
+      <form method="post" action="/update/{{ item.id }}">
+        <input name="name" value="{{ item.name }}" required>
+        <button>Update</button>
+      </form>
+      <small>{{ item.created_at[:16].replace("T", " ") }} UTC</small>
+      <form method="post" action="/delete/{{ item.id }}">
+        <button>Delete</button>
+      </form>
+    </li>
+    {% else %}
+    <li>No items yet.</li>
+    {% endfor %}
+  </ul>
+</body>
+</html>

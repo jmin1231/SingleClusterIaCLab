@@ -12,8 +12,11 @@ concurrency:
 jobs:
   check:
     uses: ./.gitea/workflows/check.yml
-  terraform:
+  image:
     needs: check
+    uses: ./.gitea/workflows/image.yml
+  terraform:
+    needs: image
     uses: ./.gitea/workflows/terraform.yml
   ansible:
     needs: terraform

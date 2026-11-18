@@ -1,0 +1,32 @@
+name: image
+
+on:
+  workflow_call:
+
+jobs:
+  build:
+    runs-on: host
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Build the frontend image
+        run: podman build -t localhost/frontend:${{ github.sha }} frontend/
+
+      - name: Save it for the frontend role
+        run: podman save -o /var/lib/lab/images/frontend.tar localhost/frontend:${{ github.sha }}
+
+      - name: Scan it (report only)
+        run: |
+          trivy image --input /var/lib/lab/images/frontend.tar --format table | tee trivy-image.txt
+          trivy image --input /var/lib/lab/images/frontend.tar --format json --output trivy-image.json
+
+      - name: Attach the scan report to the run
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-image-report
+          path: |
+            trivy-image.json
+            trivy-image.txt
+          retention-days: 7

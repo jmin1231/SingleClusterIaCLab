@@ -13,3 +13,5 @@ jobs:
       - run: terraform -chdir=terraform init -backend=false -input=false -lockfile=readonly
       - run: terraform -chdir=terraform fmt -check -recursive
       - run: terraform -chdir=terraform validate
+      - name: Scan IaC for misconfigurations (report only)
+        run: trivy config --skip-dirs terraform/.terraform .

@@ -26,7 +26,9 @@ jobs:
             kv/data/lab/pipeline/ssh private_key | SSH_PRIVATE_KEY ;
             kv/data/lab/pipeline/gitea-flux token | FLUX_GIT_TOKEN ;
             kv/data/lab/pipeline/app-db postgres_password | APP_DB_POSTGRES_PASSWORD ;
-            kv/data/lab/pipeline/app-db authenticator_password | APP_DB_AUTHENTICATOR_PASSWORD
+            kv/data/lab/pipeline/app-db authenticator_password | APP_DB_AUTHENTICATOR_PASSWORD ;
+            kv/data/lab/pipeline/app-edge cert | APP_EDGE_CERT ;
+            kv/data/lab/pipeline/app-edge key | APP_EDGE_KEY
 
       - name: Load the key into ssh-agent
         uses: webfactory/ssh-agent@v0.10.0
@@ -42,4 +44,6 @@ jobs:
           FLUX_GIT_TOKEN: ${{ steps.vault.outputs.FLUX_GIT_TOKEN }}
           APP_DB_POSTGRES_PASSWORD: ${{ steps.vault.outputs.APP_DB_POSTGRES_PASSWORD }}
           APP_DB_AUTHENTICATOR_PASSWORD: ${{ steps.vault.outputs.APP_DB_AUTHENTICATOR_PASSWORD }}
+          APP_EDGE_CERT: ${{ steps.vault.outputs.APP_EDGE_CERT }}
+          APP_EDGE_KEY: ${{ steps.vault.outputs.APP_EDGE_KEY }}
         run: ansible-playbook site.yml

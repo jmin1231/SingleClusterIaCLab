@@ -131,6 +131,21 @@ def app_db_passwords(token: str) -> None:
     log.info("stored new app database passwords in kv/lab/pipeline/app-db")
 
 
+def app_edge_cert(token: str) -> None:
+    """Copy the app-edge certificate and key from state/pki into kv/lab/pipeline/app-edge; rewrite only if they changed."""
+    path = "kv/data/lab/pipeline/app-edge"
+    cert = (config.PKI_DIR / "app-edge.pem").read_text()
+    key = (config.PKI_DIR / "app-edge-key.pem").read_text()
+
+    current = vault_api("GET", path, token=token).get("data", {}).get("data", {})
+    if current.get("cert") == cert and current.get("key") == key:
+        log.info("app-edge certificate in Vault is up to date")
+        return
+
+    vault_api("POST", path, {"data": {"cert": cert, "key": key}}, token=token)
+    log.info("stored the app-edge certificate and key in kv/lab/pipeline/app-edge")
+
+
 def policy(token: str) -> None:
     """Upload every policies/*.hcl as the Vault policy named after the file; skip unchanged ones."""
     for file in sorted(config.VAULT_POLICY_DIR.glob("*.hcl")):
@@ -228,6 +243,7 @@ def up(certs_changed: bool) -> None:
     policy(token)
     ssh_key(token)
     app_db_passwords(token)
+    app_edge_cert(token)
     log.info("Vault ready on %s", config.VAULT_ADDR)
 
 

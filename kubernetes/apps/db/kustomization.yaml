@@ -4,6 +4,7 @@ namespace: db
 resources:
   - namespace.yml
   - postgres.yaml
+  - postgrest.yaml
 configMapGenerator:
   - name: postgres-init
     files:

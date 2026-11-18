@@ -632,8 +632,8 @@ Item 2 Verified (commit `c7017af`): GitRepository `lab-repo` Ready (token from V
 Item 3 plan (layout A: separate Postgres and PostgREST pods, namespace `db`):
 - [x] Passwords: `vault.py` `app_db_passwords()` → `kv/lab/pipeline/app-db`; `ansible.yml` reads both; `roles/app_secrets` → Secret `app-db` (keys `POSTGRES_PASSWORD`, `AUTHENTICATOR_PASSWORD`). Verified `d902077`
 - [x] `kubernetes/apps/db/namespace.yml` (Flux), `lab-apps` Ready
-- [ ] `kubernetes/apps/db/postgres-init.yaml`: ConfigMap with `init.sh` (schema `api`, table `items`, `web_anon` NOLOGIN with CRUD grants, `authenticator` LOGIN NOINHERIT with the password)
-- [ ] `kubernetes/apps/db/postgres.yaml`: PVC (local-path), Deployment (Recreate, `envFrom` Secret `app-db`, init mounted at `/docker-entrypoint-initdb.d`), Service ClusterIP 5432
+- [x] `kubernetes/apps/db/init.sh` via configMapGenerator (kustomization.yaml) (schema `api`, table `items`, `web_anon` NOLOGIN with CRUD grants, `authenticator` LOGIN NOINHERIT with the password)
+- [x] `kubernetes/apps/db/postgres.yaml` (verified `9acb2ec`, authenticator → web_anon works): PVC (local-path), Deployment (Recreate, `envFrom` Secret `app-db`, init mounted at `/docker-entrypoint-initdb.d`), Service ClusterIP 5432
 - [ ] `kubernetes/apps/db/postgrest.yaml`: Deployment (`PGRST_DB_URI` with `$(AUTHENTICATOR_PASSWORD)`, schemas `api`, anon role `web_anon`), Service LoadBalancer :8000
 - [ ] `fluxcd` role: wait for `kustomization/lab-apps` Ready; from fe-1 `curl http://10.3.1.10:8000/items`
 

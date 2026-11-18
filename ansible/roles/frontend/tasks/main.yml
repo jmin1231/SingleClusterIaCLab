@@ -1,0 +1,87 @@
+# Run the frontend image (built and scanned by image.yml) on fe-1 as a systemd service
+
+- name: Podman is installed
+  ansible.builtin.apt:
+    name: podman
+    state: present
+
+- name: Non-root processes may bind 443 (the image runs as uid 65532)
+  ansible.builtin.copy:
+    dest: /etc/sysctl.d/90-lab-unprivileged-ports.conf
+    content: |
+      net.ipv4.ip_unprivileged_port_start = 443
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Apply sysctl
+
+- name: Frontend directories exist
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "{{ item.mode }}"
+  loop:
+    - { path: /etc/frontend/tls, mode: "0755" }
+    - { path: /var/lib/frontend, mode: "0700" }
+    - { path: /etc/containers/systemd, mode: "0755" }
+
+- name: app-edge certificate is installed
+  ansible.builtin.copy:
+    content: "{{ lookup('env', 'APP_EDGE_CERT') }}"
+    dest: /etc/frontend/tls/tls.crt
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart frontend
+
+- name: app-edge key is installed, readable only by the container's user
+  ansible.builtin.copy:
+    content: "{{ lookup('env', 'APP_EDGE_KEY') }}"
+    dest: /etc/frontend/tls/tls.key
+    owner: "65532"
+    group: "65532"
+    mode: "0600"
+  no_log: true
+  notify: Restart frontend
+
+- name: Image tarball from the pipeline is on fe-1
+  ansible.builtin.copy:
+    src: /var/lib/lab/images/frontend.tar
+    dest: /var/lib/frontend/frontend.tar
+    owner: root
+    group: root
+    mode: "0600"
+  register: frontend_tar
+
+- name: Image is loaded into podman
+  ansible.builtin.command: podman load -i /var/lib/frontend/frontend.tar
+  when: frontend_tar.changed
+
+- name: Quadlet unit runs this commit's image
+  ansible.builtin.template:
+    src: frontend.container.j2
+    dest: /etc/containers/systemd/frontend.container
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart frontend
+
+- name: Pending sysctl and restarts are applied
+  ansible.builtin.meta: flush_handlers
+
+- name: Frontend service is running
+  ansible.builtin.systemd_service:
+    name: frontend
+    state: started
+    daemon_reload: true
+
+- name: Frontend answers over HTTPS (and reaches the API)
+  ansible.builtin.uri:
+    url: https://127.0.0.1/
+    validate_certs: false
+  register: frontend_up
+  until: frontend_up.status == 200
+  retries: 12
+  delay: 5

@@ -1,0 +1,16 @@
+[Unit]
+Description=Lab Todo frontend (image built and scanned by the pipeline)
+Wants=network-online.target
+After=network-online.target
+
+[Container]
+Image=localhost/frontend:{{ frontend_tag }}
+ContainerName=frontend
+Network=host
+Volume=/etc/frontend/tls:/etc/app/tls:ro
+
+[Service]
+Restart=always
+
+[Install]
+WantedBy=multi-user.target

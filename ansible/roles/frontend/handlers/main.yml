@@ -1,0 +1,8 @@
+- name: Apply sysctl
+  ansible.builtin.command: sysctl -p /etc/sysctl.d/90-lab-unprivileged-ports.conf
+
+- name: Restart frontend
+  ansible.builtin.systemd_service:
+    name: frontend
+    state: restarted
+    daemon_reload: true

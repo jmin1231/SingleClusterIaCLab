@@ -37,11 +37,9 @@
     INSTALL_K3S_VERSION: "{{ k3s_version }}"
 
 - name: k3s node is Ready
-  ansible.builtin.command: >-
-    k3s kubectl get node {{ inventory_hostname }}
-    -o jsonpath={.status.conditions[?(@.type=="Ready")].status}
+  ansible.builtin.command: k3s kubectl wait --for=condition=Ready node/{{ inventory_hostname }} --timeout=10s
   register: k3s_node_ready
-  until: k3s_node_ready.stdout == "True"
+  until: k3s_node_ready.rc == 0
   retries: 30
   delay: 10
   changed_when: false

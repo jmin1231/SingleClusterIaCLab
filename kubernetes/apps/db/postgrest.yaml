@@ -27,9 +27,9 @@ spec:
                   name: app-db
                   key: AUTHENTICATOR_PASSWORD
             - name: PGRST_DB_URI
-              value: postgres://authenticator:$(AUTHENTICATOR_PASSWORD)@postgres:5432/app
+              value: postgres://authenticator:$(AUTHENTICATOR_PASSWORD)@postgres:5432/todo
             - name: PGRST_DB_SCHEMAS
-              value: api
+              value: todo
             - name: PGRST_DB_ANON_ROLE
               value: web_anon
             - name: PGRST_ADMIN_SERVER_PORT

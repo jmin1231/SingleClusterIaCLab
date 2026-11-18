@@ -32,7 +32,7 @@ spec:
               containerPort: 5432
           env:
             - name: POSTGRES_DB
-              value: app
+              value: todo
           envFrom:
             - secretRef:
                 name: app-db
@@ -44,7 +44,7 @@ spec:
               readOnly: true
           readinessProbe:
             exec:
-              command: [pg_isready, -h, "127.0.0.1", -U, postgres, -d, app]
+              command: [pg_isready, -h, "127.0.0.1", -U, postgres, -d, todo]
             periodSeconds: 5
           resources:
             requests:

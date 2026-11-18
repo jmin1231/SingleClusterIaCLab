@@ -13,9 +13,9 @@ psql \
 
 BEGIN;
 
-CREATE SCHEMA api;
+CREATE SCHEMA todo;
 
-CREATE TABLE api.items (
+CREATE TABLE todo.items (
     id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     name text NOT NULL,
     created_at timestamptz NOT NULL DEFAULT now()
@@ -24,9 +24,9 @@ CREATE TABLE api.items (
 -- Permissions used by anonymous API requests.
 CREATE ROLE web_anon NOLOGIN;
 
-GRANT USAGE ON SCHEMA api TO web_anon;
-GRANT SELECT, INSERT, UPDATE, DELETE ON api.items TO web_anon;
-GRANT USAGE ON ALL SEQUENCES IN SCHEMA api TO web_anon;
+GRANT USAGE ON SCHEMA todo TO web_anon;
+GRANT SELECT, INSERT, UPDATE, DELETE ON todo.items TO web_anon;
+GRANT USAGE ON ALL SEQUENCES IN SCHEMA todo TO web_anon;
 
 -- PostgREST connects with this account, then switches to web_anon.
 CREATE ROLE authenticator LOGIN NOINHERIT

@@ -44,7 +44,7 @@ spec:
               readOnly: true
           readinessProbe:
             exec:
-              command: [pg_isready, -U, postgres, -d, app]
+              command: [pg_isready, -h, "127.0.0.1", -U, postgres, -d, app]
             periodSeconds: 5
           resources:
             requests:

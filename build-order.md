@@ -461,7 +461,7 @@ Status: ready play Verified (run #8, against VMs that had already booted). Asser
 
 ---
 
-## B08 Next (in this order)
+## B08 Next (in this order; 2026-11-18 starts at B08.7)
 
 ### B08.1 Squid egress proxy (Verified 2026-11-17, run #12)
 The VMs have no internet: wan is route mode, and vmfw drops wan egress. All package installs go
@@ -487,6 +487,12 @@ container, a squid.conf hash in the compose env recreates the container on chang
 and vmfw now also drops forwarding to/from `cloudbr1`, `site-a`, `site-hub`, `site-c` (a changed guest route could
 otherwise leave via the host through 10.250.0.1; the tier networks are isolated, so their names are only a guard). Extra acceptance: `curl -x … http://example.com`
 returns 403, and the new vmfw drop counters exist (`nft list chain inet lab_vmfw forward`).
+
+Widened 2026-11-17 for k3s and Flux (chosen over an offline install: official sources, fewer steps), be-1 only:
+`acl backend src 10.250.0.112` + `acl k3s_hosts dstdomain get.k3s.io github.com release-assets.githubusercontent.com
+.docker.io .docker.com ghcr.io pkg-containers.githubusercontent.com`, `http_access allow backend k3s_hosts`.
+Verified: from be-1 get.k3s.io 200, Docker Hub and ghcr.io 401 (reached); from fe-1 and tun-1 403.
+Production answer: a pull-through registry mirror, or images baked into the VM image.
 
 ### B08.1b Operator SSH access (Verified 2026-11-17, run #13)
 `src/host/ssh_access.py`: `up()` creates `~/.ssh/lab_operator` for the sudo user once (ssh-keygen run as that user)
@@ -532,26 +538,29 @@ Proposed files: `ansible/roles/base/tasks/firewall.yml`, `ansible/roles/base/tem
 
 Acceptance: from the host, `nc -zv 10.250.0.112 22` works, while any port not in `fw_allow` times out.
 
-### B08.4 One data-driven wireguard role (Next)
-Create `ansible/roles/wireguard/` (an empty local directory is not tracked by git). Source for addressing and routing:
-docs/three-vpc-design.md section 5.
+Done instead (2026-11-17): only tun-1's forward chain, in the wireguard role (B08.4). Input chains on the VMs and the
+host (B09.3) stay deferred.
 
-Interface data: `ansible/host_vars/{fe-1,tun-1,be-1}.yml` (`wg_interfaces`).
-Proposed role files: `ansible/roles/wireguard/{tasks/main.yml,handlers/main.yml,templates/wg.conf.j2}`.
+### B08.4 One data-driven wireguard role (Verified 2026-11-17, run #16 + hub filter run)
+Files: `ansible/host_vars/{fe-1,tun-1,be-1}.yml` (`wg_interfaces`), `ansible/roles/wireguard/{tasks/main.yml,
+handlers/main.yml,templates/wg.conf.j2,files/hub-forward.nft}`, `terraform/inventory.tf` (`vpc_ip`, `wan_ip`).
+Addressing: docs/three-vpc-design.md section 5.
 
 | Item | Does | Connects to |
 |---|---|---|
-| `inventory.tf` | Add `vpc_ip` and `wan_ip` to `ansible_host.variables` | B06 locals.vms |
-| `wg_interfaces` data | Each host declares its local `name`, `address` (CIDR), `peer`, and `allowed_ips`; hub entries have `listen_port`, spoke entries have `endpoint_port` | ports must match nftables-vmfw.nft; AllowedIPs selects outgoing destinations and accepts incoming sources for that peer |
-| key task | `wg genkey` into `/etc/wireguard/<name>.key` (0600, `creates:`), `wg pubkey`, then set_fact `wg_pub` indexed by interface name; collect all hosts' keys before rendering | both ends use the same interface name |
-| template | One config per local interface: `Address = address`, optional `ListenPort = listen_port`; peer key from `hostvars[item.peer].wg_pub[item.name]`, `AllowedIPs = allowed_ips`; render Endpoint = `hostvars[item.peer].wan_ip:endpoint_port` only when `endpoint_port` exists | hostvars, no Vault needed |
-| hub forward | sysctl `net.ipv4.ip_forward=1`. Guest nft forward allows only 10.1.1.10 to 10.3.1.10 tcp 8000 | B08.3 |
-| service | `wg-quick@<iface>` enabled, restarted by a handler | |
-| site.yml | Add a play `hosts: hub:frontend:backend` with roles `[wireguard]` | |
+| `wg_interfaces` (host_vars) | Per local interface: `name`, `address`, `peer`, `allowed_ips`; hub entries `listen_port`, spoke entries `endpoint_port` | ports match the wan rules in nftables-vmfw.nft |
+| key tasks | One key per VM: `wg genkey` into `private.key.tmp` then `mv` to `/etc/wireguard/private.key` (umask 077, `creates:`; a failed genkey leaves no file); `wg pubkey` registered as `wg_public_key` (`changed_when: false`) | peers read `hostvars[peer].wg_public_key.stdout`; all VMs in one play |
+| `wg.conf.j2` | `Address`, `ListenPort` if `listen_port`; `PostUp = wg set %i private-key …` (no PrivateKey line, the key never reaches Ansible); spokes: `PostUp = ip route replace <net> dev %i src {{ vpc_ip }}` per AllowedIPs, `Endpoint = hostvars[peer].wan_ip:endpoint_port`, `PersistentKeepalive = 25` | `notify: Restart wireguard` (restart, not reload: reload skips Address/PostUp) |
+| hub forwarding | `/etc/sysctl.d/90-lab-forward.conf` `net.ipv4.ip_forward = 1`, `when: 'hub' in group_names`, handler `sysctl -p` | |
+| hub filter | `hub-forward.nft` → `/etc/nftables.conf` (`validate: nft -c -f %s`), nftables enabled: forward policy drop, invalid drop, established/related accept, only `wg0→wg1 10.1.1.10 → 10.3.1.10 tcp 8000 ct state new` | handler `Reload nftables` |
+| service | `wg-quick@<name>` enabled and started per interface | |
+| site.yml | play 2: `hosts: all`, roles `[ready, common, wireguard]` | |
 
-Acceptance: `wg show` on tun-1 shows two recent handshakes, and from fe-1 `nc -zv 10.3.1.10 8000` reaches be-1 (any listener). be-1 cannot reach fe-1's vpc address.
+Verified: handshakes on wg0 and wg1; fe-1 `ip route get 10.3.1.10` = `dev wg0 src 10.1.1.10`; ip_forward 1 on tun-1
+only. Hub filter: fe-1 → 10.3.1.10 tcp 8000 connects (temporary listener); tcp 22, tcp 5432 and ping blocked; be-1 →
+fe-1 blocked; drop counter rises; mgmt and wan paths between VMs still blocked. Still to see: changed=0 on a rerun.
 
-### B08.5 Teardown, destroy, and a fresh up from zero (Next, blocking the rehearsal)
+### B08.5 Teardown, destroy, and a fresh up from zero (Planned after B08.7; includes the bridge rename)
 Done 2026-11-16 evening (Implemented, not yet run): `kvm.remove_lab_vms` before the libvirt purge,
 `rmtree(/var/lib/lab)` in cmd_destroy (pool, tfstate, runner home, Vault files), `start_run` for up,
 `vault.down` guard, `cmd_teardown` exits 1.
@@ -569,15 +578,45 @@ Already proven from zero (2026-11-14, older code, `state/bootstrap.log`): destro
 
 ---
 
+### B08.6 k3s on be-1 (Verified 2026-11-17)
+Files: `ansible/roles/k3s/{defaults/main.yml,tasks/main.yml,handlers/main.yml}`, `site.yml` play 3 (`hosts: backend`,
+`become: true`, roles `[k3s]`).
+
+| Item | Does | Connects to |
+|---|---|---|
+| defaults | `k3s_version: v1.37.2+k3s1` (stable 2026-11-17), `k3s_no_proxy: 127.0.0.1,localhost,10.0.0.0/8,.lab.test` | k3s adds pod/service CIDRs and cluster.local itself |
+| config | `/etc/rancher/k3s/config.yaml` (folder made first, 0600): `node-ip: {{ vpc_ip }}`, `disable: [traefik]`; written before the first start | handler `Restart k3s` |
+| install | `get_url https://get.k3s.io` (HTTPS_PROXY) → `k3s-install.sh`, run with HTTP(S)_PROXY, NO_PROXY, INSTALL_K3S_VERSION, `creates: /usr/local/bin/k3s`; the installer verifies the binary's sha256 and copies the proxy vars into `k3s.service.env` | Squid be-1 allowlist (B08.1) |
+| ready | `k3s kubectl wait --for=condition=Ready node/{{ inventory_hostname }} --timeout=10s` in an `until` loop (30 × 10 s) | |
+| vmfw | forward: `iifname "cloudbr1" ip saddr 10.250.0.112 ct original proto-dst 443 ct status dnat accept` (Traefik is a podman port mapping, so VM → Gitea is forwarded, not input) | Flux (B08.7) |
+
+Verified: node be-1 Ready, INTERNAL-IP 10.3.1.10, coredns/local-path/metrics-server Running, no Traefik; proxy lines
+in `k3s.service.env`; be-1 → `https://gitea.lab.test` 200, fe-1 → Gitea, be-1 → Vault and be-1 → internet time out.
+Notes: flannel picked eth1 (`public-ip 198.51.100.13`); irrelevant with one node, a second node would need
+`flannel-iface: eth0`. Runs #18/#19 failed on the first ready check: the `command` module splits with shlex and
+dropped the quotes in a jsonpath filter.
+
+### B08.7 Flux, the app and the frontend (Next, 2026-11-18)
+Goal: a browser on the LAN does CRUD at `https://app.lab.test`; the database is reachable only inside k3s, and from
+fe-1 only `10.3.1.10:8000` passes the hub.
+
+| Order | Item | Proposed files | Connects to |
+|---|---|---|---|
+| 1 | Flux v2.10.0 controllers in k3s (`flux install --export`, images from ghcr.io via Squid) | `k8s/flux-system/` or the k3s manifests folder, applied by the k3s role | B08.6 |
+| 2 | Flux → Gitea: read-only token made by bootstrap, kept in Vault, delivered as a Secret with the lab CA; `GitRepository` + `Kustomization` for `k8s/app/` | `gitea.py`, `ansible.yml` (vault-action), roles/k3s or roles/flux | vmfw be-1 → 443 |
+| 3 | App: PostgreSQL (ClusterIP only, init SQL: `items` table, `web_anon` role with CRUD grants), PostgREST (LoadBalancer :8000) | `k8s/app/*.yaml` | hub filter tcp 8000 |
+| 4 | Frontend on fe-1: nginx TLS with `app-edge` (cert + key from Vault), `index.html` CRUD page, `/api/` → `http://10.3.1.10:8000/` | `ansible/roles/frontend/`, bootstrap stores app-edge in Vault kv | LAN :443 DNAT → fe-1 |
+| 5 | Acceptance: CRUD in a browser; from fe-1 `nc 10.3.1.10 5432` and `ssh 10.3.1.10` fail; tun-1 port-8000 counter rises | | |
+
 ## B09 Later
 
 | ID | Step | Proposed files / functions | Connects to | Status |
 |---|---|---|---|---|
 | B09.1 | Consoles | `src/host/trust.py` `up()/down()`: copy `state/pki/ca.pem` to `/usr/local/share/ca-certificates/lab.crt`, `update-ca-certificates`, Firefox `policies.json` (Certificates.Install). Called after `pki.up` | Gitea UI, Vault UI, `virsh console` | Planned |
 | B09.2 | Host SSH hardening | `src/host/sshd.py` + `files/sshd-lab.conf` drop-in (no passwords, no root), validate with `sshd -t`, reload | platform_up after network | Planned |
-| B09.3 | Host firewall | `files/nftables-host.nft` table `inet lab_host` (input drop. Allow lo, established, LAN ssh; cloudbr1 to 53, 123, 443, 3128, 8200; LAN to host_ip 53 if LAN clients should resolve app.lab.test, since CoreDNS binds HOST_IP too), loaded by `vmfw.up` or `hostfw.py` next to it | must not break the LAN :443 DNAT | Planned |
+| B09.3 | Host firewall (today every VM reaches anything listening on 10.250.0.1 or 0.0.0.0, e.g. sshd 22, rpcbind 111) | `files/nftables-host.nft` table `inet lab_host` (input drop. Allow lo, established, LAN ssh; cloudbr1 to 53, 123, 443, 3128, 8200; LAN to host_ip 53 if LAN clients should resolve app.lab.test, since CoreDNS binds HOST_IP too), loaded by `vmfw.up` or `hostfw.py` next to it | must not break the LAN :443 DNAT | Planned |
 | B09.4 | Monitoring | `src/services/monitoring/compose.yaml` (prometheus, node-exporter, grafana) behind Traefik. Add grafana/prometheus SANs and Corefile names back | traefik, pki | Planned |
-| B09.5 | k3s / Istio / DB / app | Design-only for the review: docs/diagram/lld/backend, request-flow. Would need Transit mount, a second CA, and roles on be-1 | k3s.lab.test record exists | Deferred |
+| B09.5 | Istio / mTLS / Transit for the app | Design-only for the review. k3s, Flux, DB and app moved to B08.6–B08.7 (2026-11-17) | B08.7 | Deferred |
 | B09.6 | DR | Walkthrough only (unseal key loss, tfstate loss) | vault-init.json, tfstate | Deferred |
 
 ---

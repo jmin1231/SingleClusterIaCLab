@@ -41,3 +41,29 @@
   retries: 30
   delay: 10
   changed_when: false
+
+- name: Flux gitea secret
+  ansible.builtin.template:
+    src: flux-git-auth.yaml.j2
+    dest: /var/lib/rancher/k3s/server/manifests/flux-git-auth.yaml
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+
+- name: Sync flux object
+  ansible.builtin.copy:
+    src: flux-sync.yaml
+    dest: /var/lib/rancher/k3s/server/manifests/flux-sync.yaml
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: GitRepository ready
+  ansible.builtin.command:
+    cmd: k3s kubectl -n flux-system wait --for=condition=Ready gitrepository/lab-repo --timeout=10s
+  register: gitrepository_ready
+  until: gitrepository_ready.rc == 0
+  retries: 30
+  delay: 10
+  changed_when: false

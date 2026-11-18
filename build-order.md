@@ -604,8 +604,8 @@ fe-1 only `10.3.1.10:8000` passes the hub.
 | Order | Item | Proposed files | Connects to |
 |---|---|---|---|
 | 1 | Flux v2.10.0 controllers in k3s (`flux install --export`, images from ghcr.io via Squid) | `k8s/flux-system/` or the k3s manifests folder, applied by the k3s role | B08.6 |
-| 2 | Flux → Gitea: read-only token made by bootstrap, kept in Vault, delivered as a Secret with the lab CA; `GitRepository` + `Kustomization` for `k8s/app/` | `gitea.py`, `ansible.yml` (vault-action), roles/k3s or roles/flux | vmfw be-1 → 443 |
-| 3 | App: PostgreSQL (ClusterIP only, init SQL: `items` table, `web_anon` role with CRUD grants), PostgREST (LoadBalancer :8000) | `k8s/app/*.yaml` | hub filter tcp 8000 |
+| 2 | Flux → Gitea: read-only token made by bootstrap, kept in Vault, delivered as a Secret with the lab CA; `GitRepository` + `Kustomization` for `kubernetes/apps/` | `gitea.py`, `ansible.yml` (vault-action), roles/k3s or roles/flux | vmfw be-1 → 443 |
+| 3 | App: PostgreSQL (ClusterIP only, init SQL: `items` table, `web_anon` role with CRUD grants), PostgREST (LoadBalancer :8000) | `kubernetes/apps/*.yaml` | hub filter tcp 8000 |
 | 4 | Frontend on fe-1: nginx TLS with `app-edge` (cert + key from Vault), `index.html` CRUD page, `/api/` → `http://10.3.1.10:8000/` | `ansible/roles/frontend/`, bootstrap stores app-edge in Vault kv | LAN :443 DNAT → fe-1 |
 | 5 | Acceptance: CRUD in a browser; from fe-1 `nc 10.3.1.10 5432` and `ssh 10.3.1.10` fail; tun-1 port-8000 counter rises | | |
 
@@ -624,7 +624,7 @@ write token and its push to Gitea would retrigger the pipeline).
   pass `FLUX_GIT_TOKEN` as `env:` on the playbook step
 - [ ] `fluxcd` role: `copy` a Secret (username, password = token, `ca.crt` = lab CA) into the k3s manifests folder
   with `no_log: true`, using `lookup('env', 'FLUX_GIT_TOKEN')`
-- [ ] `GitRepository` (`https://gitea.lab.test/lab/lab.git`, branch `main`) + `Kustomization` (`./k8s/app`) in the
+- [ ] `GitRepository` (`https://gitea.lab.test/lab/lab.git`, branch `main`) + `Kustomization` (`./kubernetes/apps`) in the
   same folder; check `k3s kubectl -n flux-system get gitrepository` is Ready (the pod must resolve and reach Gitea)
 
 ## B09 Later

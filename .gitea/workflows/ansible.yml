@@ -13,7 +13,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Read the lab SSH key from Vault
+      - name: Read the lab SSH key and flux token from Vault
         id: vault
         uses: hashicorp/vault-action@v4
         with:
@@ -22,7 +22,9 @@ jobs:
           roleId: ${{ secrets.VAULT_ROLE_ID }}
           secretId: ${{ secrets.VAULT_SECRET_ID }}
           exportEnv: false
-          secrets: kv/data/lab/pipeline/ssh private_key | SSH_PRIVATE_KEY
+          secrets: |
+            kv/data/lab/pipeline/ssh private_key | SSH_PRIVATE_KEY ;
+            kv/data/lab/pipeline/gitea-flux token | FLUX_GIT_TOKEN
 
       - name: Load the key into ssh-agent
         uses: webfactory/ssh-agent@v0.10.0
@@ -34,4 +36,6 @@ jobs:
 
       - name: Run the playbook
         working-directory: ansible
+        env:
+          FLUX_GIT_TOKEN: ${{ steps.vault.outputs.FLUX_GIT_TOKEN }}
         run: ansible-playbook site.yml

@@ -49,6 +49,13 @@ table inet lab_vmfw {
         iifname $lan_card ip daddr $host_ip tcp dport 443 dnat ip to 198.51.100.11
     }
 
+    # The same for the host's own browser: prerouting never sees traffic the host itself starts.
+    chain output {
+        type nat hook output priority dstnat; policy accept;
+
+        ip daddr $host_ip tcp dport 443 dnat ip to 198.51.100.11
+    }
+
     # No VM reaches the LAN or the internet, and none relays through the host: not via
     # 198.51.100.1 (wan) or 10.250.0.1 (mgmt). The tier networks are isolated (the host has no
     # address on them); they are listed as a guard in case one ever gets a host address.

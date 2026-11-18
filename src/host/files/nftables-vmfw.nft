@@ -53,6 +53,8 @@ table inet lab_vmfw {
     # 198.51.100.1 (wan) or 10.250.0.1 (mgmt). The tier networks are isolated (the host has no
     # address on them); they are listed as a guard in case one ever gets a host address.
     # Package downloads go through Squid, which is host traffic (input/output), not forwarded.
+    # Exception: be-1 (k3s, Flux) pulls from Gitea. Traefik's podman port mapping DNATs 10.250.0.1:443
+    # into the podman network, so that request is forwarded, not input; only this one flow passes.
     chain forward {
         type filter hook forward priority filter; policy accept;
 
@@ -61,6 +63,7 @@ table inet lab_vmfw {
 
         iifname "wan" counter drop
         oifname "wan" counter drop
+        iifname "cloudbr1" ip saddr 10.250.0.112 ct original proto-dst 443 ct status dnat accept
         iifname { "cloudbr1", "site-a", "site-hub", "site-c" } counter drop
         oifname { "cloudbr1", "site-a", "site-hub", "site-c" } counter drop
     }

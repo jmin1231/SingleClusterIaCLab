@@ -1,0 +1,47 @@
+- name: k3s config folder exists
+  ansible.builtin.file:
+    path: /etc/rancher/k3s
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: k3s has the config
+  ansible.builtin.copy:
+    dest: /etc/rancher/k3s/config.yaml
+    content: |
+      node-ip: {{ vpc_ip }}
+      disable:
+        - traefik
+    owner: root
+    group: root
+    mode: "0600"
+  notify: Restart k3s
+
+- name: k3s installer downloaded
+  ansible.builtin.get_url:
+    url: https://get.k3s.io
+    dest: /usr/local/bin/k3s-install.sh
+    mode: "0755"
+  environment:
+    HTTPS_PROXY: "{{ proxy_url }}"
+
+- name: k3s is installed
+  ansible.builtin.command:
+    cmd: /usr/local/bin/k3s-install.sh
+    creates: /usr/local/bin/k3s
+  environment:
+    HTTP_PROXY: "{{ proxy_url }}"
+    HTTPS_PROXY: "{{ proxy_url }}"
+    NO_PROXY: "{{ k3s_no_proxy }}"
+    INSTALL_K3S_VERSION: "{{ k3s_version }}"
+
+- name: k3s node is Ready
+  ansible.builtin.command: >-
+    k3s kubectl get node {{ inventory_hostname }}
+    -o jsonpath={.status.conditions[?(@.type=="Ready")].status}
+  register: k3s_node_ready
+  until: k3s_node_ready.stdout == "True"
+  retries: 30
+  delay: 10
+  changed_when: false

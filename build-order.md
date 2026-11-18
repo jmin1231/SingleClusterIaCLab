@@ -560,6 +560,7 @@ Done 2026-11-16 evening (Implemented, not yet run): `kvm.remove_lab_vms` before 
 |---|---|---|
 | Root-owned `.git` after commit_changes: Done 2026-11-17 (update e5cf4a0, no root-owned files in .git) (`git()` runs as SUDO_UID:SUDO_GID; `bootstrap.sh` refuses to start without SUDO_UID) | `gitea.py`, `bootstrap.sh` | `.git` stays the user's |
 | Optional `teardown` (VMs only, keep the platform): `teardown.yml` with `workflow_dispatch`, TMPDIR, `terraform init` + `destroy -auto-approve`; `dispatch(creds, workflow=GITEA_WORKFLOW)`; `cmd_teardown` = `follow_run(creds, dispatch(creds, "teardown.yml"))` | `.gitea/workflows/teardown.yml`, `gitea.py`, `src/__main__.py` | runner, tfstate |
+| Rename the mgmt bridge `cloudbr1` → `mgmtbr0` (anchor `mgmtbr0-anchor`, netplan `60-lab-mgmtbr0.yaml`). Do it between `destroy` (old code removes cloudbr1) and the fresh `up`, so no migration code is needed. Renaming on a live host would leave two bridges with 10.250.0.1 | `src/lib/config.py` BRIDGE, `src/host/config/config.py`, the netplan file, `network.py`, `nftables-vmfw.nft`, `terraform/compute.tf`, comments in `60-lab-ssh.conf`/`chrony-lab.conf`, docs | everything on mgmt |
 | The rehearsal itself | | |
 
 Acceptance: `sudo ./bootstrap.sh destroy`, then `virsh list --all` (libvirt is gone), `ls /var/lib/lab` (missing), and `nft list tables` (no lab tables). Then `sudo ./bootstrap.sh up` ends with a green run.

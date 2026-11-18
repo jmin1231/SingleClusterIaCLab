@@ -1,0 +1,43 @@
+# Ensure FluxCD is installed on be-1
+
+- name: Flux tarball is downloaded
+  ansible.builtin.get_url:
+    url: https://github.com/fluxcd/flux2/releases/download/v{{ flux_version }}/flux_{{ flux_version }}_linux_amd64.tar.gz
+    dest: /tmp/flux.tar.gz
+    mode: "0644"
+  environment:
+    HTTPS_PROXY: "{{ proxy_url }}"
+
+- name: Flux CLI is installed
+  ansible.builtin.unarchive:
+    src: /tmp/flux.tar.gz
+    dest: /usr/local/bin/
+    remote_src: true
+    creates: /usr/local/bin/flux
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Cluster passes Flux pre-check
+  ansible.builtin.command:
+    cmd: flux check --pre
+  environment:
+    KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
+  changed_when: false
+
+- name: Flux manifests are in the k3s manifests folder
+  ansible.builtin.shell:
+    cmd: >-
+      flux install --export
+      --components=source-controller,kustomize-controller
+      > /var/lib/rancher/k3s/server/manifests/flux.yaml
+    creates: /var/lib/rancher/k3s/server/manifests/flux.yaml
+
+- name: Flux controllers are Available
+  ansible.builtin.command:
+    cmd: k3s kubectl -n flux-system wait --for=condition=Available deployment --all --timeout=10s
+  register: flux_ready
+  until: flux_ready.rc == 0
+  retries: 30
+  delay: 10
+  changed_when: false

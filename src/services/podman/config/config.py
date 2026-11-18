@@ -5,7 +5,7 @@ from pathlib import Path
 FILES = Path(__file__).parents[1] / "files"
 
 # --- Packages ---
-PACKAGES = ["podman", "podman-netavark", "podman-aardvark-dns", "docker-compose-v2"]
+PACKAGES = ["podman", "podman-netavark", "podman-aardvark-dns", "docker-compose-v2", "uidmap"]
 # Pulled in from home:alvistack by podman 6; purged on destroy together with PACKAGES
 DEPENDENCIES = ["buildah", "skopeo", "conmon", "crun", "containers-common", "containers-storage",
                 "catatonit", "containernetworking", "containernetworking-plugins", "passt"]

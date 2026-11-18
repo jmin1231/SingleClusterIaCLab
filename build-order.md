@@ -614,9 +614,11 @@ runs `flux check --pre`, writes `flux install --export --components=source-contr
 `/var/lib/rancher/k3s/server/manifests/flux.yaml`, and waits for both Deployments. No `flux bootstrap` (it needs a
 write token and its push to Gitea would retrigger the pipeline).
 
+Item 3 Verified (`e1db038`): CRUD on `10.3.1.10:8000/items` from fe-1, pipeline waits for Flux to apply the commit.
+
 Item 2 Verified (commit `c7017af`): GitRepository `lab-repo` Ready (token from Vault, lab CA, be-1 → Gitea 443).
 
-**RESUME HERE: item 3, the app in `kubernetes/apps/`.** Kustomization `lab-apps` waits on it ("path not found" until then).
+**RESUME HERE: item 4, frontend image + Trivy (plan below).**
 - [x] `GITEA_FLUX_KV = "kv/data/lab/pipeline/gitea-flux"` in `gitea/config/config.py` (`lab-pipeline` can already read it)
 - [x] `flux_token(token, creds)` in `gitea.py`, called in `up()`: a labadmin token, scope `read:repository`, name
   `flux`, stored as `{username, token}`. Implemented, never run. Gotcha: if a run dies between the POST and the
@@ -635,7 +637,7 @@ Item 3 plan (layout A: separate Postgres and PostgREST pods, namespace `db`):
 - [x] `kubernetes/apps/db/init.sh` via configMapGenerator (kustomization.yaml) (database and schema `todo` since 2026-11-18, table `todo.items`, `web_anon` NOLOGIN with CRUD grants, `authenticator` LOGIN NOINHERIT with the password)
 - [x] `kubernetes/apps/db/postgres.yaml` (verified `9acb2ec`, authenticator → web_anon works): PVC (local-path), Deployment (Recreate, `envFrom` Secret `app-db`, init mounted at `/docker-entrypoint-initdb.d`), Service ClusterIP 5432
 - [x] `kubernetes/apps/db/postgrest.yaml` (verified `30e11b3`: CRUD from fe-1 via wg0, 5432 and 22 blocked): Deployment (`PGRST_DB_URI` with `$(AUTHENTICATOR_PASSWORD)`, schemas `todo`, anon role `web_anon`), Service LoadBalancer :8000
-- [ ] `fluxcd` role: wait until `lab-apps` lastAppliedRevision = `main@sha1:$GITHUB_SHA` (written, not yet run); from fe-1 `curl http://10.3.1.10:8000/items` (done `59c5f2a`)
+- [x] `fluxcd` role: wait until `lab-apps` lastAppliedRevision = `main@sha1:$GITHUB_SHA` (verified `e1db038`; livenessProbe dropped from PostgREST); from fe-1 `curl http://10.3.1.10:8000/items` (done `59c5f2a`)
 
 Item 4 plan (container build + Trivy, decided 2026-11-18: registry pull, IaC scan report-only):
 - [ ] Host: subuid/subgid range for `lab-runner` (`runner.py`) so rootless `podman build` works; Trivy pinned in `toolchain.py` (binary + sha256)

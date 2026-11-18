@@ -1,4 +1,4 @@
-"""Install the tools the pipeline jobs need: Terraform, Ansible with cloud.terraform, and Node."""
+"""Install the tools the pipeline jobs need: Terraform, Ansible with cloud.terraform, Node and Trivy."""
 
 import hashlib
 import io
@@ -99,17 +99,33 @@ def ensure_node() -> None:
     log.info("node %s installed at %s", config.NODE_VERSION, node)
 
 
+def ensure_trivy() -> None:
+    """Install the pinned trivy binary so pipeline jobs can scan images and IaC, unless present."""
+    trivy = config.BIN_DIR / "trivy"
+    if installed_version_ok([str(trivy), "--version"], config.TRIVY_VERSION):
+        log.info("trivy %s already installed", config.TRIVY_VERSION)
+        return
+
+    data = download(config.TRIVY_URL, config.TRIVY_SHA256)
+    with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as archive:
+        binary = archive.extractfile(config.TRIVY_MEMBER).read()
+    write_file(binary, trivy, 0o755)
+    log.info("trivy %s installed at %s", config.TRIVY_VERSION, trivy)
+
+
 def up() -> None:
-    """Install Terraform, Ansible with the cloud.terraform collection, and Node; a re-run changes nothing."""
+    """Install Terraform, Ansible with the cloud.terraform collection, Node and Trivy; a re-run changes nothing."""
     ensure_terraform()
     ensure_ansible()
     ensure_node()
+    ensure_trivy()
 
 
 def down() -> None:
     """Remove everything up() installed; safe to run twice."""
     (config.BIN_DIR / "terraform").unlink(missing_ok=True)
     (config.BIN_DIR / "node").unlink(missing_ok=True)
+    (config.BIN_DIR / "trivy").unlink(missing_ok=True)
     shutil.rmtree(config.COLLECTIONS_DIR / "ansible_collections" / "cloud", ignore_errors=True)
     apt_purge(config.ANSIBLE_PACKAGES)
     log.info("toolchain removed")

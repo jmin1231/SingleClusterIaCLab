@@ -19,7 +19,7 @@ log = logging.getLogger(__name__)
 
 
 def ensure_user() -> None:
-    """Create the lab-runner system user for libvirt and Terraform; a re-run changes nothing."""
+    """Create the lab-runner system user (libvirt group, subuid/subgid range for rootless podman); a re-run changes nothing."""
     try:
         pwd.getpwnam(config.USER)
         log.info("user %s already exists", config.USER)
@@ -33,6 +33,15 @@ def ensure_user() -> None:
         log.info("user %s created", config.USER)
 
     subprocess.run(["usermod", "-aG", "libvirt", config.USER], check=True)
+
+    if any(line.startswith(f"{config.USER}:") for line in config.SUBUID_FILE.read_text().splitlines()):
+        log.info("user %s already has a subuid range", config.USER)
+        return
+    subprocess.run(
+        ["usermod", "--add-subuids", config.SUBID_RANGE, "--add-subgids", config.SUBID_RANGE, config.USER],
+        check=True,
+    )
+    log.info("user %s got subuid/subgid range %s for rootless podman", config.USER, config.SUBID_RANGE)
 
 
 def ensure_binary() -> bool:

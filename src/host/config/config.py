@@ -46,6 +46,12 @@ NODE_URL = f"https://nodejs.org/dist/v{NODE_VERSION}/node-v{NODE_VERSION}-linux-
 NODE_SHA256 = "4f2b175a6d53a5c617a80dba2676238a0688cef28c6da4eba35c7d844e66fcfb"
 NODE_MEMBER = f"node-v{NODE_VERSION}-linux-x64/bin/node"  # the only file taken from the archive
 
+# --- Toolchain: Trivy ---
+TRIVY_VERSION = "0.76.2"
+TRIVY_URL = f"https://github.com/aquasecurity/trivy/releases/download/v{TRIVY_VERSION}/trivy_{TRIVY_VERSION}_Linux-64bit.tar.gz"
+TRIVY_SHA256 = "bc0fc726e017b8927a62b2d3531d7a84ee01769daf5c99ed866dced54089fdbf"
+TRIVY_MEMBER = "trivy"  # the only file taken from the archive
+
 # --- VM firewall (vmfw) ---
 # Preinstalled on Ubuntu; installed if missing, never purged
 VMFW_PACKAGES = ["nftables"]

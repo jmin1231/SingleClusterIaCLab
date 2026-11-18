@@ -13,11 +13,13 @@ BINARY = Path("/usr/local/bin/gitea-runner")
 # Host service
 USER = "lab-runner"
 UID = config.RUNNER_UID
+SUBID_RANGE = "200000-265535"  # rootless podman; must not overlap other users in /etc/subuid
+SUBUID_FILE = Path("/etc/subuid")
 HOME = Path("/var/lib/lab/runner")
 CONFIG_DIR = Path("/etc/lab-runner")
 CONFIG = CONFIG_DIR / "config.yaml"
 CA = CONFIG_DIR / "ca.pem"
-SSH_PUB = CONFIG_DIR / "ssh.pub"  # the VMs' authorized keys, one per line (pipeline, operator); Terraform reads it
+SSH_PUB = CONFIG_DIR / "ssh.pub"
 SSH_KV = "kv/data/lab/pipeline/ssh"
 SERVICE = "lab-runner"                                       # systemctl / journalctl name
 SERVICE_FILE = Path(f"/etc/systemd/system/{SERVICE}.service")  # installed systemd unit

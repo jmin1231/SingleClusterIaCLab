@@ -15,7 +15,9 @@ jobs:
         run: podman build -t localhost/frontend:${{ github.sha }} frontend/
 
       - name: Save it for the frontend role
-        run: podman save -o /var/lib/lab/images/frontend.tar localhost/frontend:${{ github.sha }}
+        run: |
+          rm -f /var/lib/lab/images/frontend.tar
+          podman save -o /var/lib/lab/images/frontend.tar localhost/frontend:${{ github.sha }}
 
       - name: Scan it (report only)
         run: |

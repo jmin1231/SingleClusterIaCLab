@@ -14,8 +14,8 @@
   roles: [ready, common, wireguard]
   become: true
 
-- name: be-1 runs k3s and Flux
+- name: be-1 runs k3s, Flux and the app database Secret
   hosts: backend
   gather_facts: false
-  roles: [k3s, fluxcd]
+  roles: [k3s, fluxcd, app_secrets]
   become: true

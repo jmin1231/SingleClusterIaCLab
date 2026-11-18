@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+import secrets
 import ssl
 import subprocess
 import sys
@@ -114,6 +115,22 @@ def ssh_key(token: str) -> None:
     log.info("stored a new SSH key pair in kv/lab/pipeline/ssh")
 
 
+def app_db_passwords(token: str) -> None:
+    """Store the app database's passwords at kv/lab/pipeline/app-db once; never replace them."""
+    path = "kv/data/lab/pipeline/app-db"
+
+    if vault_api("GET", path, token=token):
+        log.info("App database passwords already exist")
+        return
+
+    passwords = {
+        "postgres_password": secrets.token_urlsafe(24),
+        "authenticator_password": secrets.token_urlsafe(24),
+    }
+    vault_api("POST", path, {"data": passwords}, token=token)
+    log.info("stored new app database passwords in kv/lab/pipeline/app-db")
+
+
 def policy(token: str) -> None:
     """Upload every policies/*.hcl as the Vault policy named after the file; skip unchanged ones."""
     for file in sorted(config.VAULT_POLICY_DIR.glob("*.hcl")):
@@ -210,6 +227,7 @@ def up(certs_changed: bool) -> None:
     mount(token, "kv", {"type": "kv", "options": {"version": "2"}})
     policy(token)
     ssh_key(token)
+    app_db_passwords(token)
     log.info("Vault ready on %s", config.VAULT_ADDR)
 
 

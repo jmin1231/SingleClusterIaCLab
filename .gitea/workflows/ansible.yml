@@ -24,7 +24,9 @@ jobs:
           exportEnv: false
           secrets: |
             kv/data/lab/pipeline/ssh private_key | SSH_PRIVATE_KEY ;
-            kv/data/lab/pipeline/gitea-flux token | FLUX_GIT_TOKEN
+            kv/data/lab/pipeline/gitea-flux token | FLUX_GIT_TOKEN ;
+            kv/data/lab/pipeline/app-db postgres_password | APP_DB_POSTGRES_PASSWORD ;
+            kv/data/lab/pipeline/app-db authenticator_password | APP_DB_AUTHENTICATOR_PASSWORD
 
       - name: Load the key into ssh-agent
         uses: webfactory/ssh-agent@v0.10.0
@@ -38,4 +40,6 @@ jobs:
         working-directory: ansible
         env:
           FLUX_GIT_TOKEN: ${{ steps.vault.outputs.FLUX_GIT_TOKEN }}
+          APP_DB_POSTGRES_PASSWORD: ${{ steps.vault.outputs.APP_DB_POSTGRES_PASSWORD }}
+          APP_DB_AUTHENTICATOR_PASSWORD: ${{ steps.vault.outputs.APP_DB_AUTHENTICATOR_PASSWORD }}
         run: ansible-playbook site.yml

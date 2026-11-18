@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: app-db
+  namespace: db
+type: Opaque
+stringData:
+  POSTGRES_PASSWORD: {{ lookup('env', 'APP_DB_POSTGRES_PASSWORD') }}
+  AUTHENTICATOR_PASSWORD: {{ lookup('env', 'APP_DB_AUTHENTICATOR_PASSWORD') }}

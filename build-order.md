@@ -606,7 +606,7 @@ fe-1 only `10.3.1.10:8000` passes the hub.
 | 1 | Flux v2.10.0 controllers in k3s (`flux install --export`, images from ghcr.io via Squid) | `k8s/flux-system/` or the k3s manifests folder, applied by the k3s role | B08.6 |
 | 2 | Flux → Gitea: read-only token made by bootstrap, kept in Vault, delivered as a Secret with the lab CA; `GitRepository` + `Kustomization` for `kubernetes/apps/` | `gitea.py`, `ansible.yml` (vault-action), roles/k3s or roles/flux | vmfw be-1 → 443 |
 | 3 | App: PostgreSQL (ClusterIP only, init SQL: `items` table, `web_anon` role with CRUD grants), PostgREST (LoadBalancer :8000) | `kubernetes/apps/*.yaml` | hub filter tcp 8000 |
-| 4 | Frontend on fe-1: nginx TLS with `app-edge` (cert + key from Vault), `index.html` CRUD page, `/api/` → `http://10.3.1.10:8000/` | `ansible/roles/frontend/`, bootstrap stores app-edge in Vault kv | LAN :443 DNAT → fe-1 |
+| 4 | Frontend as a built, scanned container on fe-1 (decided 2026-11-18, replaces apt nginx): see item 4 plan below | `frontend/` (Dockerfile, index.html, nginx.conf), `.gitea/workflows/image.yml`, `ansible/roles/frontend/` | Gitea registry, vmfw fe-1 → 443, LAN :443 DNAT → fe-1 |
 | 5 | Acceptance: CRUD in a browser; from fe-1 `nc 10.3.1.10 5432` and `ssh 10.3.1.10` fail; tun-1 port-8000 counter rises | | |
 
 Status (2026-11-18): item 1 Verified (commit `a52a51d`, pipeline green): `ansible/roles/fluxcd` installs the CLI,
@@ -614,18 +614,28 @@ runs `flux check --pre`, writes `flux install --export --components=source-contr
 `/var/lib/rancher/k3s/server/manifests/flux.yaml`, and waits for both Deployments. No `flux bootstrap` (it needs a
 write token and its push to Gitea would retrigger the pipeline).
 
-**RESUME HERE: item 2, Flux → Gitea.**
+Item 2 Verified (commit `c7017af`): GitRepository `lab-repo` Ready (token from Vault, lab CA, be-1 → Gitea 443).
+
+**RESUME HERE: item 3, the app in `kubernetes/apps/`.** Kustomization `lab-apps` waits on it ("path not found" until then).
 - [x] `GITEA_FLUX_KV = "kv/data/lab/pipeline/gitea-flux"` in `gitea/config/config.py` (`lab-pipeline` can already read it)
 - [x] `flux_token(token, creds)` in `gitea.py`, called in `up()`: a labadmin token, scope `read:repository`, name
   `flux`, stored as `{username, token}`. Implemented, never run. Gotcha: if a run dies between the POST and the
   Vault write, the next POST fails (name taken): delete the `flux` token in Gitea and run again.
-- [ ] Run `sudo ./bootstrap.sh update`; check `vault kv get kv/lab/pipeline/gitea-flux` has both fields
-- [ ] `ansible.yml`: add `kv/data/lab/pipeline/gitea-flux token | FLUX_GIT_TOKEN` to the vault-action `secrets:`, and
+- [x] Run `sudo ./bootstrap.sh update`; check `vault kv get kv/lab/pipeline/gitea-flux` has both fields
+- [x] `ansible.yml`: add `kv/data/lab/pipeline/gitea-flux token | FLUX_GIT_TOKEN` to the vault-action `secrets:`, and
   pass `FLUX_GIT_TOKEN` as `env:` on the playbook step
-- [ ] `fluxcd` role: `copy` a Secret (username, password = token, `ca.crt` = lab CA) into the k3s manifests folder
+- [x] `fluxcd` role: `copy` a Secret (username, password = token, `ca.crt` = lab CA) into the k3s manifests folder
   with `no_log: true`, using `lookup('env', 'FLUX_GIT_TOKEN')`
-- [ ] `GitRepository` (`https://gitea.lab.test/lab/lab.git`, branch `main`) + `Kustomization` (`./kubernetes/apps`) in the
+- [x] `GitRepository` (`https://gitea.lab.test/lab/lab.git`, branch `main`) + `Kustomization` (`./kubernetes/apps`) in the
   same folder; check `k3s kubectl -n flux-system get gitrepository` is Ready (the pod must resolve and reach Gitea)
+
+Item 4 plan (container build + Trivy, decided 2026-11-18: registry pull, IaC scan report-only):
+- [ ] Host: subuid/subgid range for `lab-runner` (`runner.py`) so rootless `podman build` works; Trivy pinned in `toolchain.py` (binary + sha256)
+- [ ] Bootstrap: Gitea tokens in Vault: pipeline `write:package`, fe-1 `read:package` (same pattern as `flux_token()`)
+- [ ] `frontend/`: Dockerfile (pinned nginx base) + `index.html` (CRUD page) + `nginx.conf` (`/api/` → `http://10.3.1.10:8000/`)
+- [ ] `image.yml` (deploy.yml: check → image → terraform → ansible): `podman build` tag = commit SHA → `trivy image --exit-code 1 --severity CRITICAL --ignore-unfixed` (gate) → `trivy config .` (report only) → `podman push gitea.lab.test/lab/frontend:<sha>`
+- [ ] vmfw: fe-1 → 443 (Traefik/Gitea registry), like the be-1 rule
+- [ ] `frontend` role on fe-1: podman, lab CA in `/etc/containers/certs.d/gitea.lab.test/`, login with the read token, run `<sha>` as a systemd service (quadlet) on 443 with the `app-edge` cert from Vault
 
 ## B09 Later
 
@@ -635,7 +645,8 @@ write token and its push to Gitea would retrigger the pipeline).
 | B09.2 | Host SSH hardening | `src/host/sshd.py` + `files/sshd-lab.conf` drop-in (no passwords, no root), validate with `sshd -t`, reload | platform_up after network | Planned |
 | B09.3 | Host firewall (today every VM reaches anything listening on 10.250.0.1 or 0.0.0.0, e.g. sshd 22, rpcbind 111) | `files/nftables-host.nft` table `inet lab_host` (input drop. Allow lo, established, LAN ssh; cloudbr1 to 53, 123, 443, 3128, 8200; LAN to host_ip 53 if LAN clients should resolve app.lab.test, since CoreDNS binds HOST_IP too), loaded by `vmfw.up` or `hostfw.py` next to it | must not break the LAN :443 DNAT | Planned |
 | B09.4 | Monitoring | `src/services/monitoring/compose.yaml` (prometheus, node-exporter, grafana) behind Traefik. Add grafana/prometheus SANs and Corefile names back | traefik, pki | Planned |
-| B09.5 | Istio / mTLS / Transit for the app | Design-only for the review. k3s, Flux, DB and app moved to B08.6–B08.7 (2026-11-17) | B08.7 | Deferred |
+| B09.5 | Istio ambient for the app (after B08.7 acceptance, decided 2026-11-18) | Helm-rendered ambient install delivered by Flux (`profile=ambient`, `global.platform=k3s`: istio-base, istiod, istio-cni, ztunnel), namespace label `istio.io/dataplane-mode=ambient`, one L4 `AuthorizationPolicy` (only the postgrest service account → postgres:5432), PostgREST :8000 PERMISSIVE because fe-1 is outside the mesh. Transit stays deferred | B08.7 | Planned |
+| B09.5a | Vault Secrets Operator (with B09.5, decided 2026-11-18) | VSO Helm chart via Flux (same Helm setup as Istio), vmfw be-1 → 10.250.0.1:8200, `VaultConnection` with the lab CA, Vault Kubernetes auth (Vault → k3s API :6443, k3s `tls-san`, token reviewer) or JWT auth with k3s's static SA public key, policy `app-db.hcl` (read `kv/data/lab/pipeline/app-db`), `VaultStaticSecret` in git replaces `roles/app_secrets`. Pod manifests unchanged (they only name Secret `app-db`) | B08.7, B09.5 | Planned |
 | B09.6 | DR | Walkthrough only (unseal key loss, tfstate loss) | vault-init.json, tfstate | Deferred |
 
 ---

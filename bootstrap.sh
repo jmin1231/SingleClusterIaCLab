@@ -28,7 +28,7 @@ ensure_python() {
 
     log "python >= 3.12 not found. Installing ${PYTHON_PKG}"
 
-    apt-get -qq -o APT::Update::Error-Mode=any update
+    apt-get -qq -o DPkg::Lock::Timeout=120 -o APT::Update::Error-Mode=any update
     DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
         -o DPkg::Lock::Timeout=120 \
         -o Dpkg::Options::=--force-confdef \

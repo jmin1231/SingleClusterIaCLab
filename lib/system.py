@@ -34,7 +34,8 @@ def apt_install(packages: list[str]) -> bool:
     if not missing:
         return False
     log.info("installing %s", ", ".join(missing))
-    subprocess.run(["apt-get", "-qq", "update"], check=True, env=config.APT_ENV)
+    subprocess.run(["apt-get", "-qq", "-o", "DPkg::Lock::Timeout=120", "update"],
+                   check=True, env=config.APT_ENV)
     # No recommends: docker-compose-v2 would otherwise pull in docker.io and start a Docker daemon
     subprocess.run(["apt-get", "install", "-y", "-qq", "--no-install-recommends",
                     "-o", "DPkg::Lock::Timeout=120", *missing],

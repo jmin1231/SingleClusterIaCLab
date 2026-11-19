@@ -6,6 +6,9 @@ sections retain the development history; the call graph below is the current exe
 - Design baseline: plain KVM, Terraform (libvirt) and Ansible, run by Gitea Actions on one host
   runner. Target host: Ubuntu 24.04 Desktop, 4 cores, 16 GB.
 - Evidence baseline: Gitea run #8 at commit `dfa3aa9` (2026-11-16) passed check, terraform and ansible.
+- Repo layout flattened 2026-11-18 (`039ec21`, run #40 green): no `src/`; `lib/`, `host/` and each service
+  folder sit at the repo root, entry `python3 -B main.py`. The netplan file keeps its old `src/` comment
+  on purpose (any byte change triggers `netplan apply`); fix it with the mgmtbr1 rename.
 - Current code baseline: commit `4c2fd10` (2026-11-18 20:56). Monitoring steps 1–3 (host stack behind
   Traefik, Vault-backed Grafana login, Alloy on all three VMs) are verified on the running lab.
 - Recorded update runs do not prove a fresh build. The Flux/app Secret ordering issue below must be

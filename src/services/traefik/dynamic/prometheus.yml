@@ -1,0 +1,12 @@
+http:
+  routers:
+    prometheus:
+      rule: "Host(`prometheus.lab.test`)"
+      entryPoints: [websecure]
+      service: prometheus
+
+  services:
+    prometheus:
+      loadBalancer:
+        servers:
+          - url: "http://prometheus:9090"

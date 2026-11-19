@@ -34,7 +34,7 @@ LAB_CA_CERT = PKI_DIR / f"{LAB_CA}.pem"
 CERTS: dict[str, tuple[str, list[str], tuple[int, int]]] = {
     # name:     (profile,  hosts,                                            key owner (uid, gid))
     "vault":    ("server", ["vault.lab.test", str(VMNET.ip), "127.0.0.1"],  (100, 1000)),
-    "gateway":  ("server", ["gitea.lab.test", "grafana.lab.test"],           (0, 0)),
+    "gateway":  ("server", ["gitea.lab.test", "grafana.lab.test", "prometheus.lab.test", "loki.lab.test"], (0, 0)),
     "app-edge": ("server", ["app.lab.test"],                                 (0, 0)),
 }
 

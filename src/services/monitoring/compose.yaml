@@ -5,12 +5,11 @@ services:
     image: docker.io/prom/prometheus:v3.16.0@sha256:e04987641b57704f408e31f6373ba4138ecf27cb4a165d24aabb6c38fddd0f06
     container_name: prometheus
     restart: unless-stopped
-    network_mode: host
+    networks: [backend]
     command:
       - --config.file=/etc/prometheus/prometheus.yml
       - --storage.tsdb.path=/prometheus
       - --storage.tsdb.retention.time=2d
-      - --web.listen-address=10.250.0.1:9090
       - --web.enable-remote-write-receiver
     environment:
       CONF_HASH: ${PROMETHEUS_CONF_HASH:-}
@@ -23,7 +22,7 @@ services:
     image: docker.io/grafana/loki:3.7.10@sha256:b43c257ccfc925d4a50b8717cac61a3b51df8c48d01847936057e5c4075a24a7
     container_name: loki
     restart: unless-stopped
-    network_mode: host
+    networks: [backend]
     command: ["-config.file=/etc/loki/loki.yml"]
     environment:
       CONF_HASH: ${LOKI_CONF_HASH:-}
@@ -39,7 +38,9 @@ services:
     networks: [backend]
     environment:
       GF_SERVER_ROOT_URL: https://grafana.lab.test/
+      CONF_HASH: ${GRAFANA_CONF_HASH:-}
     volumes:
+      - ./files/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
       - grafana-data:/var/lib/grafana
     cap_drop: [ALL]
 
@@ -64,6 +65,7 @@ services:
       - /var/log/journal:/var/log/journal:ro
       - /run/udev/data:/run/udev/data:ro
       - /etc/machine-id:/etc/machine-id:ro
+      - ../../../state/pki/ca.pem:/etc/lab-ca.pem:ro
     cap_drop: [ALL]
 
 volumes:

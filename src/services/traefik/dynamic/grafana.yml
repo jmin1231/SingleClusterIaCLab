@@ -1,0 +1,12 @@
+http:
+  routers:
+    grafana:
+      rule: "Host(`grafana.lab.test`)"
+      entryPoints: [websecure]
+      service: grafana
+
+  services:
+    grafana:
+      loadBalancer:
+        servers:
+          - url: "http://grafana:3000"

@@ -2,6 +2,7 @@
 
 import hashlib
 import logging
+import ssl
 import sys
 import time
 import urllib.error
@@ -25,10 +26,11 @@ def conf_hash(folder: Path) -> str:
 
 def wait_ready() -> None:
     """Wait until Prometheus and Loki answer their ready URLs; stop with an error after about two minutes."""
+    ctx = ssl.create_default_context(cafile=lab_config.LAB_CA_CERT)
     for _ in range(config.READY_TRIES):
         try:
             for ready_url in config.READY_URLS:
-                urllib.request.urlopen(ready_url, timeout=5).close()
+                urllib.request.urlopen(ready_url, context=ctx, timeout=5).close()
             return
         except urllib.error.URLError:
             time.sleep(2)
@@ -41,7 +43,7 @@ def up() -> None:
     hashes = {name: conf_hash(folder) for name, folder in config.CONF_HASHES.items()}
     compose("monitoring", "up", "-d", env=hashes)
     wait_ready()
-    log.info("Monitoring receiving metrics on %s:9090 and logs on %s:3100", lab_config.VMNET.ip, lab_config.VMNET.ip)
+    log.info("Monitoring receiving metrics at https://prometheus.lab.test and logs at https://loki.lab.test")
 
 
 def down() -> None:

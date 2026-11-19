@@ -654,13 +654,13 @@ Item 4 plan (container build + Trivy; 2026-11-18: runner runs as root, image pat
 
 ## B09.4 Monitoring plan (decided 2026-11-18: an agent on every system pushes to the host stack; metrics, k3s, logs, alerts)
 
-**RESUME HERE: B09.4 step 2 (Grafana via Traefik).** Step 1 verified 2026-11-18 on the host: `up{instance="host",job="node"}`=1, node metrics in Prometheus, 53 journal units in Loki.
+**RESUME HERE: B09.4 step 2, run update and verify.** Done 2026-11-18: grafana.lab.test (SAN, Corefile, route) verified. Then decided: no IPs in URLs. Prometheus and Loki moved to lab-backend behind Traefik (prometheus.lab.test, loki.lab.test); agents push over HTTPS with the lab CA (VMs already trust it via cloud-init); Grafana data sources by container name. Left: Grafana admin password from Vault.
 
 ```
   every system runs one agent (Grafana Alloy)               host = aggregation only (compose, src/services/monitoring/)
   ┌ host  (Alloy container, host net) ─┐
-  ├ fe-1  (Alloy, systemd)             ├─ metrics: remote_write ─▶ Prometheus 10.250.0.1:9090 (remote-write receiver, rules)
-  ├ tun-1 (Alloy, systemd)             ├─ logs:    push         ─▶ Loki       10.250.0.1:3100
+  ├ fe-1  (Alloy, systemd)             ├─ metrics: remote_write ─▶ https://prometheus.lab.test ─ Traefik ─▶ Prometheus (lab-backend)
+  ├ tun-1 (Alloy, systemd)             ├─ logs:    push         ─▶ https://loki.lab.test       ─ Traefik ─▶ Loki (lab-backend)
   └ be-1  (Alloy, systemd) + k3s       ┘                            Grafana ── Traefik ── https://grafana.lab.test
 ```
 

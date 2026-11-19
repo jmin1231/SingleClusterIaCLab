@@ -11,10 +11,12 @@ CONF_HASHES = {
     "PROMETHEUS_CONF_HASH": FILES_DIR / "prometheus",
     "LOKI_CONF_HASH": FILES_DIR / "loki",
     "ALLOY_CONF_HASH": FILES_DIR / "alloy",
+    "GRAFANA_CONF_HASH": FILES_DIR / "grafana",
 }
 
+# through Traefik, like the agents reach them
 READY_URLS = [
-    f"http://{lab_config.VMNET.ip}:9090/-/ready",
-    f"http://{lab_config.VMNET.ip}:3100/ready",
+    "https://prometheus.lab.test/-/ready",
+    "https://loki.lab.test/ready",
 ]
 READY_TRIES = 60  # 2 s apart: about two minutes

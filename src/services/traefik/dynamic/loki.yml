@@ -1,0 +1,12 @@
+http:
+  routers:
+    loki:
+      rule: "Host(`loki.lab.test`)"
+      entryPoints: [websecure]
+      service: loki
+
+  services:
+    loki:
+      loadBalancer:
+        servers:
+          - url: "http://loki:3100"

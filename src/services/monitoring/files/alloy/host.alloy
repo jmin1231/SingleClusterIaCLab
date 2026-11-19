@@ -30,7 +30,11 @@ prometheus.scrape "node" {
 
 prometheus.remote_write "hub" {
   endpoint {
-    url = "http://10.250.0.1:9090/api/v1/write"
+    url = "https://prometheus.lab.test/api/v1/write"
+
+    tls_config {
+      ca_file = "/etc/lab-ca.pem"
+    }
   }
 }
 
@@ -70,6 +74,10 @@ loki.source.journal "host" {
 
 loki.write "hub" {
   endpoint {
-    url = "http://10.250.0.1:3100/loki/api/v1/push"
+    url = "https://loki.lab.test/loki/api/v1/push"
+
+    tls_config {
+      ca_file = "/etc/lab-ca.pem"
+    }
   }
 }

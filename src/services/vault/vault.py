@@ -83,17 +83,15 @@ def unseal(key: str, timeout: int = 30) -> None:
         log.error("Vault is still sealed after the unseal")
         sys.exit(1)
 
-    deadline = time.monotonic() + timeout
-    while True:
+    for _ in range(timeout):
         try:
             vault_api("GET", "sys/health")
-            break
+            log.info("Vault unsealed")
+            return
         except urllib.error.HTTPError:
-            if time.monotonic() > deadline:
-                log.error("Vault was unsealed but did not become active within %ds", timeout)
-                sys.exit(1)
             time.sleep(1)
-    log.info("Vault unsealed")
+    log.error("Vault was unsealed but did not become active within %ds", timeout)
+    sys.exit(1)
 
 
 def ssh_key(token: str) -> None:

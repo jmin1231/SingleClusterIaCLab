@@ -1,0 +1,75 @@
+// The host's agent: host metrics and the host journal, pushed to Prometheus and Loki on 10.250.0.1.
+
+// ---- metrics ----
+
+prometheus.exporter.unix "node" {
+  procfs_path = "/host/proc"
+  sysfs_path  = "/host/sys"
+  rootfs_path = "/host/root"
+}
+
+discovery.relabel "node" {
+  targets = prometheus.exporter.unix.node.targets
+
+  rule {
+    target_label = "instance"
+    replacement  = "host"
+  }
+
+  rule {
+    target_label = "job"
+    replacement  = "node"
+  }
+}
+
+prometheus.scrape "node" {
+  targets         = discovery.relabel.node.output
+  scrape_interval = "15s"
+  forward_to      = [prometheus.remote_write.hub.receiver]
+}
+
+prometheus.remote_write "hub" {
+  endpoint {
+    url = "http://10.250.0.1:9090/api/v1/write"
+  }
+}
+
+// ---- logs ----
+
+loki.relabel "journal" {
+  forward_to = []
+
+  rule {
+    source_labels = ["__journal__systemd_unit"]
+    regex         = "libpod-healthcheck-.*"
+    action        = "drop"
+  }
+
+  rule {
+    source_labels = ["__journal__systemd_unit"]
+    target_label  = "unit"
+  }
+
+  rule {
+    source_labels = ["__journal__systemd_unit"]
+    target_label  = "service_name"
+  }
+
+  rule {
+    source_labels = ["__journal_priority_keyword"]
+    target_label  = "level"
+  }
+}
+
+loki.source.journal "host" {
+  max_age       = "12h"
+  labels        = { instance = "host" }
+  relabel_rules = loki.relabel.journal.rules
+  forward_to    = [loki.write.hub.receiver]
+}
+
+loki.write "hub" {
+  endpoint {
+    url = "http://10.250.0.1:3100/loki/api/v1/push"
+  }
+}

@@ -44,6 +44,17 @@ def reattach_taps() -> None:
             log.info("reattached %s to %s", tap, lab_config.BRIDGE)
 
 
+def wait_bridge() -> None:
+    """Wait until the bridge has its address after netplan apply; exit 1 after BRIDGE_UP_TIMEOUT seconds."""
+    for _ in range(config.BRIDGE_UP_TIMEOUT):
+        if check():
+            return
+        time.sleep(1)
+    log.error("%s did not come up with %s within %ds of netplan apply",
+              lab_config.BRIDGE, lab_config.VMNET, config.BRIDGE_UP_TIMEOUT)
+    sys.exit(1)
+
+
 def up() -> None:
     """Install the lab's netplan file and create cloudbr1; a re-run changes nothing."""
     conflicts = vmnet_conflicts()  # ignores cloudbr1's own route, so a re-run passes
@@ -56,15 +67,7 @@ def up() -> None:
         log.info("%s is already up with %s", lab_config.BRIDGE, lab_config.VMNET)
         return
     subprocess.run(["netplan", "apply"], check=True)
-
-    # netplan apply returns once NetworkManager restarts; the address appears a moment later
-    deadline = time.monotonic() + config.BRIDGE_UP_TIMEOUT
-    while not check():
-        if time.monotonic() > deadline:
-            log.error("%s did not come up with %s within %ds of netplan apply",
-                      lab_config.BRIDGE, lab_config.VMNET, config.BRIDGE_UP_TIMEOUT)
-            sys.exit(1)
-        time.sleep(1)
+    wait_bridge()  # netplan apply returns once NetworkManager restarts; the address appears a moment later
     reattach_taps()
     log.info("%s is up with %s", lab_config.BRIDGE, lab_config.VMNET)
 

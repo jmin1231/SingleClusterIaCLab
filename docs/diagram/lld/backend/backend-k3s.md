@@ -1,97 +1,34 @@
 # Backend cluster
 
-Companion to [backend-k3s.drawio](backend-k3s.drawio).
-Updated 2026-11-18 from the current repository configuration, without a new
-live-cluster verification.
+What each box in `backend-k3s.drawio` is, in words.
 
-## Node and interfaces
+## be-1 and its networks
 
-be-1 is an Ubuntu 24.04 VM with **2 vCPUs, 4 GiB RAM, and a 40 GiB disk**.
-It runs a single k3s server with `node-ip: 10.3.1.10`. Bundled Traefik is disabled;
-the manifests use a LoadBalancer Service for PostgREST rather than an Ingress.
-The k3s default pod/service CIDRs (`10.42.0.0/16`, `10.43.0.0/16`) are not overridden.
+be-1 is an Ubuntu 24.04 KVM guest (2 vCPU, 4 GiB RAM, 40 GiB disk) created by Terraform
+(`terraform/compute.tf`). It runs single-node k3s `v1.37.2+k3s1` with `node-ip: 10.3.1.10`
+and the bundled Traefik disabled; ServiceLB stays on. Pods get addresses from
+`10.42.0.0/16`, services from `10.43.0.0/16` (k3s defaults, not set in the config). be-1
+has no nftables ruleset of its own: the hub filter on tun-1 and the host's `vmfw` decide
+what reaches it.
 
-| Interface | Address | Purpose |
+| Network | be-1 address | Used for |
 |---|---|---|
-| `eth0` | `10.3.1.10/24` | Private `site-c` address and frontend API destination |
-| `eth1` | `198.51.100.13/24` | WAN; default via `198.51.100.1`; WireGuard transport to hub `.12:51821` |
-| `eth2` | `10.250.0.112/24` | Host administration, DNS, Squid, and Git access |
-| `wg1` | `10.99.1.2/24` | Tunnel to tun-1; carries frontend/hub private prefixes |
+| site-c `10.3.1.0/24` (isolated libvirt network) | eth0 `10.3.1.10` | The "VPC" address. k3s uses it as node-ip, and frontend requests are addressed to `10.3.1.10:8000`. No other VM is on this network. |
+| wan `198.51.100.0/24` | eth1 `198.51.100.13` | The default route. Carries the WireGuard UDP to tun-1 `198.51.100.12:51821`. |
+| WireGuard wg1 `10.99.1.0/24` | `10.99.1.2` | Frontend requests from fe-1 (source `10.1.1.10`) arrive through tun-1. The tun-1 hub filter forwards only `10.1.1.10 → 10.3.1.10` tcp 8000 (new connections plus replies), so fe-1 cannot reach `:5432`, `:22` or `:6443`. |
+| mgmt `10.250.0.0/24` (cloudbr1) | eth2 `10.250.0.112` | Talking to the host at `10.250.0.1`. In: SSH 22 (Ansible). Out: Gitea via Traefik 443 (Flux; the host's `vmfw` lets only be-1 through on 443), Squid `proxy.lab.test:3128` (apt, k3s installer, Flux CLI, container images), and DNS 53. be-1 never talks to Vault. |
 
-The frontend sends from `10.1.1.10` to `10.3.1.10:8000`. The destination is the
-private node IP, not `10.99.1.2`. tun-1 allows this flow between its tunnels and
-blocks other new forwarded connections, including frontend access to 22 or 5432.
+## k3s namespaces
 
-## Kubernetes resources
+| Namespace | What it is |
+|---|---|
+| flux-system | Flux v2.10.0 (source and kustomize controllers). Pulls `kubernetes/apps` from Gitea (`https://gitea.lab.test/lab/lab.git`, branch `main`) and applies it. Ansible places Flux in the k3s manifests folder. |
+| kube-system | What k3s ships with: ServiceLB (opens `:8000` on the node for PostgREST's LoadBalancer Service), CoreDNS and the local-path volume provisioner. Only the bundled Traefik is disabled. |
+| app (ns `db`) | The app, applied by Flux from `kubernetes/apps/db`. |
 
-| Namespace | Resource | Behavior |
-|---|---|---|
-| `flux-system` | source-controller | Fetches GitRepository `lab-repo`, branch `main`, from Gitea over HTTPS |
-| `flux-system` | kustomize-controller | Reconciles Kustomization `lab-apps`, path `./kubernetes/apps`, with pruning and health checks |
-| `db` | Service `postgrest` | LoadBalancer TCP 8000 → named target `http`, container port 3000 |
-| `db` | Deployment `postgrest` | One PostgREST replica; HTTP 3000, admin 3001; readiness uses `/ready` on the admin port |
-| `db` | Service `postgres` | ClusterIP TCP 5432 → named target `postgres` |
-| `db` | Deployment `postgres` | One PostgreSQL replica, `Recreate` strategy; TCP readiness on `127.0.0.1:5432` |
-| `db` | PVC `postgres-data` | 1 GiB, ReadWriteOnce; no explicit storage class, so it uses the cluster default |
-| `db` | Generated ConfigMap `postgres-init-*` | Kustomize embeds `init.sh` and rewrites the Deployment's ConfigMap reference |
-| `db` | Secret `app-db` | Ansible-managed database passwords, outside the Flux-managed manifests |
+## App
 
-The node's k3s ServiceLB implements the LoadBalancer service. Its purpose here
-is frontend access at the private node IP, but the Service does not itself
-restrict exposure to `wg1`. Host/WAN isolation and the hub forwarding rule are
-separate from Kubernetes service publication; there is no dedicated be-1 guest
-input policy in this repository.
-
-## Database and application path
-
-```text
-10.3.1.10:8000
-  → Service/postgrest
-  → PostgREST pod :3000
-  → Service/postgres :5432
-  → PostgreSQL pod, database todo, schema todo, table items
-```
-
-PostgREST logs in as `authenticator` and uses `web_anon` for anonymous requests.
-The initialization script grants `web_anon` schema usage, CRUD on `todo.items`,
-and sequence usage. The table holds `id`, `name`, and `created_at`. No card-number
-encryption or Vault Transit call exists in this application.
-
-PostgreSQL mounts the PVC at `/var/lib/postgresql`; the PostgreSQL 18 image uses
-`/var/lib/postgresql/18/docker` as PGDATA. The initialization script is mounted
-under `/docker-entrypoint-initdb.d` and runs only for an empty data directory.
-Updating the ConfigMap does not migrate an existing database. The build uses a
-plain Deployment and PVC, not CloudNativePG or a `postgres-rw` Service.
-
-## Management and secrets
-
-- Flux fetches `https://gitea.lab.test/lab/lab.git` through host Traefik at
-  `10.250.0.1:443`. `flux-git-auth` contains its Git credentials and lab CA.
-- Ansible reaches be-1 at `10.250.0.112:22`, installs k3s and Flux, and writes
-  `Secret/db/app-db` into the k3s manifests directory. Passwords originate from
-  Vault KV through the host runner, not from a Kubernetes Vault client.
-- `POSTGRES_PASSWORD` and `AUTHENTICATOR_PASSWORD` are injected into PostgreSQL;
-  PostgREST receives only `AUTHENTICATOR_PASSWORD` and constructs its connection URI.
-- DNS goes to `10.250.0.1:53`; package and image egress uses Squid
-  `10.250.0.1:3128`. The host firewall currently permits the be-1 → Gitea HTTPS
-  DNAT path, not the Vault TCP 8200 DNAT path.
-
-The current Ansible order is `k3s → fluxcd → app_secrets`. The Flux role waits for
-the requested application revision before the Secret role runs. A fresh build
-can therefore wait on workloads whose Secret has not been created yet. This
-bootstrap ordering issue is not represented as a working dependency cycle in
-the diagram; the final application wait should follow Secret delivery.
-
-## Encryption and deferred components
-
-WireGuard protects each inter-VM tunnel. The application sends HTTP through the
-hub, with no inner TLS or mTLS. PostgreSQL TLS is not configured by these manifests.
-There is no Istio gateway/ambient mesh, CNPG operator, VSO, Alloy, kube-state-metrics,
-or node-exporter installed by this resource tree. Istio, VSO, and monitoring are
-future work in [build-order.md](../../../../build-order.md), not current paths.
-
-Sources: [k3s role](../../../../ansible/roles/k3s/),
-[Flux role](../../../../ansible/roles/fluxcd/),
-[database manifests](../../../../kubernetes/apps/db/),
-[Secret delivery](../../../../ansible/roles/app_secrets/), and
-[host firewall](../../../../src/host/files/nftables-vmfw.nft).
+| Part | What it does |
+|---|---|
+| PostgREST | REST API over table `todo.items`, reached at `10.3.1.10:8000` (Service type LoadBalancer). Logs in to Postgres as `authenticator` and switches to `web_anon` for anonymous CRUD. |
+| postgres | PostgreSQL 18 on `:5432`, inside the cluster only (ClusterIP). Database `todo`, data on a 1 GiB volume. Its passwords come from Secret `app-db`, which Ansible writes from Vault. |

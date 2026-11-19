@@ -1,128 +1,297 @@
-<?xml version='1.0' encoding='utf-8'?>
-<mxfile host="app.diagrams.net">
-  <diagram id="hld" name="Overall architecture">
-    <mxGraphModel dx="1600" dy="1510" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1600" pageHeight="1510" math="0" shadow="0">
-      <root>
-        <mxCell id="0" />
-        <mxCell id="1" parent="0" />
-        <mxCell id="title" value="&lt;b&gt;SingleClusterIaCLab — current build&lt;/b&gt;" style="text;html=1;whiteSpace=wrap;align=left;verticalAlign=middle;fontSize=26;fontColor=#334155;spacing=0;" vertex="1" parent="1">
-          <mxGeometry x="40" y="20" width="1520" height="42" as="geometry" />
-        </mxCell>
-        <mxCell id="subtitle" value="2026-11-18 · Configuration view · Frontend deployment and image workflow await end-to-end verification (build-order.md)." style="text;html=1;whiteSpace=wrap;align=left;verticalAlign=middle;fontSize=14;fontColor=#334155;spacing=0;" vertex="1" parent="1">
-          <mxGeometry x="40" y="67" width="1520" height="45" as="geometry" />
-        </mxCell>
-        <mxCell id="host" value="" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f8fafc;strokeColor=#64748b;fontColor=#0f172a;fontSize=15;strokeWidth=1.5;spacing=10;verticalAlign=top;align=left;spacingTop=10;fontStyle=1;" vertex="1" parent="1">
-          <mxGeometry x="30" y="260" width="1540" height="1070" as="geometry" />
-        </mxCell>
-        <mxCell id="host-title" value="&lt;b&gt;Ubuntu 24.04 host · KVM/libvirt · LAN interface detected at bootstrap&lt;/b&gt;" style="text;html=1;whiteSpace=wrap;align=left;verticalAlign=middle;fontSize=15;fontColor=#334155;spacing=0;" vertex="1" parent="1">
-          <mxGeometry x="400" y="275" width="740" height="30" as="geometry" />
-        </mxCell>
-        <mxCell id="browser" value="&lt;b&gt;LAN browser&lt;/b&gt;&lt;br&gt;https://app.lab.test" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff7ed;strokeColor=#ea580c;fontColor=#0f172a;fontSize=15;strokeWidth=1.5;spacing=10;" vertex="1" parent="1">
-          <mxGeometry x="70" y="140" width="260" height="80" as="geometry" />
-        </mxCell>
-        <mxCell id="admin" value="&lt;b&gt;Operator&lt;/b&gt;&lt;br&gt;Host SSH :22 / bootstrap" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff7ed;strokeColor=#ea580c;fontColor=#0f172a;fontSize=15;strokeWidth=1.5;spacing=10;" vertex="1" parent="1">
-          <mxGeometry x="700" y="140" width="330" height="80" as="geometry" />
-        </mxCell>
-        <mxCell id="internet" value="&lt;b&gt;Internet&lt;/b&gt;&lt;br&gt;Packages, images, GitHub" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff7ed;strokeColor=#ea580c;fontColor=#0f172a;fontSize=15;strokeWidth=1.5;spacing=10;" vertex="1" parent="1">
-          <mxGeometry x="1190" y="140" width="300" height="80" as="geometry" />
-        </mxCell>
-        <mxCell id="ingress" value="&lt;b&gt;Host LAN IP :443&lt;/b&gt;&lt;br&gt;nftables DNAT →&lt;br&gt;198.51.100.11:443" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff7ed;strokeColor=#ea580c;fontColor=#0f172a;fontSize=15;strokeWidth=1.5;spacing=10;" vertex="1" parent="1">
-          <mxGeometry x="70" y="320" width="260" height="100" as="geometry" />
-        </mxCell>
-        <mxCell id="dns" value="&lt;b&gt;CoreDNS :53&lt;/b&gt;&lt;br&gt;LAN IP + 10.250.0.1&lt;br&gt;app.lab.test → LAN IP" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ecfdf5;strokeColor=#059669;fontColor=#0f172a;fontSize=15;strokeWidth=1.5;spacing=10;" vertex="1" parent="1">
-          <mxGeometry x="400" y="320" width="230" height="100" as="geometry" />
-        </mxCell>
-        <mxCell id="runner" value="&lt;b&gt;gitea-runner · root&lt;/b&gt;&lt;br&gt;check → image → Terraform → Ansible&lt;br&gt;Podman build / Trivy reports" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ecfdf5;strokeColor=#059669;fontColor=#0f172a;fontSize=15;strokeWidth=1.5;spacing=10;" vertex="1" parent="1">
-          <mxGeometry x="700" y="320" width="330" height="100" as="geometry" />
-        </mxCell>
-        <mxCell id="squid" value="&lt;b&gt;Squid · 10.250.0.1:3128&lt;/b&gt;&lt;br&gt;VM egress allowlist&lt;br&gt;Host tools access internet directly" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ecfdf5;strokeColor=#059669;fontColor=#0f172a;fontSize=15;strokeWidth=1.5;spacing=10;" vertex="1" parent="1">
-          <mxGeometry x="1190" y="320" width="300" height="100" as="geometry" />
-        </mxCell>
-        <mxCell id="traefik" value="&lt;b&gt;Traefik&lt;/b&gt;&lt;br&gt;10.250.0.1:443 → :8443&lt;br&gt;gitea.lab.test" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ecfdf5;strokeColor=#059669;fontColor=#0f172a;fontSize=15;strokeWidth=1.5;spacing=10;" vertex="1" parent="1">
-          <mxGeometry x="400" y="480" width="230" height="95" as="geometry" />
-        </mxCell>
-        <mxCell id="gitea" value="&lt;b&gt;Gitea :3000&lt;/b&gt;&lt;br&gt;lab/lab Git repository&lt;br&gt;lab-backend Podman network" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ecfdf5;strokeColor=#059669;fontColor=#0f172a;fontSize=15;strokeWidth=1.5;spacing=10;" vertex="1" parent="1">
-          <mxGeometry x="700" y="480" width="330" height="95" as="geometry" />
-        </mxCell>
-        <mxCell id="vault" value="&lt;b&gt;Vault · 10.250.0.1:8200&lt;/b&gt;&lt;br&gt;KV: SSH, Git token, DB passwords,&lt;br&gt;frontend TLS certificate/key" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ecfdf5;strokeColor=#059669;fontColor=#0f172a;fontSize=15;strokeWidth=1.5;spacing=10;" vertex="1" parent="1">
-          <mxGeometry x="1190" y="480" width="300" height="95" as="geometry" />
-        </mxCell>
-        <mxCell id="lan-note" value="LAN card / HOST_IP discovered live. No cloudbr0 or CloudStack. cfssl issues the lab certificates." style="text;html=1;whiteSpace=wrap;align=left;verticalAlign=middle;fontSize=14;fontColor=#334155;spacing=0;" vertex="1" parent="1">
-          <mxGeometry x="400" y="595" width="1090" height="35" as="geometry" />
-        </mxCell>
-        <mxCell id="wan" value="&lt;b&gt;wan · 198.51.100.0/24 · host gateway 198.51.100.1&lt;/b&gt;&lt;br&gt;eth1 on every VM · WG transport: fe-1 → hub UDP 51820; be-1 → hub UDP 51821&lt;br&gt;Host nftables blocks other VM-to-VM WAN traffic and direct routed egress." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f1f5f9;strokeColor=#475569;fontColor=#0f172a;fontSize=15;strokeWidth=1.5;spacing=10;" vertex="1" parent="1">
-          <mxGeometry x="70" y="650" width="1420" height="105" as="geometry" />
-        </mxCell>
-        <mxCell id="fe" value="&lt;b&gt;fe-1 · frontend + VPN&lt;/b&gt;&lt;br&gt;1 vCPU · 1 GiB · 10 GiB disk&lt;br&gt;&lt;br&gt;eth0 10.1.1.10/24 · site-a&lt;br&gt;eth1 198.51.100.11/24 · wan&lt;br&gt;eth2 10.250.0.110/24 · mgmt&lt;br&gt;wg0 10.99.0.2/24&lt;br&gt;&lt;br&gt;Gunicorn TLS :443 + Flask&lt;br&gt;Podman / Quadlet · host network" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#eff6ff;strokeColor=#2563eb;fontColor=#0f172a;fontSize=15;strokeWidth=1.5;spacing=10;" vertex="1" parent="1">
-          <mxGeometry x="70" y="820" width="430" height="260" as="geometry" />
-        </mxCell>
-        <mxCell id="hub" value="&lt;b&gt;tun-1 · WireGuard hub&lt;/b&gt;&lt;br&gt;1 vCPU · 512 MiB · 10 GiB disk&lt;br&gt;&lt;br&gt;eth0 10.2.1.10/24 · site-hub&lt;br&gt;eth1 198.51.100.12/24 · wan&lt;br&gt;eth2 10.250.0.111/24 · mgmt&lt;br&gt;wg0 10.99.0.1/24 · wg1 10.99.1.1/24&lt;br&gt;&lt;br&gt;Forward only 10.1.1.10 →&lt;br&gt;10.3.1.10 TCP 8000 + replies" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#eff6ff;strokeColor=#2563eb;fontColor=#0f172a;fontSize=15;strokeWidth=1.5;spacing=10;" vertex="1" parent="1">
-          <mxGeometry x="585" y="820" width="430" height="260" as="geometry" />
-        </mxCell>
-        <mxCell id="be" value="&lt;b&gt;be-1 · k3s + VPN&lt;/b&gt;&lt;br&gt;2 vCPU · 4 GiB · 40 GiB disk&lt;br&gt;&lt;br&gt;eth0 10.3.1.10/24 · site-c&lt;br&gt;eth1 198.51.100.13/24 · wan&lt;br&gt;eth2 10.250.0.112/24 · mgmt&lt;br&gt;wg1 10.99.1.2/24&lt;br&gt;&lt;br&gt;Flux · PostgREST :8000&lt;br&gt;PostgreSQL ClusterIP :5432" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#eff6ff;strokeColor=#2563eb;fontColor=#0f172a;fontSize=15;strokeWidth=1.5;spacing=10;" vertex="1" parent="1">
-          <mxGeometry x="1100" y="820" width="390" height="260" as="geometry" />
-        </mxCell>
-        <mxCell id="private" value="Private bridges site-a / site-hub / site-c have no host IP or default gateway.&lt;br&gt;WG carries private /16 routes; application traffic uses 10.1.1.10 → 10.3.1.10." style="text;html=1;whiteSpace=wrap;align=left;verticalAlign=middle;fontSize=14;fontColor=#334155;spacing=0;" vertex="1" parent="1">
-          <mxGeometry x="40" y="1340" width="1520" height="50" as="geometry" />
-        </mxCell>
-        <mxCell id="mgmt" value="&lt;b&gt;cloudbr1 · 10.250.0.0/24 · host 10.250.0.1 · eth2 on every VM&lt;/b&gt;&lt;br&gt;Runner → VMs SSH :22 (configuration + frontend.tar); DNS :53; chrony :123; Squid :3128&lt;br&gt;be-1 → Traefik/Gitea :443 permitted; guest-to-guest management blocked. General host input allowlist remains future work." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f1f5f9;strokeColor=#475569;fontColor=#0f172a;fontSize=15;strokeWidth=1.5;spacing=10;" vertex="1" parent="1">
-          <mxGeometry x="70" y="1190" width="1420" height="100" as="geometry" />
-        </mxCell>
-        <mxCell id="legend" value="Solid arrows: selected traffic paths. Purple links: WireGuard overlay. Management attachments: dashed.&lt;br&gt;Future / absent from current build: Istio, VSO, monitoring, Vault Transit. Companion: overall-architecture.md." style="text;html=1;whiteSpace=wrap;align=left;verticalAlign=middle;fontSize=14;fontColor=#334155;spacing=0;" vertex="1" parent="1">
-          <mxGeometry x="40" y="1405" width="1520" height="70" as="geometry" />
-        </mxCell>
-        <mxCell id="browser-in" value="HTTPS" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=2;strokeColor=#ea580c;fontColor=#ea580c;fontSize=13;labelBackgroundColor=#ffffff;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="browser" target="ingress">
-          <mxGeometry relative="1" as="geometry" />
-        </mxCell>
-        <mxCell id="operator-host" value="SSH :22" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=2;strokeColor=#475569;fontColor=#475569;fontSize=13;labelBackgroundColor=#ffffff;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.54;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="admin" target="host">
-          <mxGeometry relative="1" as="geometry" />
-        </mxCell>
-        <mxCell id="squid-out" value="allowlisted egress" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=2;strokeColor=#475569;fontColor=#475569;fontSize=13;labelBackgroundColor=#ffffff;exitX=0.5;exitY=0;exitDx=0;exitDy=0;entryX=0.5;entryY=1;entryDx=0;entryDy=0;" edge="1" parent="1" source="squid" target="internet">
-          <mxGeometry relative="1" as="geometry" />
-        </mxCell>
-        <mxCell id="git-runner" value="checkout / jobs" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=2;strokeColor=#475569;fontColor=#475569;fontSize=13;labelBackgroundColor=#ffffff;exitX=0.5;exitY=0;exitDx=0;exitDy=0;entryX=0.5;entryY=1;entryDx=0;entryDy=0;" edge="1" parent="1" source="gitea" target="runner">
-          <mxGeometry relative="1" as="geometry" />
-        </mxCell>
-        <mxCell id="gateway-git" value="HTTP" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=2;strokeColor=#475569;fontColor=#475569;fontSize=13;labelBackgroundColor=#ffffff;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="traefik" target="gitea">
-          <mxGeometry relative="1" as="geometry" />
-        </mxCell>
-        <mxCell id="vault-runner" value="Vault KV / HTTPS" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=2;strokeColor=#475569;fontColor=#475569;fontSize=13;labelBackgroundColor=#ffffff;exitX=0.5;exitY=0;exitDx=0;exitDy=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="vault" target="runner">
-          <mxGeometry relative="1" as="geometry">
-            <Array as="points">
-              <mxPoint x="1340" y="450" />
-              <mxPoint x="1090" y="450" />
-              <mxPoint x="1090" y="370" />
-            </Array>
-          </mxGeometry>
-        </mxCell>
-        <mxCell id="ingress-wan" value="DNAT :443" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=2;strokeColor=#ea580c;fontColor=#ea580c;fontSize=13;labelBackgroundColor=#ffffff;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.09154929577464789;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="ingress" target="wan">
-          <mxGeometry relative="1" as="geometry" />
-        </mxCell>
-        <mxCell id="wan-fe" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=none;endFill=1;strokeWidth=2;strokeColor=#475569;fontColor=#475569;fontSize=13;labelBackgroundColor=#ffffff;exitX=0.1514;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="wan" target="fe">
-          <mxGeometry relative="1" as="geometry" />
-        </mxCell>
-        <mxCell id="mgmt-fe" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=none;endFill=1;strokeWidth=2;strokeColor=#475569;fontColor=#475569;fontSize=13;labelBackgroundColor=#ffffff;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.1514;entryY=0;entryDx=0;entryDy=0;dashed=1;" edge="1" parent="1" source="fe" target="mgmt">
-          <mxGeometry relative="1" as="geometry" />
-        </mxCell>
-        <mxCell id="wan-hub" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=none;endFill=1;strokeWidth=2;strokeColor=#475569;fontColor=#475569;fontSize=13;labelBackgroundColor=#ffffff;exitX=0.5141;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="wan" target="hub">
-          <mxGeometry relative="1" as="geometry" />
-        </mxCell>
-        <mxCell id="mgmt-hub" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=none;endFill=1;strokeWidth=2;strokeColor=#475569;fontColor=#475569;fontSize=13;labelBackgroundColor=#ffffff;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5141;entryY=0;entryDx=0;entryDy=0;dashed=1;" edge="1" parent="1" source="hub" target="mgmt">
-          <mxGeometry relative="1" as="geometry" />
-        </mxCell>
-        <mxCell id="wan-be" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=none;endFill=1;strokeWidth=2;strokeColor=#475569;fontColor=#475569;fontSize=13;labelBackgroundColor=#ffffff;exitX=0.8627;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="wan" target="be">
-          <mxGeometry relative="1" as="geometry" />
-        </mxCell>
-        <mxCell id="mgmt-be" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=none;endFill=1;strokeWidth=2;strokeColor=#475569;fontColor=#475569;fontSize=13;labelBackgroundColor=#ffffff;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.8627;entryY=0;entryDx=0;entryDy=0;dashed=1;" edge="1" parent="1" source="be" target="mgmt">
-          <mxGeometry relative="1" as="geometry" />
-        </mxCell>
-        <mxCell id="wg0" value="wg0" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=none;endFill=1;strokeWidth=2;strokeColor=#7c3aed;fontColor=#7c3aed;fontSize=13;labelBackgroundColor=#ffffff;exitX=1;exitY=0.35;exitDx=0;exitDy=0;entryX=0;entryY=0.35;entryDx=0;entryDy=0;" edge="1" parent="1" source="fe" target="hub">
-          <mxGeometry relative="1" as="geometry" />
-        </mxCell>
-        <mxCell id="wg1" value="wg1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=none;endFill=1;strokeWidth=2;strokeColor=#7c3aed;fontColor=#7c3aed;fontSize=13;labelBackgroundColor=#ffffff;exitX=1;exitY=0.35;exitDx=0;exitDy=0;entryX=0;entryY=0.35;entryDx=0;entryDy=0;" edge="1" parent="1" source="hub" target="be">
-          <mxGeometry relative="1" as="geometry" />
-        </mxCell>
-      </root>
-    </mxGraphModel>
-  </diagram>
+<mxfile host="65bd71144e">
+    <diagram id="hld" name="HLD">
+        <mxGraphModel dx="1850" dy="1077" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1700" pageHeight="1700" math="0" shadow="0">
+            <root>
+                <mxCell id="0" />
+                <mxCell id="1" parent="0" />
+                <mxCell id="hld-1" parent="1" style="rounded=0;whiteSpace=wrap;html=1;align=left;spacingLeft=10;fillColor=#ffffff;" value="&lt;b&gt;High-Level Infrastructure Architecture (HLD)&lt;/b&gt;&lt;br&gt;SingleClusterIaCLab · v0.2 · 2026-11-18 · Joosung Min" vertex="1">
+                    <mxGeometry height="70" width="460" x="40" y="20" as="geometry" />
+                </mxCell>
+                <mxCell id="hld-2" parent="1" style="shape=umlActor;verticalLabelPosition=bottom;verticalAlign=top;html=1;outlineConnect=0;" value="Admin" vertex="1">
+                    <mxGeometry height="60" width="30" x="600" y="90" as="geometry" />
+                </mxCell>
+                <mxCell id="hld-4" parent="1" style="ellipse;shape=cloud;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontColor=#333333;" value="Internet" vertex="1">
+                    <mxGeometry height="100" width="160" x="935" y="40" as="geometry" />
+                </mxCell>
+                <mxCell id="hld-5" parent="1" style="ellipse;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;" value="&lt;b&gt;LAN gateway&lt;/b&gt;" vertex="1">
+                    <mxGeometry height="60" width="130" x="950" y="180" as="geometry" />
+                </mxCell>
+                <mxCell id="hld-6" edge="1" parent="1" style="endArrow=none;html=1;strokeWidth=6;strokeColor=#333333;" value="">
+                    <mxGeometry relative="1" as="geometry">
+                        <mxPoint x="40" y="240" as="sourcePoint" />
+                        <mxPoint x="1660" y="240" as="targetPoint" />
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="hld-7" parent="1" style="text;html=1;align=left;verticalAlign=middle;whiteSpace=wrap;" value="LAN · &lt;i&gt;LAN_CIDR&lt;/i&gt;" vertex="1">
+                    <mxGeometry height="26" width="260" x="50" y="210" as="geometry" />
+                </mxCell>
+                <mxCell id="hld-8" edge="1" parent="1" source="hld-2" style="endArrow=classic;html=1;strokeWidth=1.5;" value="https://app.lab.test">
+                    <mxGeometry relative="1" as="geometry">
+                        <mxPoint x="615" y="240" as="targetPoint" />
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="hld-10" edge="1" parent="1" source="hld-5" style="endArrow=none;html=1;strokeWidth=1.5;" target="hld-4" value="">
+                    <mxGeometry relative="1" as="geometry" />
+                </mxCell>
+                <mxCell id="hld-11" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;verticalAlign=top;align=left;spacingLeft=8;spacingTop=4;container=1;collapsible=0;fillColor=#f8fbff;strokeWidth=2;fontStyle=0;" value="&lt;b&gt;Host&lt;/b&gt; · Ubuntu 24.04 + KVM" vertex="1">
+                    <mxGeometry height="1210" width="1620" x="40" y="290" as="geometry" />
+                </mxCell>
+                <mxCell id="hld-14" parent="hld-11" style="rounded=0;whiteSpace=wrap;html=1;dashed=1;fillColor=none;verticalAlign=top;align=left;spacingLeft=8;spacingTop=4;container=1;collapsible=0;" value="&lt;b&gt;Podman&lt;/b&gt; · 10.250.0.1" vertex="1">
+                    <mxGeometry height="330" width="1060" x="30" y="50" as="geometry" />
+                </mxCell>
+                <mxCell id="hld-15" parent="hld-14" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" value="&lt;b&gt;Traefik&lt;/b&gt;&lt;br&gt;:443" vertex="1">
+                    <mxGeometry height="100" width="140" x="20" y="100" as="geometry" />
+                </mxCell>
+                <mxCell id="hld-16" parent="hld-14" style="rounded=0;whiteSpace=wrap;html=1;dashed=1;fillColor=none;verticalAlign=top;align=left;spacingLeft=8;spacingTop=4;container=1;collapsible=0;fillColor=#ffffff;" value="behind Traefik" vertex="1">
+                    <mxGeometry height="230" width="300" x="190" y="40" as="geometry" />
+                </mxCell>
+                <mxCell id="hld-17" parent="hld-16" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" value="&lt;b&gt;Gitea&lt;/b&gt;" vertex="1">
+                    <mxGeometry height="80" width="260" x="20" y="40" as="geometry" />
+                </mxCell>
+                <mxCell id="hld-23" parent="hld-14" style="rounded=0;whiteSpace=wrap;html=1;dashed=1;fillColor=none;verticalAlign=top;align=left;spacingLeft=8;spacingTop=4;container=1;collapsible=0;fillColor=#ffffff;" value="direct" vertex="1">
+                    <mxGeometry height="230" width="520" x="520" y="40" as="geometry" />
+                </mxCell>
+                <mxCell id="hld-24" parent="hld-23" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" value="&lt;b&gt;Vault&lt;/b&gt;&lt;br&gt;:8200" vertex="1">
+                    <mxGeometry height="80" width="230" x="20" y="135" as="geometry" />
+                </mxCell>
+                <mxCell id="hld-25" parent="hld-23" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" value="&lt;b&gt;Squid&lt;/b&gt;&lt;br&gt;:3128" vertex="1">
+                    <mxGeometry height="80" width="230" x="270" y="40" as="geometry" />
+                </mxCell>
+                <mxCell id="hld-80" parent="hld-23" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" value="&lt;b&gt;CoreDNS&lt;/b&gt;&lt;br&gt;:53" vertex="1">
+                    <mxGeometry height="80" width="230" x="20" y="40" as="geometry" />
+                </mxCell>
+                <mxCell id="hld-28" parent="hld-11" style="rounded=0;whiteSpace=wrap;html=1;dashed=1;fillColor=none;verticalAlign=top;align=left;spacingLeft=8;spacingTop=4;container=1;collapsible=0;" value="&lt;b&gt;Host services&lt;/b&gt; · systemd" vertex="1">
+                    <mxGeometry height="330" width="470" x="1120" y="50" as="geometry" />
+                </mxCell>
+                <mxCell id="hld-29" parent="hld-28" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" value="&lt;b&gt;runner&lt;/b&gt;" vertex="1">
+                    <mxGeometry height="115" width="430" x="20" y="40" as="geometry" />
+                </mxCell>
+                <mxCell id="hld-38" parent="hld-28" style="ellipse;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;" value="&lt;b&gt;nftables&lt;/b&gt;&lt;br&gt;DNAT :443 → fe-1" vertex="1">
+                    <mxGeometry height="90" width="220" x="20" y="180" as="geometry" />
+                </mxCell>
+                <mxCell id="hld-89" parent="hld-28" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" value="&lt;b&gt;chrony&lt;/b&gt;" vertex="1">
+                    <mxGeometry height="60" width="190" x="260" y="185" as="geometry" />
+                </mxCell>
+                <mxCell id="hld-90" parent="hld-28" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" value="&lt;b&gt;PKI&lt;/b&gt;" vertex="1">
+                    <mxGeometry height="60" width="190" x="260" y="260" as="geometry" />
+                </mxCell>
+                <mxCell id="hld-30" parent="hld-11" style="rounded=0;whiteSpace=wrap;html=1;dashed=1;fillColor=none;verticalAlign=top;align=left;spacingLeft=8;spacingTop=4;container=1;collapsible=0;" value="&lt;b&gt;KVM&lt;/b&gt; · libvirt · built by Terraform" vertex="1">
+                    <mxGeometry height="750" width="1560" x="30" y="420" as="geometry" />
+                </mxCell>
+                <mxCell id="hld-31" parent="hld-30" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" value="&lt;b&gt;libvirt / QEMU&lt;/b&gt;" vertex="1">
+                    <mxGeometry height="80" width="460" x="30" y="40" as="geometry" />
+                </mxCell>
+                <mxCell id="hld-33" parent="hld-30" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" value="&lt;b&gt;Storage pool&lt;/b&gt;" vertex="1">
+                    <mxGeometry height="80" width="460" x="560" y="40" as="geometry" />
+                </mxCell>
+                <mxCell id="hld-37" parent="hld-30" style="rounded=0;whiteSpace=wrap;html=1;dashed=1;fillColor=none;verticalAlign=top;align=left;spacingLeft=8;spacingTop=4;container=1;collapsible=0;strokeWidth=2;" value="&lt;b&gt;VPC&lt;/b&gt;" vertex="1">
+                    <mxGeometry height="440" width="1500" x="30" y="280" as="geometry" />
+                </mxCell>
+                <mxCell id="hld-94" parent="hld-37" style="text;html=1;align=left;verticalAlign=middle;whiteSpace=wrap;" value="3 isolated networks" vertex="1">
+                    <mxGeometry height="40" width="250" x="350" y="5" as="geometry" />
+                </mxCell>
+                <mxCell id="hld-41" parent="hld-37" style="rounded=0;whiteSpace=wrap;html=1;dashed=1;fillColor=none;verticalAlign=top;align=left;spacingLeft=8;spacingTop=4;container=1;collapsible=0;fillColor=#fafafa;" value="&lt;b&gt;site-a&lt;/b&gt; · 10.1.1.0/24" vertex="1">
+                    <mxGeometry height="350" width="420" x="30" y="60" as="geometry" />
+                </mxCell>
+                <mxCell id="hld-47" parent="hld-41" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;verticalAlign=top;align=left;spacingLeft=8;spacingTop=4;" value="&lt;b&gt;fe-1&lt;/b&gt; · 10.1.1.10" vertex="1">
+                    <mxGeometry height="190" width="300" x="60" y="60" as="geometry" />
+                </mxCell>
+                <mxCell id="hld-83" parent="hld-47" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" value="&lt;b&gt;frontend&lt;/b&gt;" vertex="1">
+                    <mxGeometry height="105" width="270" x="15" y="70" as="geometry" />
+                </mxCell>
+                <mxCell id="hld-42" parent="hld-37" style="rounded=0;whiteSpace=wrap;html=1;dashed=1;fillColor=none;verticalAlign=top;align=left;spacingLeft=8;spacingTop=4;container=1;collapsible=0;fillColor=#fafafa;" value="&lt;b&gt;site-hub&lt;/b&gt; · 10.2.1.0/24" vertex="1">
+                    <mxGeometry height="350" width="420" x="490" y="60" as="geometry" />
+                </mxCell>
+                <mxCell id="hld-49" parent="hld-42" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;verticalAlign=top;align=left;spacingLeft=8;spacingTop=4;" value="&lt;b&gt;tun-1&lt;/b&gt; · 10.2.1.10" vertex="1">
+                    <mxGeometry height="190" width="300" x="60" y="60" as="geometry" />
+                </mxCell>
+                <mxCell id="hld-84" parent="hld-49" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" value="&lt;b&gt;WireGuard hub&lt;/b&gt;" vertex="1">
+                    <mxGeometry height="105" width="270" x="15" y="70" as="geometry" />
+                </mxCell>
+                <mxCell id="hld-43" parent="hld-37" style="rounded=0;whiteSpace=wrap;html=1;dashed=1;fillColor=none;verticalAlign=top;align=left;spacingLeft=8;spacingTop=4;container=1;collapsible=0;fillColor=#fafafa;" value="&lt;b&gt;site-c&lt;/b&gt; · 10.3.1.0/24" vertex="1">
+                    <mxGeometry height="350" width="420" x="950" y="60" as="geometry" />
+                </mxCell>
+                <mxCell id="hld-51" parent="hld-43" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;verticalAlign=top;align=left;spacingLeft=8;spacingTop=4;" value="&lt;b&gt;be-1&lt;/b&gt; · 10.3.1.10" vertex="1">
+                    <mxGeometry height="190" width="300" x="60" y="60" as="geometry" />
+                </mxCell>
+                <mxCell id="hld-53" parent="hld-51" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" value="&lt;b&gt;k3s&lt;/b&gt;&lt;br&gt;PostgREST · Postgres" vertex="1">
+                    <mxGeometry height="105" width="270" x="15" y="70" as="geometry" />
+                </mxCell>
+                <mxCell id="hld-12" edge="1" parent="1" style="endArrow=none;html=1;strokeWidth=1.5;" value="">
+                    <mxGeometry relative="1" as="geometry">
+                        <mxPoint x="200" y="240" as="sourcePoint" />
+                        <mxPoint x="200" y="290" as="targetPoint" />
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="hld-13" parent="1" style="text;html=1;align=left;verticalAlign=middle;whiteSpace=wrap;" value="&lt;i&gt;HOST_IP&lt;/i&gt;" vertex="1">
+                    <mxGeometry height="26" width="280" x="208" y="252" as="geometry" />
+                </mxCell>
+                <mxCell id="hld-26" edge="1" parent="1" source="hld-15" style="endArrow=classic;html=1;strokeWidth=1.5;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;labelBackgroundColor=#ffffff;" target="hld-16" value=":443">
+                    <mxGeometry relative="1" as="geometry" />
+                </mxCell>
+                <mxCell id="hld-27" edge="1" parent="1" source="hld-25" style="endArrow=classic;html=1;strokeWidth=1.5;exitX=0.602;exitY=0.012;exitDx=0;exitDy=0;entryX=0.85;entryY=1;entryDx=0;entryDy=0;labelBackgroundColor=#ffffff;exitPerimeter=0;" value="VM egress">
+                    <mxGeometry relative="1" as="geometry">
+                        <mxPoint x="1015.25" y="425.33" as="sourcePoint" />
+                        <mxPoint x="1019.74864862397" y="239.99576574931288" as="targetPoint" />
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="hld-34" edge="1" parent="1" style="endArrow=none;html=1;strokeWidth=6;strokeColor=#333333;" value="">
+                    <mxGeometry relative="1" as="geometry">
+                        <mxPoint x="90" y="880" as="sourcePoint" />
+                        <mxPoint x="1230" y="880" as="targetPoint" />
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="hld-35" parent="1" style="text;html=1;align=left;verticalAlign=middle;whiteSpace=wrap;" value="mgmt · cloudbr1 · 10.250.0.0/24" vertex="1">
+                    <mxGeometry height="26" width="480" x="100" y="850" as="geometry" />
+                </mxCell>
+                <mxCell id="hld-36" edge="1" parent="1" source="hld-14" style="endArrow=none;html=1;strokeWidth=1.5;exitX=0.5;exitY=1;exitDx=0;exitDy=0;labelBackgroundColor=#ffffff;" value="10.250.0.1">
+                    <mxGeometry relative="1" as="geometry" x="-0.8">
+                        <mxPoint x="600" y="880" as="targetPoint" />
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="hld-91" edge="1" parent="1" style="endArrow=none;html=1;strokeWidth=6;strokeColor=#333333;" value="">
+                    <mxGeometry relative="1" as="geometry">
+                        <mxPoint x="90" y="940" as="sourcePoint" />
+                        <mxPoint x="1610" y="940" as="targetPoint" />
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="hld-92" parent="1" style="text;html=1;align=left;verticalAlign=middle;whiteSpace=wrap;" value="wan · 198.51.100.0/24" vertex="1">
+                    <mxGeometry height="40" width="240" x="1370" y="946" as="geometry" />
+                </mxCell>
+                <mxCell id="hld-93" edge="1" parent="1" style="endArrow=classic;html=1;strokeWidth=1.5;exitX=0.5;exitY=1;exitDx=0;exitDy=0;labelBackgroundColor=#ffffff;" value="" source="hld-38">
+                    <mxGeometry relative="1" as="geometry" x="-0.5">
+                        <mxPoint x="1290" y="940" as="targetPoint" />
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="hld-39" edge="1" parent="1" source="hld-38" style="endArrow=none;html=1;strokeWidth=1.5;exitX=0.5;exitY=0;exitDx=0;exitDy=0;" value="">
+                    <mxGeometry relative="1" as="geometry">
+                        <Array as="points">
+                            <mxPoint x="1290" y="510" />
+                            <mxPoint x="1645" y="510" />
+                        </Array>
+                        <mxPoint x="1645" y="240" as="targetPoint" />
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="hld-40" parent="1" style="text;html=1;align=left;verticalAlign=middle;whiteSpace=wrap;" value="&lt;i&gt;HOST_IP&lt;/i&gt;:443 → fe-1" vertex="1">
+                    <mxGeometry height="40" width="310" x="1330" y="170" as="geometry" />
+                </mxCell>
+                <mxCell id="hld-48" edge="1" parent="1" source="hld-47" style="endArrow=none;html=1;strokeWidth=1.5;exitX=0.35;exitY=0;exitDx=0;exitDy=0;labelBackgroundColor=#ffffff;" value="">
+                    <mxGeometry relative="1" as="geometry" x="0.7">
+                        <mxPoint x="295" y="880" as="targetPoint" />
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="hld-85" edge="1" parent="1" style="endArrow=none;html=1;strokeWidth=1.5;exitX=0.8;exitY=0;exitDx=0;exitDy=0;labelBackgroundColor=#ffffff;" value="" source="hld-47">
+                    <mxGeometry relative="1" as="geometry">
+                        <mxPoint x="430" y="940" as="targetPoint" />
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="hld-50" edge="1" parent="1" source="hld-49" style="endArrow=none;html=1;strokeWidth=1.5;exitX=0.35;exitY=0;exitDx=0;exitDy=0;labelBackgroundColor=#ffffff;" value="">
+                    <mxGeometry relative="1" as="geometry" x="0.7">
+                        <mxPoint x="755" y="880" as="targetPoint" />
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="hld-86" edge="1" parent="1" style="endArrow=none;html=1;strokeWidth=1.5;exitX=0.8;exitY=0;exitDx=0;exitDy=0;labelBackgroundColor=#ffffff;" value="" source="hld-49">
+                    <mxGeometry relative="1" as="geometry">
+                        <mxPoint x="890" y="940" as="targetPoint" />
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="hld-52" edge="1" parent="1" source="hld-51" style="endArrow=none;html=1;strokeWidth=1.5;exitX=0.35;exitY=0;exitDx=0;exitDy=0;labelBackgroundColor=#ffffff;" value="">
+                    <mxGeometry relative="1" as="geometry" x="0.7">
+                        <mxPoint x="1215" y="880" as="targetPoint" />
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="hld-87" edge="1" parent="1" style="endArrow=none;html=1;strokeWidth=1.5;exitX=0.8;exitY=0;exitDx=0;exitDy=0;labelBackgroundColor=#ffffff;" value="" source="hld-51">
+                    <mxGeometry relative="1" as="geometry">
+                        <mxPoint x="1350" y="940" as="targetPoint" />
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="hld-54" edge="1" parent="1" source="hld-47" style="endArrow=none;html=1;dashed=1;dashPattern=1 3;strokeWidth=3;strokeColor=#9673a6;fontColor=#5b3d7a;exitX=1;exitY=0.5;entryX=0;entryY=0.5;labelBackgroundColor=#ffffff;" target="hld-49" value="wg0">
+                    <mxGeometry relative="1" as="geometry" />
+                </mxCell>
+                <mxCell id="hld-55" edge="1" parent="1" source="hld-49" style="endArrow=none;html=1;dashed=1;dashPattern=1 3;strokeWidth=3;strokeColor=#9673a6;fontColor=#5b3d7a;exitX=1;exitY=0.5;entryX=0;entryY=0.5;labelBackgroundColor=#ffffff;" target="hld-51" value="wg1">
+                    <mxGeometry relative="1" as="geometry" />
+                </mxCell>
+                <mxCell id="hld-56" edge="1" parent="1" source="hld-47" style="endArrow=none;html=1;dashed=1;strokeColor=#b85450;fontColor=#b85450;edgeStyle=orthogonalEdgeStyle;exitX=0.5;exitY=1;entryX=0.5;entryY=1;labelBackgroundColor=#ffffff;" target="hld-51" value="✗ fe-1 ↔ be-1">
+                    <mxGeometry relative="1" as="geometry">
+                        <Array as="points">
+                            <mxPoint x="340" y="1360" />
+                            <mxPoint x="1260" y="1360" />
+                        </Array>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="hld-57" parent="1" style="rounded=0;whiteSpace=wrap;html=1;dashed=1;fillColor=none;verticalAlign=top;align=left;spacingLeft=8;spacingTop=4;container=1;collapsible=0;dashed=0;fillColor=#ffffff;" value="&lt;b&gt;Legend&lt;/b&gt;" vertex="1">
+                    <mxGeometry height="110" width="1620" x="40" y="1530" as="geometry" />
+                </mxCell>
+                <mxCell id="hld-58" parent="hld-57" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" value="" vertex="1">
+                    <mxGeometry height="28" width="44" x="20" y="40" as="geometry" />
+                </mxCell>
+                <mxCell id="hld-59" parent="hld-57" style="text;html=1;align=left;verticalAlign=middle;whiteSpace=wrap;" value="service" vertex="1">
+                    <mxGeometry height="28" width="120" x="70" y="40" as="geometry" />
+                </mxCell>
+                <mxCell id="hld-60" parent="hld-57" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;verticalAlign=top;align=left;spacingLeft=8;spacingTop=4;" value="" vertex="1">
+                    <mxGeometry height="28" width="44" x="190" y="40" as="geometry" />
+                </mxCell>
+                <mxCell id="hld-61" parent="hld-57" style="text;html=1;align=left;verticalAlign=middle;whiteSpace=wrap;" value="machine / VM" vertex="1">
+                    <mxGeometry height="28" width="120" x="240" y="40" as="geometry" />
+                </mxCell>
+                <mxCell id="hld-62" parent="hld-57" style="rounded=0;whiteSpace=wrap;html=1;dashed=1;fillColor=none;verticalAlign=top;align=left;spacingLeft=8;spacingTop=4;collapsible=0;" value="" vertex="1">
+                    <mxGeometry height="28" width="44" x="360" y="40" as="geometry" />
+                </mxCell>
+                <mxCell id="hld-63" parent="hld-57" style="text;html=1;align=left;verticalAlign=middle;whiteSpace=wrap;" value="group · zone · subnet" vertex="1">
+                    <mxGeometry height="28" width="120" x="410" y="40" as="geometry" />
+                </mxCell>
+                <mxCell id="hld-64" parent="hld-57" style="ellipse;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;" value="" vertex="1">
+                    <mxGeometry height="28" width="44" x="530" y="40" as="geometry" />
+                </mxCell>
+                <mxCell id="hld-65" parent="hld-57" style="text;html=1;align=left;verticalAlign=middle;whiteSpace=wrap;" value="router" vertex="1">
+                    <mxGeometry height="28" width="120" x="580" y="40" as="geometry" />
+                </mxCell>
+                <mxCell id="hld-66" parent="hld-57" style="ellipse;shape=cloud;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontColor=#333333;" value="" vertex="1">
+                    <mxGeometry height="28" width="44" x="700" y="40" as="geometry" />
+                </mxCell>
+                <mxCell id="hld-67" parent="hld-57" style="text;html=1;align=left;verticalAlign=middle;whiteSpace=wrap;" value="external" vertex="1">
+                    <mxGeometry height="28" width="120" x="750" y="40" as="geometry" />
+                </mxCell>
+                <mxCell id="hld-69" parent="hld-57" style="text;html=1;align=left;verticalAlign=middle;whiteSpace=wrap;" value="network (CIDR)" vertex="1">
+                    <mxGeometry height="28" width="115" x="920" y="40" as="geometry" />
+                </mxCell>
+                <mxCell id="hld-71" parent="hld-57" style="text;html=1;align=left;verticalAlign=middle;whiteSpace=wrap;" value="WireGuard tunnel" vertex="1">
+                    <mxGeometry height="28" width="115" x="1090" y="40" as="geometry" />
+                </mxCell>
+                <mxCell id="hld-73" parent="hld-57" style="text;html=1;align=left;verticalAlign=middle;whiteSpace=wrap;" value="denied path" vertex="1">
+                    <mxGeometry height="28" width="115" x="1260" y="40" as="geometry" />
+                </mxCell>
+                <mxCell id="hld-74" parent="hld-57" style="text;html=1;align=left;verticalAlign=middle;whiteSpace=wrap;" value="&lt;i&gt;italic&lt;/i&gt; = detected at bootstrap" vertex="1">
+                    <mxGeometry height="28" width="230" x="1380" y="40" as="geometry" />
+                </mxCell>
+                <mxCell id="hld-68" edge="1" parent="1" style="endArrow=none;html=1;strokeWidth=6;strokeColor=#333333;" value="">
+                    <mxGeometry relative="1" as="geometry">
+                        <mxPoint x="910" y="1584" as="sourcePoint" />
+                        <mxPoint x="954" y="1584" as="targetPoint" />
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="hld-70" edge="1" parent="1" style="endArrow=none;html=1;dashed=1;dashPattern=1 3;strokeWidth=3;strokeColor=#9673a6;fontColor=#5b3d7a;" value="">
+                    <mxGeometry relative="1" as="geometry">
+                        <mxPoint x="1080" y="1584" as="sourcePoint" />
+                        <mxPoint x="1124" y="1584" as="targetPoint" />
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="hld-72" edge="1" parent="1" style="endArrow=none;html=1;dashed=1;strokeColor=#b85450;fontColor=#b85450;" value="">
+                    <mxGeometry relative="1" as="geometry">
+                        <mxPoint x="1250" y="1584" as="sourcePoint" />
+                        <mxPoint x="1294" y="1584" as="targetPoint" />
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="hld-95" parent="hld-57" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" value="" vertex="1">
+                    <mxGeometry height="28" width="44" x="20" y="74" as="geometry" />
+                </mxCell>
+                <mxCell id="hld-96" parent="hld-57" style="text;html=1;align=left;verticalAlign=middle;whiteSpace=wrap;" value="gateway / proxy" vertex="1">
+                    <mxGeometry height="28" width="120" x="70" y="74" as="geometry" />
+                </mxCell>
+                <mxCell id="hld-md" parent="1" style="text;html=1;align=left;verticalAlign=middle;whiteSpace=wrap;" value="Each part explained in words: &lt;b&gt;overall-architecture.md&lt;/b&gt; (same folder)" vertex="1">
+                    <mxGeometry height="30" width="600" x="40" y="1650" as="geometry" />
+                </mxCell>
+            </root>
+        </mxGraphModel>
+    </diagram>
 </mxfile>

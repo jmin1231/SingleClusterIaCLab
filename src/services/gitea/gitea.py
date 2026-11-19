@@ -224,15 +224,13 @@ def wait_for_run(creds: dict, sha: str) -> int:
     so the run with this commit and event is ours, whatever else runs meanwhile.
     """
     query = f"head_sha={sha}&event=push&branch=main&limit=1"
-    deadline = time.monotonic() + config.RUN_START_TIMEOUT
-    while True:
+    for _ in range(config.RUN_START_TIMEOUT // config.RUN_POLL_SECONDS):
         runs = gitea_api(creds, "GET", f"repos/{config.GITEA_ORG}/{config.GITEA_REPO}/actions/runs?{query}")
         if runs.get("workflow_runs"):
             return runs["workflow_runs"][0]["id"]
-        if time.monotonic() > deadline:
-            log.error("no run started for %s; does deploy.yml trigger on push to main?", sha[:7])
-            sys.exit(1)
         time.sleep(config.RUN_POLL_SECONDS)
+    log.error("no run started for %s; does deploy.yml trigger on push to main?", sha[:7])
+    sys.exit(1)
 
 
 def follow_run(creds: dict, run_id: int) -> None:

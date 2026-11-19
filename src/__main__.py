@@ -18,6 +18,7 @@ from src.services.traefik import traefik
 from src.services.vault import vault
 from src.services.gitea import gitea
 from src.services.gitea.runner import runner
+from src.services.monitoring import monitoring
 
 log = logging.getLogger(__name__)
 
@@ -40,6 +41,7 @@ def platform_up() -> None:
     vault.up(certs_changed)
     traefik.up(certs_changed)
     gitea.up()
+    monitoring.up()
     ssh_access.up()
     runner.up()
 
@@ -51,6 +53,7 @@ def platform_down() -> None:
     toolchain.down()
     kvm.down()
     vmfw.down()
+    monitoring.down()
     gitea.down()
     traefik.down()
     vault.down()

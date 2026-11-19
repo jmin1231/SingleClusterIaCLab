@@ -1,0 +1,77 @@
+name: lab-monitoring
+
+services:
+  prometheus:
+    image: docker.io/prom/prometheus:v3.16.0@sha256:e04987641b57704f408e31f6373ba4138ecf27cb4a165d24aabb6c38fddd0f06
+    container_name: prometheus
+    restart: unless-stopped
+    network_mode: host
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=2d
+      - --web.listen-address=10.250.0.1:9090
+      - --web.enable-remote-write-receiver
+    environment:
+      CONF_HASH: ${PROMETHEUS_CONF_HASH:-}
+    volumes:
+      - ./files/prometheus:/etc/prometheus:ro
+      - prometheus-data:/prometheus
+    cap_drop: [ALL]
+
+  loki:
+    image: docker.io/grafana/loki:3.7.10@sha256:b43c257ccfc925d4a50b8717cac61a3b51df8c48d01847936057e5c4075a24a7
+    container_name: loki
+    restart: unless-stopped
+    network_mode: host
+    command: ["-config.file=/etc/loki/loki.yml"]
+    environment:
+      CONF_HASH: ${LOKI_CONF_HASH:-}
+    volumes:
+      - ./files/loki:/etc/loki:ro
+      - loki-data:/loki
+    cap_drop: [ALL]
+
+  grafana:
+    image: docker.io/grafana/grafana:13.3.1@sha256:0615ec4fbd4072004b7d86b46ded63013a74b7d6eb1119273dd89e8fa25c13cf
+    container_name: grafana
+    restart: unless-stopped
+    networks: [backend]
+    environment:
+      GF_SERVER_ROOT_URL: https://grafana.lab.test/
+    volumes:
+      - grafana-data:/var/lib/grafana
+    cap_drop: [ALL]
+
+  alloy:
+    image: docker.io/grafana/alloy:v1.22.0@sha256:9acc2529bc1edb7f5b2bd801dd8334ebc80c158e3a9e5526ecd7c9a273d43189
+    container_name: alloy
+    restart: unless-stopped
+    network_mode: host
+    command:
+      - run
+      - --server.http.listen-addr=127.0.0.1:12345
+      - --storage.path=/data
+      - /etc/alloy/host.alloy
+    environment:
+      CONF_HASH: ${ALLOY_CONF_HASH:-}
+    volumes:
+      - ./files/alloy:/etc/alloy:ro
+      - alloy-data:/data
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/host/root:ro
+      - /var/log/journal:/var/log/journal:ro
+      - /run/udev/data:/run/udev/data:ro
+      - /etc/machine-id:/etc/machine-id:ro
+    cap_drop: [ALL]
+
+volumes:
+  prometheus-data:
+  loki-data:
+  grafana-data:
+  alloy-data:
+
+networks:
+  backend:
+    name: lab-backend

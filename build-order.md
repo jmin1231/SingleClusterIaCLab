@@ -654,7 +654,7 @@ Item 4 plan (container build + Trivy; 2026-11-18: runner runs as root, image pat
 
 ## B09.4 Monitoring plan (decided 2026-11-18: an agent on every system pushes to the host stack; metrics, k3s, logs, alerts)
 
-**RESUME HERE: B09.4 step 1, run `sudo ./bootstrap.sh update` and verify.** Code written 2026-11-18: compose.yaml, files/{prometheus,loki,alloy}, monitoring.py (conf_hash, wait_ready, up, down), wired after gitea.up() / before gitea.down(). Tested in throwaway containers (host metrics + journal arrive), not yet on the real host.
+**RESUME HERE: B09.4 step 2 (Grafana via Traefik).** Step 1 verified 2026-11-18 on the host: `up{instance="host",job="node"}`=1, node metrics in Prometheus, 53 journal units in Loki.
 
 ```
   every system runs one agent (Grafana Alloy)               host = aggregation only (compose, src/services/monitoring/)

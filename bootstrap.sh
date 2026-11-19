@@ -10,7 +10,7 @@ log() { printf '[+] %s\n' "$*"; }
 die() { printf '[x] %s\n' "$*" >&2; exit 1; }
 
 ensure_root() {
-    # SUDO_UID: git runs as this user so .git stays theirs (src/services/gitea/gitea.py git())
+    # SUDO_UID: git runs as this user so .git stays theirs (gitea/gitea.py git())
     if [[ "${EUID}" -ne 0 || -z "${SUDO_UID:-}" || "${SUDO_UID}" -eq 0 ]]; then
         die "run bootstrap.sh with sudo from your own account (not a root shell)"
     fi
@@ -47,7 +47,7 @@ main() {
     fi
     ensure_root
     ensure_python
-    exec "${PYTHON}" -B -m src "$@"
+    exec "${PYTHON}" -B main.py "$@"
 }
 
 main "$@"

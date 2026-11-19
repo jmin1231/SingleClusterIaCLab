@@ -49,8 +49,8 @@ Optional teardown (B08.5) is not a prerequisite for any phase.
 
 ```
 sudo ./bootstrap.sh <cmd>
-  bootstrap.sh main: ensure_root, ensure_python, exec python3 -B -m src <cmd>
-    src/__main__.py main: parse_args, setup_logging, flock state/run.lock, COMMANDS[cmd]
+  bootstrap.sh main: ensure_root, ensure_python, exec python3 -B main.py <cmd>
+    main.py main: parse_args, setup_logging, flock state/run.lock, COMMANDS[cmd]
 
 cmd_up                                       cmd_update
   state/initialized exists? info, return       state/initialized missing? error, exit 1
@@ -159,13 +159,13 @@ Files: `bootstrap.sh`, `.gitignore` (`/state/`, `__pycache__/`, `*.tfstate*`, `t
 | `ensure_root()` | Require sudo from a non-root operator account | main | EUID, SUDO_UID |
 | `check_python_version()` | Return 0 if python3 is 3.12 or newer | ensure_python | python3 |
 | `ensure_python()` | Check Python >= 3.12; try apt installation if missing/old, then check again | main | apt fallback; normally unused on 24.04 |
-| `main "$@"` | cd to the repo, then exec `python3 -B -m src "$@"` | script end / ensure_root, ensure_python | `src/__main__.py` |
+| `main "$@"` | cd to the repo, then exec `python3 -B main.py "$@"` | script end / ensure_root, ensure_python | `main.py` |
 
 Acceptance: `sudo ./bootstrap.sh` prints help and exits 1.
 Status: Verified (run #8 was started through it).
 
 ### B01.2 Logging
-Files: `src/__init__.py`, `src/lib/__init__.py`, `src/lib/log.py`
+Files: `lib/__init__.py`, `lib/log.py`
 
 | Function | Purpose | Called by / calls | Touches |
 |---|---|---|---|
@@ -177,7 +177,7 @@ Acceptance: a failing step prints one `[x]` line. The traceback appears only in 
 Status: Verified.
 
 ### B01.3 Shared settings and helpers
-Files: `src/lib/config.py`, `src/lib/system.py`. Every package directory under `src/` has an empty `__init__.py`.
+Files: `lib/config.py`, `lib/system.py`. Every Python folder (`lib/`, `host/` and each service folder) has an empty `__init__.py`; `main.py` runs from the repo root, so they import as top-level packages.
 
 `config.py` holds: paths (BASE_DIR, STATE_DIR, LAB_DIR, SERVICES_DIR), the bridge (BRIDGE, VMNET), apt and Compose (APT_ENV, COMPOSE = `/usr/libexec/docker/cli-plugins/docker-compose`, DOCKER_HOST), PKI (CFSSL_DIR, PKI_DIR, LAB_CA, LAB_CA_CERT, CERTS), Vault (VAULT_PORT, VAULT_ADDR, VAULT_INIT_FILE, VAULT_POLICY_DIR, VAULT_APPROLE_FILE), LAB_ADMIN (shared by Gitea and Grafana credential creation).
 
@@ -190,13 +190,13 @@ Files: `src/lib/config.py`, `src/lib/system.py`. Every package directory under `
 | `systemctl_ok(verb, unit) -> bool` | `systemctl <verb> --quiet` exit 0 | kvm, ntp, podman, runner | systemd |
 | `write_file(content, dst, mode) -> bool` | Write only if different | install_file, toolchain, runner | dst |
 | `install_file(src, dst, mode) -> bool` | Copy a repo file to the host if different | network, ntp, podman, runner / write_file | dst |
-| `compose(service, *args, env=None) -> None` | docker-compose on `src/services/<service>/compose.yaml` over the Podman socket | dns, squid, vault, traefik, gitea, monitoring | `/run/podman/podman.sock` |
+| `compose(service, *args, env=None) -> None` | docker-compose on `<service>/compose.yaml` over the Podman socket | dns, squid, vault, traefik, gitea, monitoring | `/run/podman/podman.sock` |
 
-Acceptance: `python3 -c "import src.lib.system"` imports cleanly.
+Acceptance: `python3 -c "import lib.system"` (from the repo root) imports cleanly.
 Status: Verified.
 
 ### B01.4 Command skeleton
-Files: `src/__main__.py`
+Files: `main.py`
 
 | Function | Purpose | Called by / calls | Touches |
 |---|---|---|---|
@@ -215,7 +215,7 @@ kvm.down; the complete current destroy/fresh-up path still needs the B08.5 rehea
 ## B02 Host steps
 
 ### B02.1 Preflight
-Files: `src/host/__init__.py`, `src/host/preflight.py`
+Files: `host/__init__.py`, `host/preflight.py`
 
 | Function | Purpose | Called by / calls | Touches |
 |---|---|---|---|
@@ -227,7 +227,7 @@ Files: `src/host/__init__.py`, `src/host/preflight.py`
 Acceptance: the log shows the LAN card, address and gateway. Status: Verified.
 
 ### B02.2 Management bridge
-Files: `src/host/network.py`, `src/host/config/{__init__,config}.py`, `src/host/files/60-lab-cloudbr1.yaml`
+Files: `host/network.py`, `host/config/{__init__,config}.py`, `host/files/60-lab-cloudbr1.yaml`
 
 | Function | Purpose | Called by / calls | Touches |
 |---|---|---|---|
@@ -241,7 +241,7 @@ Files: `src/host/network.py`, `src/host/config/{__init__,config}.py`, `src/host/
 Acceptance: `ip -4 addr show cloudbr1` shows 10.250.0.1/24. Status: Verified.
 
 ### B02.3 Time
-Files: `src/host/ntp.py`, `src/host/files/chrony-lab.conf`
+Files: `host/ntp.py`, `host/files/chrony-lab.conf`
 
 | Function | Purpose | Called by / calls | Touches |
 |---|---|---|---|
@@ -251,7 +251,7 @@ Files: `src/host/ntp.py`, `src/host/files/chrony-lab.conf`
 Acceptance: `chronyc sources` works and port 123 is bound on 10.250.0.1. Status: Verified.
 
 ### B02.4 Container runtime
-Files: `src/services/podman/{podman.py,config/config.py,files/lab-alvistack.list,files/lab-alvistack.pref}`
+Files: `podman/{podman.py,config/config.py,files/lab-alvistack.list,files/lab-alvistack.pref}`
 
 | Function | Purpose | Called by / calls | Touches |
 |---|---|---|---|
@@ -264,7 +264,7 @@ Files: `src/services/podman/{podman.py,config/config.py,files/lab-alvistack.list
 Acceptance: `podman --version` reports 6.x, and `DOCKER_HOST=unix:///run/podman/podman.sock /usr/libexec/docker/cli-plugins/docker-compose version` answers. Status: up Verified; down ran once on 2026-11-14.
 
 ### B02.5 Virtualization
-Files: `src/host/kvm.py`
+Files: `host/kvm.py`
 
 | Function | Purpose | Called by / calls | Touches |
 |---|---|---|---|
@@ -272,12 +272,12 @@ Files: `src/host/kvm.py`
 | `remove_lab_vms() -> None` | `virsh destroy`/`undefine` LAB_DOMAINS, `net-destroy`/`net-undefine` LAB_NETWORKS, `pool-destroy`/`pool-undefine` LAB_POOL; missing ones are skipped | down | qemu:///system |
 | `down() -> None` | remove_lab_vms (if virsh exists), then purge KVM packages. The disk files go with `/var/lib/lab` in cmd_destroy | platform_down | |
 
-LAB_DOMAINS, LAB_NETWORKS and LAB_POOL in `src/host/config/config.py` must match the names in
+LAB_DOMAINS, LAB_NETWORKS and LAB_POOL in `host/config/config.py` must match the names in
 `terraform/compute.tf`, `network.tf` and `storage.tf`.
 Acceptance: `virsh -c qemu:///system list --all` answers. Status: up Verified; down Implemented (never run).
 
 ### B02.6 VM firewall
-Files: `src/host/vmfw.py`, `src/host/files/nftables-vmfw.nft`
+Files: `host/vmfw.py`, `host/files/nftables-vmfw.nft`
 
 | Function | Purpose | Called by / calls | Touches |
 |---|---|---|---|
@@ -293,7 +293,7 @@ Acceptance: `nft list tables` shows both tables, and the marker exists. `up()` f
 Status: Verified, including the three-VM Traefik exception (2026-11-18: fe-1 and tun-1 Alloy push through Traefik). Down never run.
 
 ### B02.7 Toolchain for the runner
-Files: `src/host/toolchain.py`
+Files: `host/toolchain.py`
 
 | Function | Purpose | Called by / calls | Touches |
 |---|---|---|---|
@@ -314,7 +314,7 @@ Status: up Verified; down never run.
 ## B03 Host services
 
 ### B03.1 DNS
-Files: `src/services/coredns/{dns.py,compose.yaml,conf/Corefile}`
+Files: `coredns/{dns.py,compose.yaml,conf/Corefile}`
 
 | Function | Purpose | Called by / calls | Touches |
 |---|---|---|---|
@@ -326,7 +326,7 @@ app.lab.test points to {$HOST_IP}, k3s.lab.test to 10.250.0.112.
 Acceptance: `resolvectl query gitea.lab.test` returns 10.250.0.1. Status: Verified.
 
 ### B03.2 Certificates
-Files: `src/lib/pki.py`, `src/cfssl/ca-csr.json`, `src/cfssl/ca-config.json` (profile `server` only) (CERTS table in `src/lib/config.py`)
+Files: `lib/pki.py`, `lib/cfssl/ca-csr.json`, `lib/cfssl/ca-config.json` (profile `server` only) (CERTS table in `lib/config.py`)
 
 | Function | Purpose | Called by / calls | Touches |
 |---|---|---|---|
@@ -341,7 +341,7 @@ certificate/key before update, keeping the CA. New issuance makes Traefik reload
 Status: Verified. Gateway reissued 2026-11-18 with all four names (old leaf deleted by hand before update).
 
 ### B03.3 Vault
-Files: `src/services/vault/{vault.py,compose.yaml,vault.hcl,policies/lab-bootstrap.hcl,policies/lab-pipeline.hcl}`
+Files: `vault/{vault.py,compose.yaml,vault.hcl,policies/lab-bootstrap.hcl,policies/lab-pipeline.hcl}`
 
 Write the functions in this order:
 
@@ -367,7 +367,7 @@ Acceptance: `curl --cacert state/pki/ca.pem https://vault.lab.test:8200/v1/sys/h
 Status: Verified.
 
 ### B03.4 Gateway
-Files: `src/services/traefik/{traefik.py,compose.yaml,dynamic/}` (TLS plus gitea, grafana, prometheus and loki routes).
+Files: `traefik/{traefik.py,compose.yaml,dynamic/}` (TLS plus gitea, grafana, prometheus and loki routes).
 
 | Function | Purpose | Called by / calls | Touches |
 |---|---|---|---|
@@ -385,7 +385,7 @@ on 10.250.0.1:8200; app.lab.test reaches fe-1 through DNAT, outside this Traefik
 ## B04 Gitea and runner
 
 ### B04.1 Gitea service and seeding
-Files: `src/services/gitea/{gitea.py,compose.yaml,config/config.py}`
+Files: `gitea/{gitea.py,compose.yaml,config/config.py}`
 
 | Function | Purpose | Called by / calls | Touches |
 |---|---|---|---|
@@ -402,7 +402,7 @@ Files: `src/services/gitea/{gitea.py,compose.yaml,config/config.py}`
 Acceptance: `lab/lab` exists, and its Actions secrets list both VAULT_* names. Status: Verified.
 
 ### B04.2 Host runner
-Files: `src/services/gitea/runner/{runner.py,config/config.py,files/config.yaml,files/lab-runner.service}`
+Files: `gitea/runner/{runner.py,config/config.py,files/config.yaml,files/lab-runner.service}`
 
 | Function | Purpose | Called by / calls | Touches |
 |---|---|---|---|
@@ -422,7 +422,7 @@ Acceptance: `systemctl is-active lab-runner` is active, and Gitea shows runner `
 ## B05 up/update and the pipeline skeleton
 
 ### B05.1 Git and run helpers
-Files: `src/services/gitea/gitea.py` (same file as B04.1), `src/services/gitea/config/config.py` (RUN_*, COMMIT_IDENTITY)
+Files: `gitea/gitea.py` (same file as B04.1), `gitea/config/config.py` (RUN_*, COMMIT_IDENTITY)
 
 | Function | Purpose | Called by / calls | Touches |
 |---|---|---|---|
@@ -440,7 +440,7 @@ Status: push/update helpers have recorded successful runs; dispatch passed run #
 updates. The initial push through the current `cmd_up` still needs the fresh-build rehearsal.
 
 ### B05.2 Commands
-Files: `src/__main__.py`
+Files: `main.py`
 
 | Function | Purpose | Called by / calls | Touches |
 |---|---|---|---|
@@ -527,7 +527,7 @@ This is an outstanding code fix, not the current playbook order.
 The VMs have no internet: wan is route mode, and vmfw drops wan egress. All package installs go
 through Squid.
 
-Proposed files: `src/services/squid/{__init__.py,squid.py,compose.yaml,conf/squid.conf}`
+Proposed files: `squid/{__init__.py,squid.py,compose.yaml,conf/squid.conf}`
 
 | Function / item | Purpose | Called by / calls | Touches |
 |---|---|---|---|
@@ -539,7 +539,7 @@ Proposed files: `src/services/squid/{__init__.py,squid.py,compose.yaml,conf/squi
 
 Acceptance: on fe-1, `curl -x http://proxy.lab.test:3128 -I http://archive.ubuntu.com` returns 200, and `curl -I https://example.com` fails without the proxy.
 
-Implemented and verified 2026-11-17 (run #12): `src/services/squid/` (image `ubuntu/squid:7.2-26.04_edge` digest-pinned, contains
+Implemented and verified 2026-11-17 (run #12): `squid/` (image `ubuntu/squid:7.2-26.04_edge` digest-pinned, contains
 squid 7.7-0ubuntu0.26.04.2 (checked in /usr/share/rocks/dpkg.query); a Rockcraft image: runs as `_daemon_` UID 584792,
 binary `squid-gnutls`, so the entrypoint runs it directly, `cap_drop: ALL` with no additions, `pid_filename none`; own
 config path `/etc/squid-lab`, FTP denied for CVE-2026-47729, file access log at `/var/log/squid/access.log` in the
@@ -555,8 +555,8 @@ Verified: from be-1 get.k3s.io 200, Docker Hub and ghcr.io 401 (reached); from f
 Production answer: a pull-through registry mirror, or images baked into the VM image.
 
 ### B08.1b Operator SSH access (Verified 2026-11-17, run #13)
-`src/host/ssh_access.py`: `up()` creates `~/.ssh/lab_operator` for the sudo user once (ssh-keygen run as that user)
-and installs `src/host/files/60-lab-ssh.conf` to `/etc/ssh/ssh_config.d/` (aliases fe-1, tun-1, be-1 on the mgmt IPs);
+`host/ssh_access.py`: `up()` creates `~/.ssh/lab_operator` for the sudo user once (ssh-keygen run as that user)
+and installs `host/files/60-lab-ssh.conf` to `/etc/ssh/ssh_config.d/` (aliases fe-1, tun-1, be-1 on the mgmt IPs);
 `public_key()` derives the public key with `ssh-keygen -y`; `down()` removes only the aliases and keeps the key.
 `runner.ensure_ssh_key()` writes both public keys (pipeline from Vault, operator) to `/etc/lab-runner/ssh.pub`;
 `compute.tf` splits it into `ssh_public_keys` and the user-data template loops over it. Wired in `platform_up` before
@@ -628,8 +628,8 @@ Done 2026-11-16 evening (Implemented, not yet run): `kvm.remove_lab_vms` before 
 | Still to do | File | Connects to |
 |---|---|---|
 | Root-owned `.git` after commit_changes: Done 2026-11-17 (update e5cf4a0, no root-owned files in .git) (`git()` runs as SUDO_UID:SUDO_GID; `bootstrap.sh` refuses to start without SUDO_UID) | `gitea.py`, `bootstrap.sh` | `.git` stays the user's |
-| Optional `teardown` (VMs only, keep the platform): `teardown.yml` with `workflow_dispatch`, TMPDIR, `terraform init` + `destroy -auto-approve`; `dispatch(creds, workflow=GITEA_WORKFLOW)`; `cmd_teardown` = `follow_run(creds, dispatch(creds, "teardown.yml"))` | `.gitea/workflows/teardown.yml`, `gitea.py`, `src/__main__.py` | runner, tfstate |
-| Rename the mgmt bridge `cloudbr1` → `mgmtbr1` (name confirmed 2026-11-18; do it after B09.4 monitoring, then rebuild in a fresh 4-core / 16 GB VM as the from-zero test; anchor `mgmtbr1-anchor`, netplan `60-lab-mgmtbr1.yaml`). Do it between `destroy` (old code removes cloudbr1) and the fresh `up`, so no migration code is needed. Renaming on a live host would leave two bridges with 10.250.0.1 | `src/lib/config.py` BRIDGE, `src/host/config/config.py`, the netplan file, `network.py`, `nftables-vmfw.nft`, `terraform/compute.tf`, comments in `60-lab-ssh.conf`/`chrony-lab.conf`, docs | everything on mgmt |
+| Optional `teardown` (VMs only, keep the platform): `teardown.yml` with `workflow_dispatch`, TMPDIR, `terraform init` + `destroy -auto-approve`; `dispatch(creds, workflow=GITEA_WORKFLOW)`; `cmd_teardown` = `follow_run(creds, dispatch(creds, "teardown.yml"))` | `.gitea/workflows/teardown.yml`, `gitea.py`, `main.py` | runner, tfstate |
+| Rename the mgmt bridge `cloudbr1` → `mgmtbr1` (name confirmed 2026-11-18; do it after B09.4 monitoring, then rebuild in a fresh 4-core / 16 GB VM as the from-zero test; anchor `mgmtbr1-anchor`, netplan `60-lab-mgmtbr1.yaml`). Do it between `destroy` (old code removes cloudbr1) and the fresh `up`, so no migration code is needed. Renaming on a live host would leave two bridges with 10.250.0.1 | `lib/config.py` BRIDGE, `host/config/config.py`, the netplan file, `network.py`, `nftables-vmfw.nft`, `terraform/compute.tf`, comments in `60-lab-ssh.conf`/`chrony-lab.conf`, docs | everything on mgmt |
 | The rehearsal itself | | |
 
 Prerequisite: resolve the B07 Flux/app Secret ordering blocker before the rehearsal. The target VM
@@ -727,14 +727,14 @@ three VMs in Loki (`wg-quick@wg0/wg1`, `frontend.service`, `k3s.service`); Grafa
 `admin/admin` → 401 (login `labadmin`, password at `kv/lab/bootstrap/grafana-admin`); old ports
 10.250.0.1:9090/3100 refused. VM Alloy runs as user `alloy`, 0 restarts, 0 OOM kills, process memory
 54–68 MiB (the rest of the 200 MiB cgroup is reclaimable file cache); tun-1 249 MiB free.
-Read the Grafana password: `sudo python3 -B -c "from src.services.vault import vault; print(vault.vault_api('GET', 'kv/data/lab/bootstrap/grafana-admin', token=vault.login())['data']['data']['password'])"`.
+Read the Grafana password: `sudo python3 -B -c "from vault import vault; print(vault.vault_api('GET', 'kv/data/lab/bootstrap/grafana-admin', token=vault.login())['data']['data']['password'])"`.
 
 Existing-lab migrations done once by hand on 2026-11-18 (not needed on a fresh build): gateway leaf
 deleted for the new SANs; `grafana` container and `lab-monitoring_grafana-data` volume removed so
 Grafana created `labadmin` from the Vault password (Grafana reads `GF_SECURITY_ADMIN_*` only on its
 first start).
 
-Host functions in `src/services/monitoring/monitoring.py`:
+Host functions in `monitoring/monitoring.py`:
 
 | Function | Purpose | Called by / reads or writes |
 |---|---|---|
@@ -749,7 +749,7 @@ provisioned datasources use `http://prometheus:9090` and `http://loki:3100` inte
 through the HTTPS routes; host Alloy mounts the CA, while VM agents use the cloud-init trust store.
 
 ```
-  every system runs one agent (Grafana Alloy)               host = aggregation only (compose, src/services/monitoring/)
+  every system runs one agent (Grafana Alloy)               host = aggregation only (compose, monitoring/)
   ┌ host  (Alloy container, host net) ─┐
   ├ fe-1  (Alloy, systemd)             ├─ metrics: remote_write ─▶ https://prometheus.lab.test ─ Traefik ─▶ Prometheus (lab-backend)
   ├ tun-1 (Alloy, systemd)             ├─ logs:    push         ─▶ https://loki.lab.test       ─ Traefik ─▶ Loki (lab-backend)
@@ -779,9 +779,9 @@ through the HTTPS routes; host Alloy mounts the CA, while VM agents use the clou
 
 | Step | What | Files | Status |
 |---|---|---|---|
-| 1 | Host stack: Prometheus remote-write receiver, Loki, Grafana, host Alloy; pinned digests; lifecycle and config hashes | `src/services/monitoring/{monitoring.py,compose.yaml,config/config.py,files/}` | Verified 2026-11-18 |
-| 2 | Grafana, Prometheus and Loki behind Traefik: DNS, gateway SANs, routes, Grafana datasources and Vault admin credentials | `src/services/traefik/dynamic/`, `src/lib/config.py`, Corefile, monitoring.py, `files/grafana/` | Verified 2026-11-18 |
-| 3 | VM agents: checksum-pinned .deb via host, package unit, unix metrics and journal, instance labels, memory cap; vmfw permits all three VMs through Traefik | `ansible/roles/alloy/`, `ansible/site.yml`, `src/host/files/nftables-vmfw.nft` | Verified 2026-11-18 (`4c2fd10`) |
+| 1 | Host stack: Prometheus remote-write receiver, Loki, Grafana, host Alloy; pinned digests; lifecycle and config hashes | `monitoring/{monitoring.py,compose.yaml,config/config.py,files/}` | Verified 2026-11-18 |
+| 2 | Grafana, Prometheus and Loki behind Traefik: DNS, gateway SANs, routes, Grafana datasources and Vault admin credentials | `traefik/dynamic/`, `lib/config.py`, Corefile, monitoring.py, `files/grafana/` | Verified 2026-11-18 |
+| 3 | VM agents: checksum-pinned .deb via host, package unit, unix metrics and journal, instance labels, memory cap; vmfw permits all three VMs through Traefik | `ansible/roles/alloy/`, `ansible/site.yml`, `host/files/nftables-vmfw.nft` | Verified 2026-11-18 (`4c2fd10`) |
 | 4 | k3s: kube-state-metrics via Flux; be-1 Alloy extras with ServiceAccount access (plan above) | `kubernetes/monitoring/`, `ansible/roles/alloy/` | Deferred 2026-11-18 |
 | 5 | Alerts on node metrics: InstanceDown (`up == 0` / no data 2 min), DiskAlmostFull, MemoryHigh, CPUHigh (10 min). Pod rules (PodNotReady, PodRestarting, PostgRESTDown) come with step 4. Shown in Prometheus and Grafana; no notification channel | `files/prometheus/rules.yml` (currently `groups: []`, already mounted and hashed) | **Next** |
 | 6 | Dashboards: provision Node Exporter Full (1860) as pinned JSON (a dashboard-provider YAML + mount); a Kubernetes dashboard after step 4; logs via Explore | `files/grafana/provisioning/dashboards/`, `files/grafana/dashboards/` | Planned |
@@ -798,8 +798,8 @@ host memory 35 % used with the full stack; about 50 MB more for kube-state-metri
 | B09.5 | Istio ambient for the app (after monitoring and the fresh-build rehearsal) | Helm-rendered ambient install delivered by Flux (`profile=ambient`, `global.platform=k3s`: istio-base, istiod, istio-cni, ztunnel), namespace label `istio.io/dataplane-mode=ambient`, dedicated workload service accounts and one L4 `AuthorizationPolicy` (only postgrest → postgres:5432), PostgREST :8000 PERMISSIVE because fe-1 is outside the mesh. Transit stays deferred | B08.7, B09.4, B08.5 | Planned |
 | B09.5a | Vault Secrets Operator (with B09.5, decided 2026-11-18) | VSO Helm chart via Flux (same Helm setup as Istio), vmfw be-1 → 10.250.0.1:8200, `VaultConnection` with the lab CA, Vault Kubernetes auth (Vault → k3s API :6443, k3s `tls-san`, token reviewer) or JWT auth with k3s's static SA public key, policy `app-db.hcl` (read `kv/data/lab/pipeline/app-db`), `VaultStaticSecret` in git replaces `roles/app_secrets`. Pod manifests unchanged (they only name Secret `app-db`) | B08.7, B09.5 | Planned |
 | B09.6 | DR | Walkthrough only (unseal key loss, tfstate loss) | vault-init.json, tfstate | Deferred |
-| B09.1 | Consoles | `src/host/trust.py` `up()/down()`: copy `state/pki/ca.pem` to `/usr/local/share/ca-certificates/lab.crt`, `update-ca-certificates`, Firefox `policies.json` (Certificates.Install). Called after `pki.up` | Gitea UI, Vault UI, `virsh console` | Last, likely skipped (2026-11-18) |
-| B09.2 | Host SSH hardening | `src/host/sshd.py` + `files/sshd-lab.conf` drop-in (no passwords, no root), validate with `sshd -t`, reload | platform_up after network | Last, likely skipped (2026-11-18) |
+| B09.1 | Consoles | `host/trust.py` `up()/down()`: copy `state/pki/ca.pem` to `/usr/local/share/ca-certificates/lab.crt`, `update-ca-certificates`, Firefox `policies.json` (Certificates.Install). Called after `pki.up` | Gitea UI, Vault UI, `virsh console` | Last, likely skipped (2026-11-18) |
+| B09.2 | Host SSH hardening | `host/sshd.py` + `files/sshd-lab.conf` drop-in (no passwords, no root), validate with `sshd -t`, reload | platform_up after network | Last, likely skipped (2026-11-18) |
 | B09.3 | Host firewall (today every VM reaches anything listening on 10.250.0.1 or 0.0.0.0, e.g. sshd 22, rpcbind 111) | `files/nftables-host.nft` table `inet lab_host` (input drop. Allow lo, established, LAN ssh; cloudbr1 to 53, 123, 443, 3128, 8200; LAN to host_ip 53 if LAN clients should resolve app.lab.test, since CoreDNS binds HOST_IP too), loaded by `vmfw.up` or `hostfw.py` next to it | must not break the LAN :443 DNAT | Last, likely skipped (2026-11-18) |
 
 Before B09.5/B09.5a, settle chart delivery: commit rendered manifests, or install `helm-controller`
@@ -830,7 +830,7 @@ Ansible's secret delivery. Application readiness must follow secret availability
 
 ## Cleanup log and what is left
 
-Done 2026-11-16 evening: removed `src/cfssl/app-root-csr.json` with APP_ROOT, the backend-gw and
+Done 2026-11-16 evening: removed `lib/cfssl/app-root-csr.json` with APP_ROOT, the backend-gw and
 frontend-client certs and `profiles.client`; removed `STUDY-PLAN.md`, `docs/code-review.md`, the dead
 first `ensure_node`, the unused `GITEA_URL` import, `hostname` in compute.tf, duplicate `.gitignore`
 lines, `cloudstack.lab.test` (Corefile and gateway SANs), stale comments and strings; README rewritten;

@@ -2,7 +2,7 @@
 
 One Ubuntu 24.04 host runs a small private cloud, built and changed through a pipeline:
 
-- **Host platform** (Python, `src/`): management bridge `cloudbr1` (10.250.0.1/24), chrony,
+- **Host platform** (Python, the repo root): management bridge `cloudbr1` (10.250.0.1/24), chrony,
   Podman, KVM/libvirt, a VM firewall (nftables), CoreDNS (`lab.test`), a cfssl CA,
   Vault, Traefik, Gitea and a Gitea Actions runner.
 - **Tenant infrastructure** (declarative): Terraform (libvirt provider) builds three VMs on
@@ -39,6 +39,21 @@ if nothing changed) and prints each job's result in the terminal.
 Pipeline (`.gitea/workflows/deploy.yml`): `check` (terraform fmt, validate) → `terraform`
 (apply) → `ansible` (Vault AppRole → SSH key → `ansible-playbook site.yml`).
 
+## Repository layout
+
+| Folder | What |
+|---|---|
+| `bootstrap.sh`, `main.py` | Entry point: `sudo ./bootstrap.sh up\|update\|destroy` runs `python3 -B main.py` |
+| `lib/` | Shared settings, logging, helpers, PKI (`lib/cfssl/`) |
+| `host/` | Host steps: preflight, mgmt bridge, chrony, KVM, VM firewall, toolchain, operator SSH |
+| `podman/`, `coredns/`, `squid/`, `vault/`, `traefik/`, `gitea/` (+ `gitea/runner/`), `monitoring/` | Host services: Python `up()/down()` + `compose.yaml` + `config/` + files |
+| `terraform/` | The three VMs and their networks (libvirt) |
+| `ansible/` | VM configuration: WireGuard, k3s, Flux, frontend, Alloy |
+| `kubernetes/` | Manifests Flux applies in k3s (the app database and PostgREST) |
+| `frontend/` | The Flask app image built and scanned by the pipeline |
+| `.gitea/workflows/` | The pipeline: check → image → terraform → ansible |
+| `docs/` | Design notes and diagrams |
+
 ## Where things live
 
 | What | Where |
@@ -50,7 +65,7 @@ Pipeline (`.gitea/workflows/deploy.yml`): `check` (terraform fmt, validate) → 
 | Terraform state | `/var/lib/lab/tfstate` (root, 0700) |
 | Log of every run | `state/bootstrap.log` |
 
-Web UIs: `https://gitea.lab.test`, `https://vault.lab.test:8200`.
+Web UIs: `https://gitea.lab.test`, `https://grafana.lab.test`, `https://vault.lab.test:8200`.
 
 ## Docs
 

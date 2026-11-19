@@ -252,8 +252,8 @@ management IPs and inventory groups do not change.
 | `terraform/compute.tf` | Private/WAN/management addresses and MACs; three interfaces; stable host tap identities |
 | `terraform/cloud-init/network-config.yaml.tftpl` | MAC matching for `eth0`/`eth1`/`eth2`; default route on WAN; DNS on management |
 | `terraform/inventory.tf` | No address, username, or group change |
-| `src/host/vpc.py` | Render detected host/LAN values and port identities; install/load both tables; enforce boot ordering and teardown |
-| `src/host/files/nftables-vpc.nft` | WAN DNAT and routing rules; WAN and management bridge filtering; source identity checks |
+| `host/vpc.py` | Render detected host/LAN values and port identities; install/load both tables; enforce boot ordering and teardown |
+| `host/files/nftables-vpc.nft` | WAN DNAT and routing rules; WAN and management bridge filtering; source identity checks |
 | WireGuard roles | WAN endpoints, private AllowedIPs, preferred-source routes, and hub policy |
 | Guest firewall roles | Three NIC roles; private API addresses; appropriate input/output/forward rules |
 | k3s and application configuration | Private node IP, API destination, management interface references |

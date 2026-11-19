@@ -570,7 +570,7 @@ Done 2026-11-16 evening (Implemented, not yet run): `kvm.remove_lab_vms` before 
 |---|---|---|
 | Root-owned `.git` after commit_changes: Done 2026-11-17 (update e5cf4a0, no root-owned files in .git) (`git()` runs as SUDO_UID:SUDO_GID; `bootstrap.sh` refuses to start without SUDO_UID) | `gitea.py`, `bootstrap.sh` | `.git` stays the user's |
 | Optional `teardown` (VMs only, keep the platform): `teardown.yml` with `workflow_dispatch`, TMPDIR, `terraform init` + `destroy -auto-approve`; `dispatch(creds, workflow=GITEA_WORKFLOW)`; `cmd_teardown` = `follow_run(creds, dispatch(creds, "teardown.yml"))` | `.gitea/workflows/teardown.yml`, `gitea.py`, `src/__main__.py` | runner, tfstate |
-| Rename the mgmt bridge `cloudbr1` → `mgmtbr0` (anchor `mgmtbr0-anchor`, netplan `60-lab-mgmtbr0.yaml`). Do it between `destroy` (old code removes cloudbr1) and the fresh `up`, so no migration code is needed. Renaming on a live host would leave two bridges with 10.250.0.1 | `src/lib/config.py` BRIDGE, `src/host/config/config.py`, the netplan file, `network.py`, `nftables-vmfw.nft`, `terraform/compute.tf`, comments in `60-lab-ssh.conf`/`chrony-lab.conf`, docs | everything on mgmt |
+| Rename the mgmt bridge `cloudbr1` → `mgmtbr1` (name confirmed 2026-11-18; do it after B09.4 monitoring, then rebuild in a fresh 4-core / 16 GB VM as the from-zero test; anchor `mgmtbr1-anchor`, netplan `60-lab-mgmtbr1.yaml`). Do it between `destroy` (old code removes cloudbr1) and the fresh `up`, so no migration code is needed. Renaming on a live host would leave two bridges with 10.250.0.1 | `src/lib/config.py` BRIDGE, `src/host/config/config.py`, the netplan file, `network.py`, `nftables-vmfw.nft`, `terraform/compute.tf`, comments in `60-lab-ssh.conf`/`chrony-lab.conf`, docs | everything on mgmt |
 | The rehearsal itself | | |
 
 Acceptance: `sudo ./bootstrap.sh destroy`, then `virsh list --all` (libvirt is gone), `ls /var/lib/lab` (missing), and `nft list tables` (no lab tables). Then `sudo ./bootstrap.sh up` ends with a green run.
@@ -654,7 +654,7 @@ Item 4 plan (container build + Trivy; 2026-11-18: runner runs as root, image pat
 
 ## B09.4 Monitoring plan (decided 2026-11-18: an agent on every system pushes to the host stack; metrics, k3s, logs, alerts)
 
-**RESUME HERE: B09.4 step 2, run update and verify.** Done 2026-11-18: grafana.lab.test (SAN, Corefile, route) verified. Then decided: no IPs in URLs. Prometheus and Loki moved to lab-backend behind Traefik (prometheus.lab.test, loki.lab.test); agents push over HTTPS with the lab CA (VMs already trust it via cloud-init); Grafana data sources by container name. Left: Grafana admin password from Vault.
+**RESUME HERE: B09.4 step 3, push and verify the VM agents.** Step 2 code done (Grafana admin labadmin, password at kv/lab/bootstrap/grafana-admin; needs one-time grafana-data volume reset + update). Step 3 written 2026-11-18: ansible/roles/alloy (host downloads the pinned .deb, copies to each VM, apt installs; config.alloy.j2 with instance=inventory_hostname; MemoryMax=200M), last play in site.yml. vmfw exception for all 3 VMs must be loaded (update) before the push.
 
 ```
   every system runs one agent (Grafana Alloy)               host = aggregation only (compose, src/services/monitoring/)
@@ -669,8 +669,8 @@ Item 4 plan (container build + Trivy; 2026-11-18: runner runs as root, image pat
 | every system | node: CPU, memory, disk, network (Alloy's built-in unix exporter) | systemd journal |
 | be-1, extra: k3s | kubelet/cAdvisor (pod and container CPU, memory), k3s API server, kube-state-metrics (pod ready, restarts, deployments), PostgREST `/metrics` (admin port, found by pod discovery) | `k3s.service` (in the journal), pod logs from `/var/log/pods` (postgres, postgrest, flux, coredns) |
 
-- Push only, VM → host: Prometheus and Loki use the host network on 10.250.0.1, so VM traffic is plain input (no host
-  firewall) and needs no vmfw change; fe-1 and tun-1 already reach 10.250.0.1 (Squid, DNS).
+- Push only, VM → host, over HTTPS through Traefik (prometheus.lab.test, loki.lab.test). Traefik's podman port mapping
+  makes that forwarded traffic, so vmfw's Traefik exception (be-1 only until now) is extended to fe-1 and tun-1.
 - be-1's agent runs as root: it reads k3s's admin client certificate (`/var/lib/rancher/k3s/server/tls/`) for the kubelet
   and API server, and pod log files. kube-state-metrics stays ClusterIP; the agent reaches pod IPs from the node. No new
   LoadBalancer ports.

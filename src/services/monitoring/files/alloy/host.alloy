@@ -1,4 +1,4 @@
-// The host's agent: host metrics and the host journal, pushed to Prometheus and Loki on 10.250.0.1.
+// The host's agent: host metrics and the host journal, pushed to prometheus.lab.test and loki.lab.test.
 
 // ---- metrics ----
 

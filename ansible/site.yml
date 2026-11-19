@@ -25,3 +25,9 @@
   gather_facts: false
   roles: [frontend]
   become: true
+
+- name: Every VM runs the Alloy monitoring agent
+  hosts: all
+  gather_facts: false
+  roles: [alloy]
+  become: true

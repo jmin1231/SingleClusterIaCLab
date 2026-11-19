@@ -1,0 +1,66 @@
+// {{ inventory_hostname }}'s agent: node metrics and the journal, pushed to prometheus.lab.test and loki.lab.test.
+// The VM trusts the lab CA (cloud-init), so HTTPS needs no extra settings.
+
+// ---- metrics ----
+
+prometheus.exporter.unix "node" { }
+
+discovery.relabel "node" {
+  targets = prometheus.exporter.unix.node.targets
+
+  rule {
+    target_label = "instance"
+    replacement  = "{{ inventory_hostname }}"
+  }
+
+  rule {
+    target_label = "job"
+    replacement  = "node"
+  }
+}
+
+prometheus.scrape "node" {
+  targets         = discovery.relabel.node.output
+  scrape_interval = "15s"
+  forward_to      = [prometheus.remote_write.hub.receiver]
+}
+
+prometheus.remote_write "hub" {
+  endpoint {
+    url = "https://prometheus.lab.test/api/v1/write"
+  }
+}
+
+// ---- logs ----
+
+loki.relabel "journal" {
+  forward_to = []
+
+  rule {
+    source_labels = ["__journal__systemd_unit"]
+    target_label  = "unit"
+  }
+
+  rule {
+    source_labels = ["__journal__systemd_unit"]
+    target_label  = "service_name"
+  }
+
+  rule {
+    source_labels = ["__journal_priority_keyword"]
+    target_label  = "level"
+  }
+}
+
+loki.source.journal "vm" {
+  max_age       = "12h"
+  labels        = { instance = "{{ inventory_hostname }}" }
+  relabel_rules = loki.relabel.journal.rules
+  forward_to    = [loki.write.hub.receiver]
+}
+
+loki.write "hub" {
+  endpoint {
+    url = "https://loki.lab.test/loki/api/v1/push"
+  }
+}

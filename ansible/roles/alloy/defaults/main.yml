@@ -1,0 +1,4 @@
+alloy_version: "1.22.0"
+alloy_deb: "alloy-{{ alloy_version }}-1.amd64.deb"
+alloy_deb_sha256: "29ca37327c02e30ff7cc3a1e0ff3779217f26092a1adc29ff4738f6a9e4370e3"
+alloy_download_dir: /var/lib/lab/downloads  # on the host (the Ansible controller)

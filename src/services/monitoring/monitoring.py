@@ -2,6 +2,7 @@
 
 import hashlib
 import logging
+import secrets
 import ssl
 import sys
 import time
@@ -13,6 +14,7 @@ from src.lib import config as lab_config
 from src.lib.system import compose
 from src.services.monitoring.config import config
 from src.services.podman import podman
+from src.services.vault import vault
 
 log = logging.getLogger(__name__)
 
@@ -22,6 +24,17 @@ def conf_hash(folder: Path) -> str:
     config_files = sorted(path for path in folder.rglob("*") if path.is_file())
     contents = b"".join(config_file.read_bytes() for config_file in config_files)
     return hashlib.sha256(contents).hexdigest()
+
+
+def grafana_admin(token: str) -> dict:
+    """Grafana's admin credentials from Vault; created once with a random password, never replaced."""
+    saved = vault.vault_api("GET", config.GRAFANA_ADMIN_KV, token=token)
+    if saved:
+        return saved["data"]["data"]
+    creds = {"username": lab_config.LAB_ADMIN, "password": secrets.token_urlsafe(24)}
+    vault.vault_api("POST", config.GRAFANA_ADMIN_KV, {"data": creds}, token=token)
+    log.info("stored new Grafana admin password in Vault")
+    return creds
 
 
 def wait_ready() -> None:
@@ -40,8 +53,10 @@ def wait_ready() -> None:
 
 def up() -> None:
     """Start the monitoring stack; a changed config folder recreates only that container. Wait until it is ready."""
-    hashes = {name: conf_hash(folder) for name, folder in config.CONF_HASHES.items()}
-    compose("monitoring", "up", "-d", env=hashes)
+    creds = grafana_admin(vault.login())
+    env = {name: conf_hash(folder) for name, folder in config.CONF_HASHES.items()}
+    env |= {"GRAFANA_ADMIN_USER": creds["username"], "GRAFANA_ADMIN_PASSWORD": creds["password"]}
+    compose("monitoring", "up", "-d", env=env)
     wait_ready()
     log.info("Monitoring receiving metrics at https://prometheus.lab.test and logs at https://loki.lab.test")
 

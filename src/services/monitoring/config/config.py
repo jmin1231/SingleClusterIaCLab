@@ -2,7 +2,6 @@
 
 from pathlib import Path
 
-from src.lib import config as lab_config
 
 FILES_DIR = Path(__file__).parent.parent / "files"
 
@@ -19,4 +18,6 @@ READY_URLS = [
     "https://prometheus.lab.test/-/ready",
     "https://loki.lab.test/ready",
 ]
+GRAFANA_ADMIN_KV = "kv/data/lab/bootstrap/grafana-admin"
+
 READY_TRIES = 60  # 2 s apart: about two minutes

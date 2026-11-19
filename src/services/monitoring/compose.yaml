@@ -38,6 +38,8 @@ services:
     networks: [backend]
     environment:
       GF_SERVER_ROOT_URL: https://grafana.lab.test/
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD}
       CONF_HASH: ${GRAFANA_CONF_HASH:-}
     volumes:
       - ./files/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro

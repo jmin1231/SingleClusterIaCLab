@@ -1,0 +1,70 @@
+# Run the Grafana Alloy agent on every VM: node metrics and the journal, pushed to prometheus.lab.test and loki.lab.test.
+# The host downloads the package once; the VMs never reach GitHub (Squid allows it only for be-1's k3s).
+
+- name: Download directory exists on the host
+  ansible.builtin.file:
+    path: "{{ alloy_download_dir }}"
+    state: directory
+    mode: "0700"
+  delegate_to: localhost
+  run_once: true
+  become: false
+
+- name: Alloy package is downloaded on the host (sha256 pinned)
+  ansible.builtin.get_url:
+    url: "https://github.com/grafana/alloy/releases/download/v{{ alloy_version }}/{{ alloy_deb }}"
+    dest: "{{ alloy_download_dir }}/{{ alloy_deb }}"
+    checksum: "sha256:{{ alloy_deb_sha256 }}"
+    mode: "0644"
+  delegate_to: localhost
+  run_once: true
+  become: false
+
+- name: Alloy package is on the VM
+  ansible.builtin.copy:
+    src: "{{ alloy_download_dir }}/{{ alloy_deb }}"
+    dest: "/var/cache/{{ alloy_deb }}"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Alloy is installed (user alloy, in groups adm and systemd-journal)
+  ansible.builtin.apt:
+    deb: "/var/cache/{{ alloy_deb }}"
+
+- name: Agent config names this VM
+  ansible.builtin.template:
+    src: config.alloy.j2
+    dest: /etc/alloy/config.alloy
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart alloy
+
+- name: Drop-in directory for the alloy unit exists
+  ansible.builtin.file:
+    path: /etc/systemd/system/alloy.service.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Agent memory is capped (tun-1 has 512 MB)
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/alloy.service.d/lab.conf
+    content: |
+      [Service]
+      MemoryMax=200M
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart alloy
+
+- name: Pending restarts are applied
+  ansible.builtin.meta: flush_handlers
+
+- name: Alloy is running and starts on boot
+  ansible.builtin.systemd_service:
+    name: alloy
+    state: started
+    enabled: true

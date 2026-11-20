@@ -25,13 +25,23 @@
     KUBECONFIG: "/etc/rancher/k3s/k3s.yaml"
   changed_when: false
 
-- name: Flux manifests are in the k3s manifests folder
-  ansible.builtin.shell:
+# helm-controller runs the k8s-monitoring HelmRelease (B09.4 step 4).
+# Exported on every run and written with copy, so a changed component list reaches a running lab.
+- name: Flux manifests are rendered
+  ansible.builtin.command:
     cmd: >-
       flux install --export
-      --components=source-controller,kustomize-controller
-      > /var/lib/rancher/k3s/server/manifests/flux.yaml
-    creates: /var/lib/rancher/k3s/server/manifests/flux.yaml
+      --components=source-controller,kustomize-controller,helm-controller
+  register: flux_manifests
+  changed_when: false
+
+- name: Flux manifests are in the k3s manifests folder
+  ansible.builtin.copy:
+    content: "{{ flux_manifests.stdout }}\n"
+    dest: /var/lib/rancher/k3s/server/manifests/flux.yaml
+    owner: root
+    group: root
+    mode: "0644"
 
 - name: Flux controllers are Available
   ansible.builtin.command:

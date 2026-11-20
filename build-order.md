@@ -34,11 +34,11 @@ first pipeline finishes, so retry a failed pipeline with `update` if the marker 
 
 | # | Phase | What | Status |
 |---|---|---|---|
-| 1 | B09.4 monitoring, steps 5–7 | Alerts (node rules), provisioned Node Exporter Full dashboard, acceptance | **Next: step 5 alerts** |
-| 2 | Fresh-build blocker | Split the Flux app-readiness wait from Flux setup so `app_secrets` runs first (B07) | Planned, before 3 |
-| 3 | B08.5 rebuild from zero | `destroy` with the current code, rename `cloudbr1` → `mgmtbr1`, then `up` in a **fresh 4-core / 16 GB Ubuntu 24.04 Desktop VM** (nested KVM); proves the lab runs on the target size | Planned |
-| 4 | B09.5 + B09.5a | Istio ambient for the app, Vault Secrets Operator replacing `roles/app_secrets` | Planned after 3 |
-| 5 | B09.4 step 4 | k3s metrics and pod logs (plan kept in B09.4) | Deferred 2026-11-18 (effort); pick up when time allows |
+| 1 | B09.4 monitoring, steps 4, 6, 7 | k3s via Grafana's `k8s-monitoring` chart, provisioned Node Exporter Full dashboard, acceptance. Step 5 alerts deferred 2026-11-20 ("we don't need alerts for now") | **Next: step 4** |
+| 2 | B09.7 k3s NetworkPolicy | Default-deny plus allow rules for the app (and the monitoring collectors) using k3s's built-in policy controller (flannel + embedded kube-router; no CNI swap) | Planned after 1 (decided 2026-11-20) |
+| 3 | Fresh-build blocker | Split the Flux app-readiness wait from Flux setup so `app_secrets` runs first (B07) | Planned |
+| 4 | B08.5 rebuild from zero | `destroy` with the current code, rename `cloudbr1` → `mgmtbr1`, then `up` in a **fresh 4-core / 16 GB Ubuntu 24.04 Desktop VM** (nested KVM); proves the lab runs on the target size | Planned |
+| 5 | B09.5 + B09.5a | k3s's bundled Traefik as the app ingress (Istio dropped 2026-11-20), Vault Secrets Operator replacing `roles/app_secrets` | Planned |
 | 6 | B09.6 | DR walkthrough (unseal key loss, tfstate loss) | Discussion only |
 | 7 | B09.1–B09.3 | Console CA trust, host SSH hardening, host firewall | Last, likely skipped |
 
@@ -721,9 +721,9 @@ Item 4 implementation (container build + Trivy; runner runs as root, image deliv
 - [x] `image.yml` (verified 2026-11-18; `rm -f` before `podman save`, which refuses to overwrite) (deploy.yml: check → image → terraform → ansible, written): `podman build` tag = commit SHA → `podman save -o /var/lib/lab/images/frontend.tar` → `trivy image --input` **report only** (user's choice 2026-11-18, no gate): table in the log + `trivy-image.{txt,json}` uploaded as artifact `trivy-image-report` (upload-artifact@v4, 7 days)
 - [x] (verified 2026-11-18: service active, image tag = commit, key 65532 0600, cert CN app.lab.test, page 200 via API; host-local access works with the vmfw output DNAT added in `07bbeeb`) `frontend` role on fe-1: podman (Ubuntu 4.9, quadlet keys from the 4.9 set only), sysctl `net.ipv4.ip_unprivileged_port_start=443` (Chainguard runs non-root), copy + `podman load` the tar, quadlet `Network=host` on 443, `app-edge` cert mounted at `/etc/app/tls` (key readable by uid 65532)
 
-## B09.4 Monitoring (steps 1–3 verified 2026-11-18; step 4 deferred; steps 5–7 next)
+## B09.4 Monitoring (steps 1–3 verified 2026-11-18; next steps 4, 6, 7; step 5 alerts deferred)
 
-**RESUME HERE: B09.4 step 5 (alerts).**
+**RESUME HERE: B09.4 step 4 (k8s-monitoring chart); step 5 alerts deferred 2026-11-20.**
 
 Verified 2026-11-18 (`4c2fd10`): `up{job="node"}` = 1 for host, fe-1, tun-1, be-1; journals of all
 three VMs in Loki (`wg-quick@wg0/wg1`, `frontend.service`, `k3s.service`); Grafana data sources healthy;
@@ -768,14 +768,17 @@ through the HTTPS routes; host Alloy mounts the CA, while VM agents use the clou
   makes that forwarded traffic, so vmfw's Traefik exception (be-1 only until now) is extended to fe-1 and tun-1.
 - Current VM agents use the package's `alloy` user and unit. The role adds `MemoryMax=200M`, node metrics,
   journal collection and per-VM instance labels. It does not yet configure k3s credentials or pod logs.
-- Step 4 plan (deferred 2026-11-18, recommended choices not yet confirmed): keep be-1's Alloy non-root and give it
-  a ServiceAccount `alloy` with a read-only ClusterRole (nodes/metrics, pods, services, endpoints, pods/log,
-  nonResourceURL `/metrics`) plus a token Secret, written by Ansible to `/etc/alloy/` (owner alloy, 0600) with
-  k3s's CA; the alternative (root + k3s admin client cert) is cluster-admin. kube-state-metrics from
-  `docker.io/rancher/mirrored-kube-state-metrics-kube-state-metrics:v2.17.0` (digest-pinned): `registry.k8s.io`
-  is not in Squid. Manifests in `kubernetes/monitoring/` via Flux; the be-1 section goes in `config.alloy.j2`
-  under `{% if inventory_hostname == 'be-1' %}`. Not kube-prometheus-stack or the k8s-monitoring chart: they
-  duplicate the host stack (same agent + kube-state-metrics pattern, built by hand).
+- Step 4 (decided 2026-11-20, replaces the hand-built ServiceAccount/kube-state-metrics plan): Grafana's
+  `k8s-monitoring` Helm chart (4.6.1) as a Flux HelmRelease in `kubernetes/monitoring/`. Collection only, no
+  backends: destinations `https://prometheus.lab.test/api/v1/write` and `https://loki.lab.test/loki/api/v1/push`
+  with `tls.ca` = lab CA, read by `valuesFrom` (Secret `flux-git-auth`, key `ca.crt`, already written to `flux-system`
+  by the fluxcd role; so the HelmRelease lives in `flux-system` with `targetNamespace: monitoring`). Features: `clusterMetrics` (+ kube-state-metrics), `podLogsViaKubernetesApi`,
+  `clusterEvents`. Off: `hostMetrics`, node-exporter, `nodeLogs` (be-1's systemd Alloy already sends those).
+  Needs: Flux `helm-controller`; chart pulled as OCI (`oci://ghcr.io/grafana/helm-charts/k8s-monitoring`) through an
+  `OCIRepository` with `proxySecretRef` → `http://proxy.lab.test:3128` (ghcr.io is already in Squid for be-1, so no
+  Squid change; a classic `HelmRepository` has no proxy setting); kube-state-metrics and the kubectl removal hook
+  pointed at docker.io mirrors (`registry.k8s.io` is not in Squid); memory limits (be-1 has 4 GB).
+  Not kube-prometheus-stack: it ships its own Prometheus/Grafana and would duplicate the host stack.
 - Alloy install: the Ansible role downloads the pinned 1.22.0 .deb with SHA256 verification once on the
   host, copies it to each VM, and installs it with apt. The package supplies the service; the role supplies
   its configuration and memory drop-in. No Alloy download in toolchain.py, Grafana apt repo or new Squid rule.
@@ -785,8 +788,8 @@ through the HTTPS routes; host Alloy mounts the CA, while VM agents use the clou
 | 1 | Host stack: Prometheus remote-write receiver, Loki, Grafana, host Alloy; pinned digests; lifecycle and config hashes | `monitoring/{monitoring.py,compose.yaml,config/config.py,files/}` | Verified 2026-11-18 |
 | 2 | Grafana, Prometheus and Loki behind Traefik: DNS, gateway SANs, routes, Grafana datasources and Vault admin credentials | `traefik/dynamic/`, `lib/config.py`, Corefile, monitoring.py, `files/grafana/` | Verified 2026-11-18 |
 | 3 | VM agents: checksum-pinned .deb via host, package unit, unix metrics and journal, instance labels, memory cap; vmfw permits all three VMs through Traefik | `ansible/roles/alloy/`, `ansible/site.yml`, `host/files/nftables-vmfw.nft` | Verified 2026-11-18 (`4c2fd10`) |
-| 4 | k3s: kube-state-metrics via Flux; be-1 Alloy extras with ServiceAccount access (plan above) | `kubernetes/monitoring/`, `ansible/roles/alloy/` | Deferred 2026-11-18 |
-| 5 | Alerts on node metrics: InstanceDown (`up == 0` / no data 2 min), DiskAlmostFull, MemoryHigh, CPUHigh (10 min). Pod rules (PodNotReady, PodRestarting, PostgRESTDown) come with step 4. Shown in Prometheus and Grafana; no notification channel | `files/prometheus/rules.yml` (currently `groups: []`, already mounted and hashed) | **Next** |
+| 4 | k3s: Grafana `k8s-monitoring` chart via Flux HelmRelease (cluster metrics, kube-state-metrics, pod logs, events) | `kubernetes/monitoring/`, `ansible/roles/fluxcd/` (helm-controller) | Written 2026-11-20 (helm-controller, `kubernetes/monitoring/`, `lab-monitoring` Kustomization); not yet run |
+| 5 | Alerts on node metrics: InstanceDown (`up == 0` / no data 2 min), DiskAlmostFull, MemoryHigh, CPUHigh (10 min). Pod rules (PodNotReady, PodRestarting, PostgRESTDown) come with step 4. Shown in Prometheus and Grafana; no notification channel | `files/prometheus/rules.yml` (currently `groups: []`, already mounted and hashed) | Deferred 2026-11-20 |
 | 6 | Dashboards: provision Node Exporter Full (1860) as pinned JSON (a dashboard-provider YAML + mount); a Kubernetes dashboard after step 4; logs via Explore | `files/grafana/provisioning/dashboards/`, `files/grafana/dashboards/` | Planned |
 | 7 | Acceptance: all four machines on the dashboard; journals searchable per `instance`; stop Alloy on fe-1 → InstanceDown fires, start it → resolves | Grafana, Prometheus, Loki | Planned after 5–6 |
 
@@ -798,8 +801,9 @@ host memory 35 % used with the full stack; about 50 MB more for kube-state-metri
 | ID | Step | Proposed files / functions | Connects to | Status |
 |---|---|---|---|---|
 | B09.4 | Monitoring | Steps 1–3 verified (host stack behind Traefik, Vault login, VM agents); next alerts, dashboards, acceptance; k3s extras deferred | traefik, pki, vault, vmfw | In progress |
-| B09.5 | Istio ambient for the app (after monitoring and the fresh-build rehearsal) | Helm-rendered ambient install delivered by Flux (`profile=ambient`, `global.platform=k3s`: istio-base, istiod, istio-cni, ztunnel), namespace label `istio.io/dataplane-mode=ambient`, dedicated workload service accounts and one L4 `AuthorizationPolicy` (only postgrest → postgres:5432), PostgREST :8000 PERMISSIVE because fe-1 is outside the mesh. Transit stays deferred | B08.7, B09.4, B08.5 | Planned |
-| B09.5a | Vault Secrets Operator (with B09.5, decided 2026-11-18) | VSO Helm chart via Flux (same Helm setup as Istio), vmfw be-1 → 10.250.0.1:8200, `VaultConnection` with the lab CA, Vault Kubernetes auth (Vault → k3s API :6443, k3s `tls-san`, token reviewer) or JWT auth with k3s's static SA public key, policy `app-db.hcl` (read `kv/data/lab/pipeline/app-db`), `VaultStaticSecret` in git replaces `roles/app_secrets`. Pod manifests unchanged (they only name Secret `app-db`) | B08.7, B09.5 | Planned |
+| B09.5 | App ingress: k3s's bundled Traefik (decided 2026-11-20; replaces Istio, dropped the same day) | Remove `traefik` from `disable` in `roles/k3s`; `HelmChartConfig` (k3s CRD, applied by Flux) sets Traefik's `web` entry point to `exposedPort: 8000` and stops exposing `websecure`, so the backend firewall (wg → 8000 only), hub filter and fe-1 nginx stay unchanged; PostgREST Service `LoadBalancer` → `ClusterIP` (frees :8000 for ServiceLB) plus an `Ingress`. Plain HTTP over WireGuard as today, no TLS on be-1. Not ingress-nginx (retired March 2026) | B08.7 | Planned |
+| B09.5a | Vault Secrets Operator (with B09.5, decided 2026-11-18) | VSO Helm chart via Flux (same Flux helm-controller as k8s-monitoring), vmfw be-1 → 10.250.0.1:8200, `VaultConnection` with the lab CA, Vault Kubernetes auth (Vault → k3s API :6443, k3s `tls-san`, token reviewer) or JWT auth with k3s's static SA public key, policy `app-db.hcl` (read `kv/data/lab/pipeline/app-db`), `VaultStaticSecret` in git replaces `roles/app_secrets`. Pod manifests unchanged (they only name Secret `app-db`) | B08.7, B09.4 | Planned |
+| B09.7 | k3s NetworkPolicy (decided 2026-11-20, after B09.4) | k3s's embedded policy controller (kube-router, on by default with flannel): default-deny per namespace, then allow postgrest → postgres:5432, ingress to PostgREST :3000, DNS to kube-system, and the k8s-monitoring collectors' scrapes/API access. No Calico/Cilium | B09.4 | Planned |
 | B09.6 | DR | Walkthrough only (unseal key loss, tfstate loss) | vault-init.json, tfstate | Deferred |
 | B09.1 | Consoles | `host/trust.py` `up()/down()`: copy `state/pki/ca.pem` to `/usr/local/share/ca-certificates/lab.crt`, `update-ca-certificates`, Firefox `policies.json` (Certificates.Install). Called after `pki.up` | Gitea UI, Vault UI, `virsh console` | Last, likely skipped (2026-11-18) |
 | B09.2 | Host SSH hardening | `host/sshd.py` + `files/sshd-lab.conf` drop-in (no passwords, no root), validate with `sshd -t`, reload | platform_up after network | Last, likely skipped (2026-11-18) |

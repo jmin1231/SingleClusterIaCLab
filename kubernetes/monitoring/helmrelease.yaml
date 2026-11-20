@@ -1,0 +1,79 @@
+# Grafana k8s-monitoring: collection only. Sends k3s metrics, pod logs and events to the host's
+# Prometheus and Loki. Node metrics and the journal stay with be-1's systemd Alloy.
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: k8s-monitoring
+  namespace: flux-system          # valuesFrom only reads this namespace
+spec:
+  interval: 10m
+  releaseName: k8s-monitoring
+  targetNamespace: monitoring
+  install:
+    createNamespace: true
+  chartRef:
+    kind: OCIRepository
+    name: k8s-monitoring
+  # The lab CA changes every build, so it comes from the Secret the fluxcd role writes (flux-git-auth, key ca.crt)
+  valuesFrom:
+    - kind: Secret
+      name: flux-git-auth
+      valuesKey: ca.crt
+      targetPath: destinations.hostPrometheus.tls.ca
+    - kind: Secret
+      name: flux-git-auth
+      valuesKey: ca.crt
+      targetPath: destinations.hostLoki.tls.ca
+  values:
+    cluster:
+      name: lab
+
+    destinations:
+      hostPrometheus:
+        type: prometheus
+        url: https://prometheus.lab.test/api/v1/write
+      hostLoki:
+        type: loki
+        url: https://loki.lab.test/loki/api/v1/push
+
+    clusterMetrics:
+      enabled: true               # kubelet, cAdvisor, kube-state-metrics
+    podLogsViaKubernetesApi:
+      enabled: true
+    clusterEvents:
+      enabled: true
+
+    # One collector: with a single collector the chart assigns every feature to it
+    collectors:
+      alloy:
+        presets: [singleton]
+        alloy:
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits:   { memory: 512Mi }
+        configReloader:
+          image:                  # quay.io is not in Squid
+            registry: docker.io
+            repository: rancher/mirrored-prometheus-operator-prometheus-config-reloader
+            tag: v0.89.0
+
+    telemetryServices:
+      kube-state-metrics:
+        deploy: true
+        image:                    # registry.k8s.io is not in Squid
+          registry: docker.io
+          repository: rancher/mirrored-kube-state-metrics-kube-state-metrics
+          tag: v2.17.0
+        resources:
+          requests: { cpu: 10m, memory: 32Mi }
+          limits:   { memory: 128Mi }
+
+    alloy-operator:
+      resources:
+        requests: { cpu: 10m, memory: 64Mi }
+        limits:   { memory: 128Mi }
+      waitForAlloyRemoval:
+        image:                    # registry.k8s.io is not in Squid
+          registry: docker.io
+          repository: rancher/kubectl
+          tag: v1.34.9

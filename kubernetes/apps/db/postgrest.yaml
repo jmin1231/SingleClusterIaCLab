@@ -45,15 +45,33 @@ spec:
             limits:
               memory: 128Mi
 ---
+# ClusterIP: Traefik owns be-1's port 8000 and reaches PostgREST through the Ingress below
 apiVersion: v1
 kind: Service
 metadata:
   name: postgrest
 spec:
-  type: LoadBalancer
   selector:
     app: postgrest
   ports:
     - name: http
-      port: 8000
+      port: 3000
       targetPort: http
+---
+# No host rule: fe-1 calls by IP (http://10.3.1.10:8000)
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: postgrest
+spec:
+  ingressClassName: traefik
+  rules:
+    - http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: postgrest
+                port:
+                  name: http

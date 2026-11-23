@@ -1,0 +1,15 @@
+# Managed by Ansible (roles/k3s); k3s applies it to its bundled Traefik chart.
+# fe-1 calls 10.3.1.10:8000 and the hub filter allows only 8000, so web moves from 80 to 8000 and websecure is not exposed.
+apiVersion: helm.cattle.io/v1
+kind: HelmChartConfig
+metadata:
+  name: traefik
+  namespace: kube-system
+spec:
+  valuesContent: |
+    ports:
+      web:
+        exposedPort: 8000
+      websecure:
+        expose:
+          default: false

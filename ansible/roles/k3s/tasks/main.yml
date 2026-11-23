@@ -11,12 +11,29 @@
     dest: /etc/rancher/k3s/config.yaml
     content: |
       node-ip: {{ vpc_ip }}
-      disable:
-        - traefik
     owner: root
     group: root
     mode: "0600"
   notify: Restart k3s
+
+# Exists before k3s is installed on a fresh build, so Traefik starts with the config below
+- name: k3s manifests folder exists
+  ansible.builtin.file:
+    path: /var/lib/rancher/k3s/server/manifests
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+# k3s watches this folder and applies changes itself; no restart needed
+- name: Traefik listens on 8000 only
+  ansible.builtin.copy:
+    src: traefik-config.yaml
+    dest: /var/lib/rancher/k3s/server/manifests/traefik-config.yaml
+    owner: root
+    group: root
+    mode: "0600"
+
 
 - name: k3s installer downloaded
   ansible.builtin.get_url:

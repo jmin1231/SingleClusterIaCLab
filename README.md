@@ -46,10 +46,12 @@ Pipeline (`.gitea/workflows/deploy.yml`): `check` (terraform fmt, validate) → 
 | `bootstrap.sh`, `main.py` | Entry point: `sudo ./bootstrap.sh up\|update\|destroy` runs `python3 -B main.py` |
 | `lib/` | Shared settings, logging, helpers, PKI (`lib/cfssl/`) |
 | `host/` | Host steps: preflight, mgmt bridge, chrony, KVM, VM firewall, toolchain, operator SSH |
-| `podman/`, `coredns/`, `squid/`, `vault/`, `traefik/`, `gitea/` (+ `gitea/runner/`), `monitoring/` | Host services: Python `up()/down()` + `compose.yaml` + `config/` + files |
+| `podman/` | Installs Podman and Compose on the host |
+| `services/` | Host Podman services: `coredns/`, `squid/`, `vault/`, `traefik/`, `gitea/` (+ `gitea/runner/`), `monitoring/`; each has Python `up()/down()` + `compose.yaml` + `config/` + files |
+| `demo/` | Demo helpers (`load.sh`: request load for the HPA demo) |
 | `terraform/` | The three VMs and their networks (libvirt) |
 | `ansible/` | VM configuration: WireGuard, k3s, Flux, frontend, Alloy |
-| `kubernetes/` | Manifests Flux applies in k3s (the app database and PostgREST) |
+| `kubernetes/` | Everything Flux applies in k3s: the app (`apps/`) and monitoring (`monitoring/`) |
 | `frontend/` | The Flask app image built and scanned by the pipeline |
 | `.gitea/workflows/` | The pipeline: check → image → terraform → ansible |
 | `docs/` | Design notes and diagrams |

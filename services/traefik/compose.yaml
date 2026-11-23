@@ -16,8 +16,8 @@ services:
     networks: [backend]
     volumes:
       - ./dynamic:/etc/traefik/dynamic:ro
-      - ../state/pki/gateway.pem:/etc/traefik/tls/gateway.pem:ro
-      - ../state/pki/gateway-key.pem:/etc/traefik/tls/gateway-key.pem:ro
+      - ../../state/pki/gateway.pem:/etc/traefik/tls/gateway.pem:ro
+      - ../../state/pki/gateway-key.pem:/etc/traefik/tls/gateway-key.pem:ro
     cap_drop: [ALL]
 
 networks:

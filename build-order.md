@@ -323,7 +323,7 @@ Status: up Verified; down never run.
 ## B03 Host services
 
 ### B03.1 DNS
-Files: `coredns/{dns.py,compose.yaml,conf/Corefile}`
+Files: `services/coredns/{dns.py,compose.yaml,conf/Corefile}`
 
 | Function | Purpose | Called by / calls | Touches |
 |---|---|---|---|
@@ -350,7 +350,7 @@ certificate/key before update, keeping the CA. New issuance makes Traefik reload
 Status: Verified. Gateway reissued 2026-11-18 with all four names (old leaf deleted by hand before update).
 
 ### B03.3 Vault
-Files: `vault/{vault.py,compose.yaml,vault.hcl,policies/lab-bootstrap.hcl,policies/lab-pipeline.hcl}`
+Files: `services/vault/{vault.py,compose.yaml,vault.hcl,policies/lab-bootstrap.hcl,policies/lab-pipeline.hcl}`
 
 Write the functions in this order:
 
@@ -376,7 +376,7 @@ Acceptance: `curl --cacert state/pki/ca.pem https://vault.lab.test:8200/v1/sys/h
 Status: Verified.
 
 ### B03.4 Gateway
-Files: `traefik/{traefik.py,compose.yaml,dynamic/}` (TLS plus gitea, grafana, prometheus and loki routes).
+Files: `services/traefik/{traefik.py,compose.yaml,dynamic/}` (TLS plus gitea, grafana, prometheus and loki routes).
 
 | Function | Purpose | Called by / calls | Touches |
 |---|---|---|---|
@@ -394,7 +394,7 @@ on 10.250.0.1:8200; app.lab.test reaches fe-1 through DNAT, outside this Traefik
 ## B04 Gitea and runner
 
 ### B04.1 Gitea service and seeding
-Files: `gitea/{gitea.py,compose.yaml,config/config.py}`
+Files: `services/gitea/{gitea.py,compose.yaml,config/config.py}`
 
 | Function | Purpose | Called by / calls | Touches |
 |---|---|---|---|
@@ -411,7 +411,7 @@ Files: `gitea/{gitea.py,compose.yaml,config/config.py}`
 Acceptance: `lab/lab` exists, and its Actions secrets list both VAULT_* names. Status: Verified.
 
 ### B04.2 Host runner
-Files: `gitea/runner/{runner.py,config/config.py,files/config.yaml,files/lab-runner.service}`
+Files: `services/gitea/runner/{runner.py,config/config.py,files/config.yaml,files/lab-runner.service}`
 
 | Function | Purpose | Called by / calls | Touches |
 |---|---|---|---|
@@ -431,7 +431,7 @@ Acceptance: `systemctl is-active lab-runner` is active, and Gitea shows runner `
 ## B05 up/update and the pipeline skeleton
 
 ### B05.1 Git and run helpers
-Files: `gitea/gitea.py` (same file as B04.1), `gitea/config/config.py` (RUN_*, COMMIT_IDENTITY)
+Files: `services/gitea/gitea.py` (same file as B04.1), `services/gitea/config/config.py` (RUN_*, COMMIT_IDENTITY)
 
 | Function | Purpose | Called by / calls | Touches |
 |---|---|---|---|
@@ -536,7 +536,7 @@ This is an outstanding code fix, not the current playbook order.
 The VMs have no internet: wan is route mode, and vmfw drops wan egress. All package installs go
 through Squid.
 
-Proposed files: `squid/{__init__.py,squid.py,compose.yaml,conf/squid.conf}`
+Proposed files: `services/squid/{__init__.py,squid.py,compose.yaml,conf/squid.conf}`
 
 | Function / item | Purpose | Called by / calls | Touches |
 |---|---|---|---|
@@ -548,7 +548,7 @@ Proposed files: `squid/{__init__.py,squid.py,compose.yaml,conf/squid.conf}`
 
 Acceptance: on fe-1, `curl -x http://proxy.lab.test:3128 -I http://archive.ubuntu.com` returns 200, and `curl -I https://example.com` fails without the proxy.
 
-Implemented and verified 2026-11-17 (run #12): `squid/` (image `ubuntu/squid:7.2-26.04_edge` digest-pinned, contains
+Implemented and verified 2026-11-17 (run #12): `services/squid/` (image `ubuntu/squid:7.2-26.04_edge` digest-pinned, contains
 squid 7.7-0ubuntu0.26.04.2 (checked in /usr/share/rocks/dpkg.query); a Rockcraft image: runs as `_daemon_` UID 584792,
 binary `squid-gnutls`, so the entrypoint runs it directly, `cap_drop: ALL` with no additions, `pid_filename none`; own
 config path `/etc/squid-lab`, FTP denied for CVE-2026-47729, file access log at `/var/log/squid/access.log` in the
@@ -698,7 +698,7 @@ LAN and from the host's own browser (vmfw `nat output` DNAT added).
 
 Item 5 Verified (2026-11-18): CRUD in the host browser; from fe-1 :8000 → 200, :5432, :22, :6443 blocked; be-1 → fe-1
 :443 blocked; hub drop counter 8 → 23. **B08.7 done.** Next: B09.4 monitoring (plan below).
-- [x] `GITEA_FLUX_KV = "kv/data/lab/pipeline/gitea-flux"` in `gitea/config/config.py` (`lab-pipeline` can already read it)
+- [x] `GITEA_FLUX_KV = "kv/data/lab/pipeline/gitea-flux"` in `services/gitea/config/config.py` (`lab-pipeline` can already read it)
 - [x] `flux_token(token, creds)` in `gitea.py`, called in `up()`: a labadmin token, scope `read:repository`, name
   `flux`, stored as `{username, token}`. Verified `c7017af`. Gotcha: if a run dies between the POST and the
   Vault write, the next POST fails (name taken): delete the `flux` token in Gitea and run again.
@@ -741,7 +741,7 @@ deleted for the new SANs; `grafana` container and `lab-monitoring_grafana-data` 
 Grafana created `labadmin` from the Vault password (Grafana reads `GF_SECURITY_ADMIN_*` only on its
 first start).
 
-Host functions in `monitoring/monitoring.py`:
+Host functions in `services/monitoring/monitoring.py`:
 
 | Function | Purpose | Called by / reads or writes |
 |---|---|---|
@@ -756,7 +756,7 @@ provisioned datasources use `http://prometheus:9090` and `http://loki:3100` inte
 through the HTTPS routes; host Alloy mounts the CA, while VM agents use the cloud-init trust store.
 
 ```
-  every system runs one agent (Grafana Alloy)               host = aggregation only (compose, monitoring/)
+  every system runs one agent (Grafana Alloy)               host = aggregation only (compose, services/monitoring/)
   ┌ host  (Alloy container, host net) ─┐
   ├ fe-1  (Alloy, systemd)             ├─ metrics: remote_write ─▶ https://prometheus.lab.test ─ Traefik ─▶ Prometheus (lab-backend)
   ├ tun-1 (Alloy, systemd)             ├─ logs:    push         ─▶ https://loki.lab.test       ─ Traefik ─▶ Loki (lab-backend)
@@ -789,8 +789,8 @@ through the HTTPS routes; host Alloy mounts the CA, while VM agents use the clou
 
 | Step | What | Files | Status |
 |---|---|---|---|
-| 1 | Host stack: Prometheus remote-write receiver, Loki, Grafana, host Alloy; pinned digests; lifecycle and config hashes | `monitoring/{monitoring.py,compose.yaml,config/config.py,files/}` | Verified 2026-11-18 |
-| 2 | Grafana, Prometheus and Loki behind Traefik: DNS, gateway SANs, routes, Grafana datasources and Vault admin credentials | `traefik/dynamic/`, `lib/config.py`, Corefile, monitoring.py, `files/grafana/` | Verified 2026-11-18 |
+| 1 | Host stack: Prometheus remote-write receiver, Loki, Grafana, host Alloy; pinned digests; lifecycle and config hashes | `services/monitoring/{monitoring.py,compose.yaml,config/config.py,files/}` | Verified 2026-11-18 |
+| 2 | Grafana, Prometheus and Loki behind Traefik: DNS, gateway SANs, routes, Grafana datasources and Vault admin credentials | `services/traefik/dynamic/`, `lib/config.py`, Corefile, monitoring.py, `files/grafana/` | Verified 2026-11-18 |
 | 3 | VM agents: checksum-pinned .deb via host, package unit, unix metrics and journal, instance labels, memory cap; vmfw permits all three VMs through Traefik | `ansible/roles/alloy/`, `ansible/site.yml`, `host/files/nftables-vmfw.nft` | Verified 2026-11-18 (`4c2fd10`) |
 | 4 | k3s: Grafana `k8s-monitoring` chart via Flux HelmRelease (cluster metrics, kube-state-metrics, pod logs, events) | `kubernetes/monitoring/`, `ansible/roles/fluxcd/` (helm-controller) | Verified 2026-11-23: HelmRelease Ready; kube-state-metrics, kubelet, cadvisor `up` = 1; pod logs (db, flux-system, kube-system, monitoring) and events in Loki; about 545 MiB on be-1 |
 | 5 | Alerts on node metrics: InstanceDown (`up == 0` / no data 2 min), DiskAlmostFull, MemoryHigh, CPUHigh (10 min). Pod rules (PodNotReady, PodRestarting, PostgRESTDown) come with step 4. Shown in Prometheus and Grafana; no notification channel | `files/prometheus/rules.yml` (currently `groups: []`, already mounted and hashed) | Deferred 2026-11-20 |
@@ -809,7 +809,7 @@ host memory 35 % used with the full stack; about 50 MB more for kube-state-metri
 | B09.5b | End-to-end TLS fe-1 → Traefik (decided 2026-11-23) | WireGuard encrypts each link, but tun-1 decrypts wg0 and re-encrypts into wg1, so it sees plain HTTP. Server TLS: a `backend-api` cert in `config.CERTS` (SAN 10.3.1.10, lab CA); Ansible writes it as a `kubernetes.io/tls` Secret in k3s's manifests folder (like `app_secrets`); HelmChartConfig exposes `websecure` on 8000 instead of `web`; `TLSStore` `default` with that cert; Ingress `tls:`; fe-1 `API_URL=https://10.3.1.10:8000` with the lab CA mounted and `SSL_CERT_FILE` (no app.py change). mTLS later if time allows: `frontend-client` cert, Traefik `TLSOption` `RequireAndVerifyClientCert`, small app.py change. Not WireGuard fe-1 ↔ be-1 through the hub: tun-1 could no longer filter tcp 8000. Traefik → PostgREST stays HTTP inside be-1 (a mesh would cover it) | B09.5, pki | Planned |
 | B09.5a | Vault Secrets Operator (with B09.5, decided 2026-11-18) | VSO Helm chart via Flux (same Flux helm-controller as k8s-monitoring), vmfw be-1 → 10.250.0.1:8200, `VaultConnection` with the lab CA, Vault Kubernetes auth (Vault → k3s API :6443, k3s `tls-san`, token reviewer) or JWT auth with k3s's static SA public key, policy `app-db.hcl` (read `kv/data/lab/pipeline/app-db`), `VaultStaticSecret` in git replaces `roles/app_secrets`. Pod manifests unchanged (they only name Secret `app-db`) | B08.7, B09.4 | Planned |
 | B09.7 | k3s NetworkPolicy (decided 2026-11-20, after B09.4) | k3s's embedded policy controller (kube-router, on by default with flannel): default-deny per namespace, then allow postgrest → postgres:5432, ingress to PostgREST :3000, DNS to kube-system, and the k8s-monitoring collectors' scrapes/API access. No Calico/Cilium | B09.4 | Planned |
-| B09.8a | HA: PostgREST scales up and down (decided 2026-11-23) | Remove `replicas` from the PostgREST Deployment (Flux would reset it on every sync and fight the HPA); `kubernetes/apps/db/postgrest-hpa.yaml` (`autoscaling/v2`): min 1, max 4, CPU 50 % of the 50m request, `behavior.scaleDown.stabilizationWindowSeconds: 60` so scale-down shows in about a minute; metrics from k3s's bundled metrics-server. Demo: from fe-1 `seq 1 50000 \| xargs -P 8 -I{} curl -s -o /dev/null http://10.3.1.10:8000/items` (through the tunnel and Traefik), watch `kubectl get hpa,pods -n db -w` and Grafana's "Replicas available by deployment" go 1 → 3–4 and back to 1. Pool check: 4 × PostgREST's 10 connections = 40 of Postgres's 100 | B09.5, B09.4 | Planned |
+| B09.8a | HA: PostgREST scales up and down (decided 2026-11-23) | Remove `replicas` from the PostgREST Deployment (Flux would reset it on every sync and fight the HPA); `kubernetes/apps/db/postgrest-hpa.yaml` (`autoscaling/v2`): min 1, max 4, CPU 50 % of the 50m request, `behavior.scaleDown.stabilizationWindowSeconds: 60` so scale-down shows in about a minute; metrics from k3s's bundled metrics-server. Demo: from fe-1 `seq 1 50000 \| xargs -P 8 -I{} curl -s -o /dev/null http://10.3.1.10:8000/items` (through the tunnel and Traefik), watch `kubectl get hpa,pods -n db -w` and Grafana's "Replicas available by deployment" go 1 → 3–4 and back to 1. Pool check: 4 × PostgREST's 10 connections = 40 of Postgres's 100. Prerequisite found by the first load test (2026-11-23): tun-1's conntrack table (4096 entries on 512 MB, TIME_WAIT 120 s, so about 34 new connections/s) filled at ~100 requests/s and dropped packets (`nf_conntrack: table full`); fix in `roles/wireguard`: `nf_conntrack_max = 65536`, `nf_conntrack_tcp_timeout_time_wait = 30` in `90-lab-forward.conf`, plus `/etc/modules-load.d/lab-conntrack.conf` so the settings survive a reboot. Then a Traefik `rateLimit` Middleware (`traefik.io/v1alpha1`, token bucket, `average`/`period`/`burst`) on the PostgREST Ingress via `traefik.ingress.kubernetes.io/router.middlewares: db-api-ratelimit@kubernetescrd`: over the limit Traefik answers 429 at once (load shedding) instead of PostgREST and Postgres slowing for everyone; one global bucket here (all traffic comes from fe-1 and ServiceLB rewrites the source IP). Demo script `demo/hpa-test.sh` (load from fe-1, HPA and result codes every 10 s, waits for scale-down); Grafana: Namespaces dashboard + Explore queries | B09.5, B09.4 | Planned (HPA applied 2026-11-23, scaled 1 → 3; conntrack fix and rate limit next) |
 | B09.8b | HA: Postgres on CloudNativePG (decided 2026-11-23) | Operator v1.30.2, chart 0.29.2 as OCI (`oci://ghcr.io/cloudnative-pg/charts/cloudnative-pg`, ghcr.io already in Squid): `kubernetes/cnpg/` with `OCIRepository` + `HelmRelease` (target `cnpg-system`), Flux Kustomization `lab-cnpg`, `lab-apps` `dependsOn: lab-cnpg` (CRDs first). Move Secret `flux-proxy` from `kubernetes/monitoring/` to `kubernetes/sources/` with its own Flux Kustomization `lab-sources` (in flux-sync.yaml); `lab-monitoring` and `lab-cnpg` get `dependsOn: lab-sources`, so neither chart depends on the other (rule: Flux-deployed files live in `kubernetes/`, Ansible-deployed ones stay in the roles). `postgres.yaml` → CNPG `Cluster` `pg`: 2 instances, 1 Gi local-path each, `ghcr.io/cloudnative-pg/postgresql:18.7-minimal-trixie` pinned by digest, `bootstrap.initdb` (database `todo`, schema SQL from a ConfigMap via `postInitApplicationSQLRefs`), `managed.roles` `authenticator` (login, NOINHERIT, in `web_anon`, password from Secret). `init.sh` → `init.sql` (schema, table, `web_anon`, grants; no `authenticator`). `app_secrets` writes a new `kubernetes.io/basic-auth` Secret `db-authenticator` (a Secret's type is immutable; `POSTGRES_PASSWORD` dropped). PostgREST `PGRST_DB_URI` → `pg-rw`, password from key `password`. Demo: request loop from fe-1, delete the primary pod (`cnpg.io/instanceRole=primary`), replica promoted in seconds, old pod rejoins as replica. Cost: ~100 MB operator + a second instance (256–512 Mi); existing rows dropped; both instances on be-1, so database failover, not node failover. B09.7 must allow operator → instances :8000 and replication :5432 | B09.8a, B09.4 (Flux helm-controller) | Planned |
 | B09.6 | DR | Walkthrough only (unseal key loss, tfstate loss) | vault-init.json, tfstate | Deferred |
 | B09.1 | Consoles | `host/trust.py` `up()/down()`: copy `state/pki/ca.pem` to `/usr/local/share/ca-certificates/lab.crt`, `update-ca-certificates`, Firefox `policies.json` (Certificates.Install). Called after `pki.up` | Gitea UI, Vault UI, `virsh console` | Last, likely skipped (2026-11-18) |

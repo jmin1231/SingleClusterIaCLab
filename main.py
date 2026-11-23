@@ -11,14 +11,14 @@ from collections.abc import Callable
 from host import kvm, network, ntp, preflight, ssh_access, toolchain, vmfw
 from lib import config, pki
 from lib.log import setup_logging
-from coredns import dns
+from services.coredns import dns
 from podman import podman
-from squid import squid
-from traefik import traefik
-from vault import vault
-from gitea import gitea
-from gitea.runner import runner
-from monitoring import monitoring
+from services.squid import squid
+from services.traefik import traefik
+from services.vault import vault
+from services.gitea import gitea
+from services.gitea.runner import runner
+from services.monitoring import monitoring
 
 log = logging.getLogger(__name__)
 

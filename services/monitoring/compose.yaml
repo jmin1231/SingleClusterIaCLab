@@ -69,7 +69,7 @@ services:
       - /var/log/journal:/var/log/journal:ro
       - /run/udev/data:/run/udev/data:ro
       - /etc/machine-id:/etc/machine-id:ro
-      - ../state/pki/ca.pem:/etc/lab-ca.pem:ro
+      - ../../state/pki/ca.pem:/etc/lab-ca.pem:ro
     cap_drop: [ALL]
 
 volumes:

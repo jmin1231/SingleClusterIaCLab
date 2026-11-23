@@ -21,11 +21,26 @@
   loop: "{{ wg_interfaces }}"
   notify: Restart wireguard
 
+# net.netfilter.* settings exist only once nf_conntrack is loaded; loading it at boot lets them apply after a reboot
+- name: Hub loads conntrack before sysctl runs at boot
+  ansible.builtin.copy:
+    dest: /etc/modules-load.d/lab-conntrack.conf
+    content: |
+      nf_conntrack
+    owner: root
+    group: root
+    mode: "0644"
+  when: "'hub' in group_names"
+
+# The hub filter is stateful, so every connection through tun-1 takes a conntrack entry. The 512 MB default (4096 entries,
+# TIME_WAIT 120 s) fills at ~34 new connections/s and drops packets; 65536 entries and 30 s hold ~2200/s (~20 MB when full).
 - name: Hub forwards traffic between tunnels
   ansible.builtin.copy:
     dest: /etc/sysctl.d/90-lab-forward.conf
     content: |
       net.ipv4.ip_forward = 1
+      net.netfilter.nf_conntrack_max = 65536
+      net.netfilter.nf_conntrack_tcp_timeout_time_wait = 30
     owner: root
     group: root
     mode: "0644"

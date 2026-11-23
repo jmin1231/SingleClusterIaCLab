@@ -15,9 +15,9 @@ from datetime import datetime
 
 from lib import config as lab_config
 from lib.system import compose
-from gitea.config import config
+from services.gitea.config import config
 from podman import podman
-from vault import vault
+from services.vault import vault
 
 log = logging.getLogger(__name__)
 

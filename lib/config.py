@@ -11,7 +11,7 @@ LAB_ADMIN = "labadmin"
 BASE_DIR = Path(__file__).resolve().parents[1]
 STATE_DIR = BASE_DIR / "state"
 LAB_DIR = Path("/var/lib/lab")
-SERVICES_DIR = BASE_DIR  # each service is a folder at the repo root
+SERVICES_DIR = BASE_DIR / "services"  # one folder per host Podman service
 
 # --- Network ---
 BRIDGE = "cloudbr1"

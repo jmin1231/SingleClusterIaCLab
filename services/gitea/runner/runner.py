@@ -12,9 +12,9 @@ import urllib.request
 from host import ssh_access
 from lib import config as lab_config
 from lib.system import install_file, systemctl_ok, write_file
-from gitea.config import config as gitea_config
-from gitea.runner.config import config
-from vault import vault
+from services.gitea.config import config as gitea_config
+from services.gitea.runner.config import config
+from services.vault import vault
 
 log = logging.getLogger(__name__)
 

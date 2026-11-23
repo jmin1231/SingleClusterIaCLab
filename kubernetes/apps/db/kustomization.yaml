@@ -5,6 +5,7 @@ resources:
   - namespace.yml
   - postgres.yaml
   - postgrest.yaml
+  - postgrest-hpa.yaml
 configMapGenerator:
   - name: postgres-init
     files:

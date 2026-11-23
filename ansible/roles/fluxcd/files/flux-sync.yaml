@@ -25,6 +25,8 @@ spec:
   path: ./kubernetes/apps
   prune: true
   wait: true
+  dependsOn:
+    - name: lab-cnpg              # the Cluster in apps/db needs CNPG's CRDs and operator (B09.8b)
   sourceRef:
     kind: GitRepository
     name: lab-repo
@@ -41,6 +43,24 @@ spec:
   retryInterval: 2m
   timeout: 5m                     # first install pulls four images through Squid
   path: ./kubernetes/monitoring
+  prune: true
+  wait: true
+  sourceRef:
+    kind: GitRepository
+    name: lab-repo
+
+---
+# CloudNativePG operator (B09.8b). lab-apps waits for it: the Cluster in apps/db needs its CRDs.
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: lab-cnpg
+  namespace: flux-system
+spec:
+  interval: 5m
+  retryInterval: 2m
+  timeout: 5m                     # first install pulls the chart and the operator image through Squid
+  path: ./kubernetes/cnpg
   prune: true
   wait: true
   sourceRef:

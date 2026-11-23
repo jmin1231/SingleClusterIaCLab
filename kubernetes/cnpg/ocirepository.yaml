@@ -1,0 +1,16 @@
+# The CloudNativePG chart as OCI from ghcr.io (already allowed in Squid); a classic HelmRepository has no proxy setting.
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: OCIRepository
+metadata:
+  name: cnpg
+  namespace: flux-system
+spec:
+  interval: 1h
+  url: oci://ghcr.io/cloudnative-pg/charts/cloudnative-pg
+  ref:
+    tag: 0.29.2
+  layerSelector:
+    mediaType: application/vnd.cncf.helm.chart.content.v1.tar+gzip
+    operation: copy
+  proxySecretRef:
+    name: cnpg-proxy

@@ -43,6 +43,8 @@ services:
       CONF_HASH: ${GRAFANA_CONF_HASH:-}
     volumes:
       - ./files/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./files/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./files/grafana/dashboards:/etc/grafana/dashboards:ro
       - grafana-data:/var/lib/grafana
     cap_drop: [ALL]
 

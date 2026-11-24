@@ -4,6 +4,7 @@ metadata:
   name: pg
 spec:
   instances: 2
+  smartShutdownTimeout: 10        # default 180 s: PostgREST never disconnects, so a graceful delete stalled failover 3 min
   imageName: ghcr.io/cloudnative-pg/postgresql:18.7-minimal-trixie@sha256:c8caac9817d2b5e5e66297a3ccf86d9fcbd68f097aa6cc00161d83f9635e88cc
   storage:
     size: 1Gi

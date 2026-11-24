@@ -55,8 +55,10 @@ TRIVY_MEMBER = "trivy"  # the only file taken from the archive
 # --- VM firewall (vmfw) ---
 # Preinstalled on Ubuntu; installed if missing, never purged
 VMFW_PACKAGES = ["nftables"]
+VMFW_BRIDGE_CT_MODULE = "nf_conntrack_bridge"  # bridge conntrack for lab_sg's ct rules; the kernel would autoload it, up loads it first
 VMFW_NFT_SRC = FILES / "nftables-vmfw.nft"
-VMFW_TABLES = ["bridge lab_vmfw_l2", "inet lab_vmfw"]  # must match the tables in VMFW_NFT_SRC
+VMFW_TABLES = ["bridge lab_sg", "inet lab_vmfw"]  # the tables up() loads from VMFW_NFT_SRC
+VMFW_LEGACY_TABLES = ["bridge lab_vmfw_l2"]  # replaced by lab_sg; down() removes it too. Delete with the lab_vmfw_l2 lines in VMFW_NFT_SRC
 VMFW_MARKER = Path("/run/lab/vmfw.loaded")  # /run empties on reboot, like the rules; terraform.yml checks it
 
 # --- Operator SSH access (ssh_access) ---

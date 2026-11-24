@@ -1,38 +1,113 @@
-# --- Switched: VM <-> VM inside one bridge (the "security groups") ---
+# --- Switched: VM <-> VM inside one bridge: the security groups ---
+# Like a cloud security group: per VM card, stateful (replies to an allowed flow come back on their
+# own) and allow-only (a group lists what may reach its cards; everything else is dropped).
+# Stateful uses bridge conntrack (nf_conntrack_bridge). The kernel loads it with the first ct rule
+# here (nft fails the whole load if it cannot); vmfw.py loads it first so that failure comes earlier.
+# Once loaded it tracks frames on every bridge, Podman's and libvirt's too; only the lab's VM cards
+# are filtered. Bridge and routed traffic share one conntrack table, which is why the source checks
+# run before conntrack and the routed table drops VM -> VM traffic through the host.
+
+# Migration: lab_sg replaced the stateless lab_vmfw_l2. The file loads as one transaction, so the
+# old table goes and lab_sg arrives at the same instant. Bridge conntrack starts empty, though: on
+# that first load a tunnel with traffic in flight loses hub -> spoke packets until the spoke sends
+# again (at most one 25 s keepalive); idle tunnels are unaffected. Remove these two lines and
+# VMFW_LEGACY_TABLES (host/config/config.py) once every host has run up.
 table bridge lab_vmfw_l2
 delete table bridge lab_vmfw_l2
 
-table bridge lab_vmfw_l2 {
-    set wan_taps {
+table bridge lab_sg
+delete table bridge lab_sg
+
+table bridge lab_sg {
+    # Group membership: a card is in a group by being in its set (terraform/compute.tf names the taps)
+    set sg_frontend {
         type ifname
-        elements = { "fe-1-wan", "tun-1-wan", "be-1-wan" }
+        elements = { "fe-1-wan" }
+    }
+    set sg_hub {
+        type ifname
+        elements = { "tun-1-wan" }
+    }
+    set sg_backend {
+        type ifname
+        elements = { "be-1-wan" }
     }
     set mgmt_taps {
         type ifname
         elements = { "fe-1-mgmt", "tun-1-mgmt", "be-1-mgmt" }
     }
+    # Every card above. Only frames from these cards (and between them) are filtered: Podman's and
+    # libvirt's bridges and mgmtbr1's anchor port are not
+    set lab_taps {
+        type ifname
+        elements = { "fe-1-wan", "tun-1-wan", "be-1-wan", "fe-1-mgmt", "tun-1-mgmt", "be-1-mgmt" }
+    }
+    # Each card's own address (terraform/compute.tf), for the source and destination checks
+    set lab_addrs {
+        type ifname . ipv4_addr
+        elements = { "fe-1-wan" . 198.51.100.11, "tun-1-wan" . 198.51.100.12, "be-1-wan" . 198.51.100.13,
+                     "fe-1-mgmt" . 10.250.0.110, "tun-1-mgmt" . 10.250.0.111, "be-1-mgmt" . 10.250.0.112 }
+    }
+
+    # Source checks (a cloud enforces these below its security groups), on every frame a VM card
+    # sends, to another VM or to the host, and before conntrack sees it (priority -300; bridge
+    # conntrack runs at -200): a card sends only from its own address and announces only that
+    # address in ARP. So a VM cannot pass a forged packet off as a reply in another VM's connection,
+    # nor poison the host's or the hub's ARP cache to pull another VM's traffic.
+    chain prerouting {
+        type filter hook prerouting priority -300; policy accept;
+
+        iifname != @lab_taps return
+        iifname . ip saddr != @lab_addrs counter drop comment "spoofed source"
+        iifname . arp saddr ip != @lab_addrs counter drop comment "spoofed ARP"
+    }
 
     chain forward {
         type filter hook forward priority filter; policy accept;
 
-        # mgmt: no VM-to-VM at all; each VM still talks to the host
-        iifname @mgmt_taps oifname @mgmt_taps counter drop
+        iifname != @lab_taps return
+        oifname != @lab_taps return
 
-        # wan: ARP only between each spoke and the hub
-        iifname "fe-1-wan" oifname "tun-1-wan" ether type arp accept
-        iifname "tun-1-wan" oifname "fe-1-wan" ether type arp accept
-        iifname "be-1-wan" oifname "tun-1-wan" ether type arp accept
-        iifname "tun-1-wan" oifname "be-1-wan" ether type arp accept
+        # mgmt: no VM-to-VM at all, not even as a "reply"; each VM still talks to the host
+        iifname @mgmt_taps counter drop comment "mgmt: VM to VM"
 
-        # wan: WireGuard only, spoke -> hub and the hub's replies
-        # (stateless: conntrack in a bridge table needs nf_conntrack_bridge)
-        iifname "fe-1-wan" oifname "tun-1-wan" ether type ip udp dport 51820 accept
-        iifname "tun-1-wan" oifname "fe-1-wan" ether type ip udp sport 51820 accept
-        iifname "be-1-wan" oifname "tun-1-wan" ether type ip udp dport 51821 accept
-        iifname "tun-1-wan" oifname "be-1-wan" ether type ip udp sport 51821 accept
+        # Destination check: a card receives only frames for its own address
+        oifname . ip daddr != @lab_addrs counter drop comment "wan: wrong destination"
 
-        # wan: anything else between VMs (fe-1 <-> be-1, IPv6, other ports)
-        iifname @wan_taps oifname @wan_taps counter drop
+        # ARP carries no connection state, so it is allowed before the stateful rules: only between
+        # cards that may talk (each spoke and the hub)
+        iifname @sg_frontend oifname @sg_hub ether type arp accept
+        iifname @sg_hub oifname @sg_frontend ether type arp accept
+        iifname @sg_backend oifname @sg_hub ether type arp accept
+        iifname @sg_hub oifname @sg_backend ether type arp accept
+
+        # Stateful: replies to a flow a group allowed, and only between cards a group connects. A
+        # bare "ct state established,related accept" would also pass an ICMP error that names another
+        # VM's connection (fe-1 -> be-1 naming be-1's tunnel counts as "related")
+        iifname @sg_frontend oifname @sg_hub ct state established,related accept
+        iifname @sg_hub oifname @sg_frontend ct state established,related accept
+        iifname @sg_backend oifname @sg_hub ct state established,related accept
+        iifname @sg_hub oifname @sg_backend ct state established,related accept
+
+        # Each group's inbound rules; outbound is open, as in a cloud security group
+        oifname @sg_hub jump sg_hub_in
+        oifname @sg_frontend jump sg_frontend_in
+        oifname @sg_backend jump sg_backend_in
+
+        # Default deny: whatever no group allows (fe-1 <-> be-1, IPv6, other ports and protocols)
+        counter drop comment "wan: no security group allows it"
+    }
+
+    chain sg_hub_in {
+        iifname @sg_frontend ether type ip udp dport 51820 ct state new accept  # WireGuard from the frontend
+        iifname @sg_backend ether type ip udp dport 51821 ct state new accept   # WireGuard from the backend
+    }
+
+    # No inbound from other VMs: their only peer is the hub, and they start their tunnel themselves
+    chain sg_frontend_in {
+    }
+
+    chain sg_backend_in {
     }
 }
 
@@ -65,6 +140,12 @@ table inet lab_vmfw {
     # into the podman network, so these requests are forwarded, not input; only this one flow passes.
     chain forward {
         type filter hook forward priority filter; policy accept;
+
+        # No VM reaches another VM through the host, not even as a "reply": routing one VM's packet
+        # back out to the VMs is never legitimate. It must come before the established rule, which
+        # would otherwise pass an ICMP error naming another VM's connection (routed and bridged
+        # flows share one conntrack table, and the host's own SSH sessions into the VMs are in it).
+        iifname { "wan", "mgmtbr1" } oifname { "wan", "mgmtbr1" } counter drop
 
         ct state established,related accept
         iifname $lan_card oifname "wan" ip daddr 198.51.100.11 tcp dport 443 ct status dnat accept

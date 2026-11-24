@@ -79,7 +79,7 @@ platform_up (re-runnable; some steps still reload rules or check/download resour
    3 ntp.up         system.apt_install, install_file(chrony-lab.conf), systemctl
    4 podman.up      repo, system.apt_install, socket_ready
    5 kvm.up         system.apt_install, libvirtd.socket, virsh list
-   6 vmfw.up        preflight.detect_network, render_rules, nft -c, nft -f, marker
+   6 vmfw.up        apt_install, modprobe nf_conntrack_bridge, preflight.detect_network, render_rules, nft -c, nft -f, marker
    7 toolchain.up   ensure_terraform, ensure_ansible, ensure_node, ensure_trivy
    8 dns.up         preflight.detect_network > system.compose("coredns", HOST_IP)
    9 squid.up       compose with config hash
@@ -291,15 +291,27 @@ Files: `host/vmfw.py`, `host/files/nftables-vmfw.nft`
 | Function | Purpose | Called by / calls | Touches |
 |---|---|---|---|
 | `render_rules(network) -> bytes` | Prepend `define lan_card` and `define host_ip` to the .nft file | up | |
-| `up() -> None` | Check, then atomically load both tables. Touch the marker | platform_up / detect_network, render_rules | nft, `/run/lab/vmfw.loaded` |
-| `down() -> None` | `nft destroy table` for both tables, remove the marker | platform_down | |
+| `up() -> None` | Load `nf_conntrack_bridge`, check, then atomically load both tables. Touch the marker | platform_up / detect_network, render_rules | modprobe, nft, `/run/lab/vmfw.loaded` |
+| `down() -> None` | `nft destroy table` for both tables (and the replaced `lab_vmfw_l2`, if still loaded), remove the marker | platform_down | |
 
-Rules: bridge `lab_vmfw_l2` drops mgmt tap-to-tap traffic and allows only ARP + WireGuard
-(fe-1 to tun-1 on udp 51820, be-1 to tun-1 on 51821) on wan. inet `lab_vmfw` DNATs LAN requests
-and host-local requests to HOST_IP:443 to fe-1 198.51.100.11. It permits the three VM management
-IPs through Traefik's 443 port mapping, drops other VM forwarding, and drops new host input from wan.
+Rules: bridge `lab_sg` is the security-group layer, per VM card: stateful (bridge conntrack; the
+kernel would autoload `nf_conntrack_bridge` with the ct rules, up loads it first) and allow-only. Its
+prerouting chain (priority -300, before conntrack) binds every wan and mgmt tap to its own address
+(IPv4 source and ARP sender), also for frames to the host. Its forward chain drops mgmt tap-to-tap
+traffic, checks the destination address, allows ARP only between each spoke and the hub, accepts
+established/related only between the spoke-hub pairs, and group `sg_hub` admits WireGuard from
+`sg_frontend` (udp 51820) and `sg_backend` (udp 51821); everything else is dropped. It replaced the
+stateless `lab_vmfw_l2` on 2026-11-24 (the .nft file deletes the old table; the first load starts bridge
+conntrack empty, so a busy tunnel can drop hub-to-spoke packets until its spoke's next packet, at most
+one 25 s keepalive). inet `lab_vmfw` DNATs LAN requests
+and host-local requests to HOST_IP:443 to fe-1 198.51.100.11. Its forward chain first drops anything
+routed from wan/mgmtbr1 back to wan/mgmtbr1 (VM to VM through the host, even as a "reply": bridge and
+routed flows share one conntrack table), then permits the three VM management IPs through Traefik's 443
+port mapping, drops other VM forwarding, and drops new host input from wan.
 Acceptance: `nft list tables` shows both tables, and the marker exists. `up()` first runs `apt_install(VMFW_PACKAGES)` (nftables: preinstalled on Ubuntu, installed if missing, never purged).
-Status: Verified, including the three-VM Traefik exception (2026-11-18: fe-1 and tun-1 Alloy push through Traefik). Down never run.
+Status: inet `lab_vmfw` Verified, including the three-VM Traefik exception (2026-11-18: fe-1 and tun-1 Alloy push
+through Traefik). bridge `lab_sg` written 2026-11-24 and tested in network namespaces on fe-1, not yet applied on
+the host. Down never run.
 
 ### B02.7 Toolchain for the runner
 Files: `host/toolchain.py`

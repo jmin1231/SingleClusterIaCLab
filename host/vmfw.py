@@ -1,4 +1,4 @@
-"""VM firewall: loads the bridge lab_vmfw_l2 and inet lab_vmfw nftables on every up (gone after a reboot)."""
+"""VM firewall: loads the bridge lab_sg (security groups) and inet lab_vmfw nftables on every up (gone after a reboot)."""
 
 import logging
 import subprocess
@@ -22,6 +22,9 @@ def render_rules(network: dict) -> bytes:
 def up() -> None:
     """Check and load the rules (one atomic swap, safe to repeat), then leave the marker for terraform.yml."""
     apt_install(config.VMFW_PACKAGES)
+    # lab_sg's "ct state" rules use bridge conntrack. The kernel would load it with them (and nft refuses
+    # the whole ruleset if it cannot); loading it here makes the dependency explicit and fails earlier
+    subprocess.run(["modprobe", config.VMFW_BRIDGE_CT_MODULE], check=True)
     network = detect_network()
     rules = render_rules(network)
 
@@ -35,8 +38,8 @@ def up() -> None:
 
 
 def down() -> None:
-    """Remove the two tables and the marker; other tables (libvirt, Podman) are untouched."""
-    for table in config.VMFW_TABLES:
+    """Remove the lab's tables (and the pre-lab_sg one, if still loaded) and the marker; libvirt's and Podman's stay."""
+    for table in config.VMFW_TABLES + config.VMFW_LEGACY_TABLES:
         subprocess.run(["nft", "destroy", "table", *table.split()], check=True)
     config.VMFW_MARKER.unlink(missing_ok=True)
     log.info("VM firewall removed")

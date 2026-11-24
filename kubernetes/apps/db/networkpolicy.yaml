@@ -1,0 +1,101 @@
+# Network policies for namespace db (B09.7), enforced by k3s's embedded kube-router.
+# Default deny in both directions, then one allow per real connection.
+# kube-router always allows traffic from the node itself (kubelet probes, API server -> webhooks).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+spec:
+  podSelector: {}                 # every pod in db
+  policyTypes: [Ingress, Egress]  # no rules listed, so nothing is allowed
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: postgrest
+spec:
+  podSelector:
+    matchLabels:
+      app: postgrest
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:                       # only Traefik, the Ingress controller
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: traefik
+      ports:
+        - { protocol: TCP, port: 3000 }
+  egress:
+    - to:                         # only the database instances
+        - podSelector:
+            matchLabels:
+              cnpg.io/cluster: pg
+      ports:
+        - { protocol: TCP, port: 5432 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: pg-instances
+spec:
+  podSelector:
+    matchLabels:
+      cnpg.io/cluster: pg         # instances pg-1/pg-2 and CNPG's initdb/join job pods
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:                       # SQL: PostgREST, and replicas streaming from the primary
+        - podSelector:
+            matchLabels:
+              app: postgrest
+        - podSelector:
+            matchLabels:
+              cnpg.io/cluster: pg
+      ports:
+        - { protocol: TCP, port: 5432 }
+    - from:                       # instance manager status: other instances and the CNPG operator
+        - podSelector:
+            matchLabels:
+              cnpg.io/cluster: pg
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: cnpg-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: cloudnative-pg
+      ports:
+        - { protocol: TCP, port: 8000 }
+  egress:
+    - to:                         # replication and status between instances
+        - podSelector:
+            matchLabels:
+              cnpg.io/cluster: pg
+      ports:
+        - { protocol: TCP, port: 5432 }
+        - { protocol: TCP, port: 8000 }
+    - to:                         # Kubernetes API: the instance manager watches the Cluster (needed for failover)
+        - ipBlock:
+            cidr: 10.3.1.10/32    # be-1's API server; checked after the Service IP 10.43.0.1:443 becomes 10.3.1.10:6443
+      ports:
+        - { protocol: TCP, port: 6443 }

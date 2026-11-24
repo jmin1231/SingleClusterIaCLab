@@ -6,6 +6,7 @@ resources:
   - postgres.yaml
   - postgrest.yaml
   - postgrest-hpa.yaml
+  - networkpolicy.yaml          # B09.7: default deny; Postgres only from PostgREST, PostgREST only from Traefik
 configMapGenerator:
   - name: postgres-init
     files:

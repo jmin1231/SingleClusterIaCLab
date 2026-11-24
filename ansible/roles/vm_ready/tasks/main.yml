@@ -1,3 +1,6 @@
+# Wait until the VM is up: SSH answers and cloud-init has finished its first-boot setup.
+# Runs first on every VM, so later roles never race the first boot.
+
 - name: Wait until SSH answers
   ansible.builtin.wait_for_connection:
     timeout: 300

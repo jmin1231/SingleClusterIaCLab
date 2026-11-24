@@ -1,5 +1,16 @@
 # Deliver the app database's passwords to k3s on be-1
 
+# k3s applies the manifests folder at once, so the Secret's namespace must exist first.
+# Flux creates it from kubernetes/apps, after lab-cnpg is Ready (dependsOn).
+- name: Namespace db exists
+  ansible.builtin.command:
+    cmd: k3s kubectl get namespace db
+  register: db_namespace
+  until: db_namespace.rc == 0
+  retries: 60                     # ~10 min: on a fresh build lab-cnpg first pulls its chart and operator image through Squid
+  delay: 10
+  changed_when: false
+
 - name: App database authenticator secret
   ansible.builtin.template:
     src: db-authenticator.yaml.j2

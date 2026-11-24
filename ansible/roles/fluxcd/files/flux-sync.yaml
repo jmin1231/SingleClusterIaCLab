@@ -21,7 +21,7 @@ metadata:
 spec:
   interval: 5m
   retryInterval: 2m
-  timeout: 3m
+  timeout: 5m                     # first CNPG bootstrap: image pull through Squid, initdb, replica clone
   path: ./kubernetes/apps
   prune: true
   wait: true

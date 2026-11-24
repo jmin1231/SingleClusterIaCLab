@@ -1,14 +1,5 @@
 # Deliver the app database's passwords to k3s on be-1
 
-- name: App database Secret is in the k3s manifests folder
-  ansible.builtin.template:
-    src: app-db.yaml.j2
-    dest: /var/lib/rancher/k3s/server/manifests/app-db.yaml
-    owner: root
-    group: root
-    mode: "0600"
-  no_log: true
-
 - name: App database authenticator secret
   ansible.builtin.template:
     src: db-authenticator.yaml.j2

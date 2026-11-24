@@ -1,72 +1,33 @@
-apiVersion: v1
-kind: PersistentVolumeClaim
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
 metadata:
-  name: postgres-data
+  name: pg
 spec:
-  accessModes: [ReadWriteOnce]
+  instances: 2
+  imageName: ghcr.io/cloudnative-pg/postgresql:18.7-minimal-trixie@sha256:c8caac9817d2b5e5e66297a3ccf86d9fcbd68f097aa6cc00161d83f9635e88cc
+  storage:
+    size: 1Gi
   resources:
     requests:
-      storage: 1Gi
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: postgres
-spec:
-  strategy:
-    type: Recreate
-  selector:
-    matchLabels:
-      app: postgres
-  template:
-    metadata:
-      labels:
-        app: postgres
-    spec:
-      containers:
-        - name: postgres
-          image: docker.io/library/postgres:18.7-alpine@sha256:b6972e1115a4ff8eba5d7f7d19184926d1e16d7d1136ae1e1a7ebf286da0f015
-          ports:
-            - name: postgres
-              containerPort: 5432
-          env:
-            - name: POSTGRES_DB
-              value: todo
-          envFrom:
-            - secretRef:
-                name: app-db
-          volumeMounts:
-            - name: data
-              mountPath: /var/lib/postgresql
-            - name: init
-              mountPath: /docker-entrypoint-initdb.d
-              readOnly: true
-          readinessProbe:
-            exec:
-              command: [pg_isready, -h, "127.0.0.1", -U, postgres, -d, todo]
-            periodSeconds: 5
-          resources:
-            requests:
-              cpu: 100m
-              memory: 256Mi
-            limits:
-              memory: 512Mi
-      volumes:
-        - name: data
-          persistentVolumeClaim:
-            claimName: postgres-data
-        - name: init
-          configMap:
-            name: postgres-init
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: postgres
-spec:
-  selector:
-    app: postgres
-  ports:
-    - name: postgres
-      port: 5432
-      targetPort: postgres
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      memory: 512Mi
+  bootstrap:
+    initdb:
+      database: todo
+      owner: app
+      postInitApplicationSQLRefs:
+        configMapRefs:
+          - name: postgres-init
+            key: init.sql
+  managed:
+    roles:
+      - name: authenticator
+        ensure: present
+        login: true
+        inherit: false
+        inRoles:
+          - api_anon
+        passwordSecret:
+          name: db-authenticator

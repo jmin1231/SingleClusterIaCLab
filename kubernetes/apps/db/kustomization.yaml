@@ -9,4 +9,6 @@ resources:
 configMapGenerator:
   - name: postgres-init
     files:
-      - init.sh
+      - init.sql
+    options:
+      disableNameSuffixHash: true

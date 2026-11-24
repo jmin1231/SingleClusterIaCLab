@@ -8,3 +8,12 @@
     group: root
     mode: "0600"
   no_log: true
+
+- name: App database authenticator secret
+  ansible.builtin.template:
+    src: db-authenticator.yaml.j2
+    dest: /var/lib/rancher/k3s/server/manifests/db-authenticator.yaml
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true

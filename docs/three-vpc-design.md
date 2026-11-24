@@ -43,7 +43,7 @@ WireGuard transport:
   be-1  -> 198.51.100.12:51821 -> tun-1
 
 Management, separate from the above:
-  host 10.250.0.1 -- cloudbr1 -- eth2 on each VM
+  host 10.250.0.1 -- mgmtbr1 -- eth2 on each VM
   guest-to-guest management traffic is blocked on the host bridge
 ```
 
@@ -59,7 +59,7 @@ the selected WireGuard exchanges and the address-resolution traffic they need.
 | `vpc-hub` | `10.2.0.0/16` | `10.2.1.0/24` | None | tun-1 `10.2.1.10` |
 | `vpc-west` | `10.3.0.0/16` | `10.3.1.0/24` | None | be-1 `10.3.1.10` |
 | `wan` | — | `198.51.100.0/24` | `198.51.100.1` | fe-1 `.11`, tun-1 `.12`, be-1 `.13` |
-| Existing `cloudbr1` | — | `10.250.0.0/24` | `10.250.0.1` | fe-1 `.110`, tun-1 `.111`, be-1 `.112` |
+| Existing `mgmtbr1` | — | `10.250.0.0/24` | `10.250.0.1` | fe-1 `.110`, tun-1 `.111`, be-1 `.112` |
 
 Each `/16` reserves space for its simulated VPC; only the listed `/24` is attached
 today. Declaring a VPC range does not create all its possible subnets or routes.
@@ -80,7 +80,7 @@ Terraform creates four libvirt networks:
   `198.51.100.1/24`, no DHCP, and DNS disabled. There is no source NAT or
   masquerading for guest internet access.
 
-Management attaches directly to the existing `cloudbr1`; Terraform does not
+Management attaches directly to the existing `mgmtbr1`; Terraform does not
 create another management network. Omitting host gateway addresses on a private
 libvirt network leaves guest communication on the bridge without making the host
 its IP gateway. [Libvirt network format](https://libvirt.org/formatnetwork.html)
@@ -193,7 +193,7 @@ sender identity before accepting traffic. Apply source checks to ingress toward
 the host as well as ingress forwarded to another guest. An IP-only allow-list
 does not justify the claim that guest root cannot impersonate another guest.
 
-On `cloudbr1`, block guest-to-guest forwarding, including ARP and IPv6, while
+On `mgmtbr1`, block guest-to-guest forwarding, including ARP and IPv6, while
 preserving each guest's ARP and IP communication with the host. The three
 management addresses and Ansible inventory stay unchanged. This extra bridge
 rule closes the management bypass without creating more networks.

@@ -114,7 +114,10 @@ def ssh_key(token: str) -> None:
 
 
 def app_db_passwords(token: str) -> None:
-    """Store the app database's passwords at kv/lab/pipeline/app-db once; never replace them."""
+    """Store the app database's authenticator password at kv/lab/pipeline/app-db once; never replace it.
+
+    CNPG's postgres superuser has no password (local peer auth only), so only PostgREST's login role is stored here.
+    """
     path = "kv/data/lab/pipeline/app-db"
 
     if vault_api("GET", path, token=token):
@@ -122,7 +125,6 @@ def app_db_passwords(token: str) -> None:
         return
 
     passwords = {
-        "postgres_password": secrets.token_urlsafe(24),
         "authenticator_password": secrets.token_urlsafe(24),
     }
     vault_api("POST", path, {"data": passwords}, token=token)

@@ -1,0 +1,24 @@
+name: teardown
+
+# Removes what terraform.yml created (VMs, lab networks, pool); the host platform stays.
+# Started only by `bootstrap.sh teardown` (a dispatch); `update` builds the VMs again.
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: lab-deploy               # same group as deploy.yml: never destroy while a deploy runs
+  cancel-in-progress: false
+
+jobs:
+  destroy:
+    runs-on: host
+    env:
+      TMPDIR: /var/lib/lab/tfstate
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: libvirt answers
+        run: virsh --connect qemu:///system list
+      - run: terraform -chdir=terraform init -input=false -lockfile=readonly
+      - run: terraform -chdir=terraform destroy -auto-approve -input=false

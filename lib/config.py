@@ -14,7 +14,7 @@ LAB_DIR = Path("/var/lib/lab")
 SERVICES_DIR = BASE_DIR / "services"  # one folder per host Podman service
 
 # --- Network ---
-BRIDGE = "cloudbr1"
+BRIDGE = "mgmtbr1"
 VMNET = ipaddress.ip_interface("10.250.0.1/24")
 
 # --- Apt ---

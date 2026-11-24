@@ -39,8 +39,8 @@ first pipeline finishes, so retry a failed pipeline with `update` if the marker 
 | 3 | B09.8b HA: Postgres on CloudNativePG | 2-instance CNPG `Cluster` with automatic failover replaces the Postgres Deployment (decided 2026-11-23) | Verified 2026-11-24 (failover demonstrated; crash re-run skipped) |
 | 4 | B09.5b end-to-end TLS | TLS from fe-1 to be-1's Traefik so tun-1 only forwards ciphertext; server TLS first, mTLS if time allows (decided 2026-11-23) | Dropped 2026-11-24 ("too much work"); talking point only: the hub filters at L4 and can see the HTTP API traffic |
 | 5 | B09.7 k3s NetworkPolicy | Default-deny plus allow rules for the app, CNPG and the monitoring collectors using k3s's built-in policy controller (flannel + embedded kube-router; no CNI swap); last, so it covers the final set of pods | Verified 2026-11-24 for namespace `db` (`d0a6496`); monitoring policies dropped 2026-11-24; IPv4 only |
-| 6 | Fresh-build blocker | Split the Flux app-readiness wait from Flux setup so `app_secrets` runs first (B07) | Written 2026-11-24 (`roles/app_deployed` after `app_secrets`, which waits for namespace `db`); verified by the fresh build in 7 |
-| 7 | B08.5 rebuild from zero | `destroy` with the current code, rename `cloudbr1` → `mgmtbr1`, then `up` in a **fresh 4-core / 16 GB Ubuntu 24.04 Desktop VM** (nested KVM); proves the lab runs on the target size | Planned |
+| 6 | Fresh-build blocker | Split the Flux app-readiness wait from Flux setup so `app_secrets` runs first (B07) | Written 2026-11-24 (`roles/app_deployed` after `app_secrets`, which waits for namespace `db`); `update` green on the existing lab (`241cd2f`); fresh-build proof in 7 |
+| 7 | B08.5 rebuild from zero | `destroy` with the current code, rename `cloudbr1` → `mgmtbr1`, then `up` in a **fresh 4-core / 16 GB Ubuntu 24.04 Desktop VM** (nested KVM); proves the lab runs on the target size. Then `teardown` and `update` there | `destroy` run on the dev VM 2026-11-24 (lab removed; libvirt's `virbr0` stays until reboot); rename and `teardown` written 2026-11-24; fresh `up` next |
 | 8 | B09.5a | Vault Secrets Operator replacing `roles/app_secrets` | Planned |
 | 9 | B09.6 | DR walkthrough (unseal key loss, tfstate loss) | Discussion only |
 | 10 | B09.1–B09.3 | Console CA trust, host SSH hardening, host firewall | Last, likely skipped |
@@ -109,7 +109,7 @@ Order rules that the code depends on:
 
 | Rule | Why |
 |---|---|
-| network before ntp and dns | chrony and CoreDNS bind 10.250.0.1 on cloudbr1 |
+| network before ntp and dns | chrony and CoreDNS bind 10.250.0.1 on mgmtbr1 |
 | kvm before runner | Terraform in the runner's jobs needs libvirt (the runner runs as root since 2026-11-18) |
 | dns before gitea and runner | `gitea_api`, `push` and `gitea-runner register` use `https://gitea.lab.test`, which the host resolves only through CoreDNS (netplan `~lab.test`). `vault_api` uses the IP, but ansible.yml's vault-action uses `vault.lab.test` |
 | podman before dns, vault, traefik, gitea | `system.compose` talks to the Podman socket |
@@ -236,18 +236,18 @@ Files: `host/__init__.py`, `host/preflight.py`
 Acceptance: the log shows the LAN card, address and gateway. Status: Verified.
 
 ### B02.2 Management bridge
-Files: `host/network.py`, `host/config/{__init__,config}.py`, `host/files/60-lab-cloudbr1.yaml`
+Files: `host/network.py`, `host/config/{__init__,config}.py`, `host/files/60-lab-mgmtbr1.yaml`
 
 | Function | Purpose | Called by / calls | Touches |
 |---|---|---|---|
 | `vmnet_conflicts() -> list[str]` | Routes that overlap 10.250.0.0/24 | up / ip_json | |
-| `check() -> bool` | cloudbr1 holds 10.250.0.1 | up / ip_json | |
-| `wait_bridge() -> None` | Wait for cloudbr1's address after netplan apply | up / check | |
-| `reattach_taps() -> None` | Reattach existing VM management taps after bridge recreation or an interrupted run | up / ip_json | cloudbr1, VM management taps |
-| `up() -> None` | Install netplan file, apply if needed, wait for the address, reattach taps (also on unchanged runs) | platform_up / install_file | `/etc/netplan/60-lab-cloudbr1.yaml` |
-| `down() -> None` | Remove the file, netplan apply, delete the links | platform_down | cloudbr1, cloudbr1-anchor |
+| `check() -> bool` | mgmtbr1 holds 10.250.0.1 | up / ip_json | |
+| `wait_bridge() -> None` | Wait for mgmtbr1's address after netplan apply | up / check | |
+| `reattach_taps() -> None` | Reattach existing VM management taps after bridge recreation or an interrupted run | up / ip_json | mgmtbr1, VM management taps |
+| `up() -> None` | Install netplan file, apply if needed, wait for the address, reattach taps (also on unchanged runs) | platform_up / install_file | `/etc/netplan/60-lab-mgmtbr1.yaml` |
+| `down() -> None` | Remove the file, netplan apply, delete the links | platform_down | mgmtbr1, mgmtbr1-anchor |
 
-Acceptance: `ip -4 addr show cloudbr1` shows 10.250.0.1/24. Status: Verified.
+Acceptance: `ip -4 addr show mgmtbr1` shows 10.250.0.1/24. Status: Verified.
 
 ### B02.3 Time
 Files: `host/ntp.py`, `host/files/chrony-lab.conf`
@@ -455,11 +455,11 @@ Files: `main.py`
 |---|---|---|---|
 | `cmd_up() -> None` | First build (see the call graph) | COMMANDS["up"] | `state/initialized` |
 | `cmd_update() -> None` | Converge the host, push or dispatch, follow | COMMANDS["update"] | |
-| `cmd_teardown() -> None` | Not implemented: logs an error and exits 1 (B08.5) | COMMANDS["teardown"] | |
+| `cmd_teardown() -> None` | Marker check, `platform_up`, dispatch `teardown.yml` (terraform destroy on the runner), `follow_run` (written 2026-11-24, B08.5) | COMMANDS["teardown"] | gitea.dispatch |
 | `cmd_destroy() -> None` | platform_down, `rmtree(/var/lib/lab)`, remove the marker | COMMANDS["destroy"] | |
 
 Acceptance: `sudo ./bootstrap.sh update` with no edits dispatches a run and prints its job results.
-Status: cmd_update has recorded successful runs. cmd_up Implemented (never run from zero in its current form). cmd_destroy Implemented (current full path awaits B08.5 rehearsal). cmd_teardown is an error stub; implementation is optional (B08.5).
+Status: cmd_update has recorded successful runs. cmd_up Implemented (never run from zero in its current form). cmd_destroy Implemented (current full path awaits B08.5 rehearsal). cmd_teardown written 2026-11-24, first run in the B08.5 rehearsal.
 
 ### B05.3 Workflow skeleton
 Files: `.gitea/workflows/{deploy,check,image,terraform,ansible}.yml`
@@ -486,7 +486,7 @@ Files and resources in build order (provider dmacvicar/libvirt 0.9.9, ansible/an
 | `terraform/variables.tf` | `base_image_url`, `ssh_public_key_file` (/etc/lab-runner/ssh.pub), `lab_ca_cert_file` (/etc/lab-runner/ca.pem) | runner.ensure_ssh_key, runner.ensure_config |
 | `terraform/storage.tf` | `libvirt_pool.lab` (/var/lib/lab/pool), `libvirt_volume.base` (Ubuntu 24.04 cloud image) | compute.tf backing store |
 | `terraform/network.tf` | `site_a`, `site_hub`, `site_c` (isolated, no IP), `wan` (route, 198.51.100.1/24) | domain NIC 0 and NIC 1, vmfw bridge name `wan` |
-| `terraform/compute.tf` | `local.vms`, `libvirt_volume.disk` (`<vm>-<gb>g.qcow2`), `libvirt_cloudinit_disk.seed`, `libvirt_volume.seed` (iso), `libvirt_domain.vm` (file-path disks, NICs vpc/wan/mgmt with taps `<vm>-vpc/-wan/-mgmt`) | vmfw tap names, cloudbr1 |
+| `terraform/compute.tf` | `local.vms`, `libvirt_volume.disk` (`<vm>-<gb>g.qcow2`), `libvirt_cloudinit_disk.seed`, `libvirt_volume.seed` (iso), `libvirt_domain.vm` (file-path disks, NICs vpc/wan/mgmt with taps `<vm>-vpc/-wan/-mgmt`) | vmfw tap names, mgmtbr1 |
 | `terraform/cloud-init/user-data.yaml.tftpl` | User `user` (key only, sudo), root login off, `ca_certs.trusted` | ssh.pub, ca.pem |
 | `terraform/cloud-init/network-config.yaml.tftpl` | eth0 vpc_ip, eth1 wan_ip with default route via 198.51.100.1, eth2 mgmt_ip with DNS 10.250.0.1 | CoreDNS |
 | `terraform/inventory.tf` | `ansible_host.vm`: groups frontend/hub/backend, ansible_host = mgmt_ip, ansible_user = user | ansible/inventory.yml |
@@ -554,7 +554,7 @@ squid 7.7-0ubuntu0.26.04.2 (checked in /usr/share/rocks/dpkg.query); a Rockcraft
 binary `squid-gnutls`, so the entrypoint runs it directly, `cap_drop: ALL` with no additions, `pid_filename none`; own
 config path `/etc/squid-lab`, FTP denied for CVE-2026-47729, file access log at `/var/log/squid/access.log` in the
 container, a squid.conf hash in the compose env recreates the container on change), `proxy.lab.test` in the Corefile,
-and vmfw now also drops forwarding to/from `cloudbr1`, `site-a`, `site-hub`, `site-c` (a changed guest route could
+and vmfw now also drops forwarding to/from `mgmtbr1`, `site-a`, `site-hub`, `site-c` (a changed guest route could
 otherwise leave via the host through 10.250.0.1; the tier networks are isolated, so their names are only a guard). Extra acceptance: `curl -x … http://example.com`
 returns 403, and the new vmfw drop counters exist (`nft list chain inet lab_vmfw forward`).
 
@@ -633,13 +633,13 @@ fe-1 blocked; drop counter rises; mgmt and wan paths between VMs still blocked. 
 ### B08.5 Teardown, destroy, and a fresh up from zero (Planned after B09.4; includes the bridge rename)
 Done 2026-11-16 evening (Implemented, not yet run): `kvm.remove_lab_vms` before the libvirt purge,
 `rmtree(/var/lib/lab)` in cmd_destroy (pool, tfstate, runner home, Vault files), `start_run` for up,
-`vault.down` guard, `cmd_teardown` exits 1.
+`vault.down` guard, `cmd_teardown` exits 1 (replaced by the real teardown 2026-11-24).
 
 | Still to do | File | Connects to |
 |---|---|---|
 | Root-owned `.git` after commit_changes: Done 2026-11-17 (update e5cf4a0, no root-owned files in .git) (`git()` runs as SUDO_UID:SUDO_GID; `bootstrap.sh` refuses to start without SUDO_UID) | `gitea.py`, `bootstrap.sh` | `.git` stays the user's |
-| Optional `teardown` (VMs only, keep the platform): `teardown.yml` with `workflow_dispatch`, TMPDIR, `terraform init` + `destroy -auto-approve`; `dispatch(creds, workflow=GITEA_WORKFLOW)`; `cmd_teardown` = `follow_run(creds, dispatch(creds, "teardown.yml"))` | `.gitea/workflows/teardown.yml`, `gitea.py`, `main.py` | runner, tfstate |
-| Rename the mgmt bridge `cloudbr1` → `mgmtbr1` (name confirmed 2026-11-18; do it after B09.4 monitoring, then rebuild in a fresh 4-core / 16 GB VM as the from-zero test; anchor `mgmtbr1-anchor`, netplan `60-lab-mgmtbr1.yaml`). Do it between `destroy` (old code removes cloudbr1) and the fresh `up`, so no migration code is needed. Renaming on a live host would leave two bridges with 10.250.0.1 | `lib/config.py` BRIDGE, `host/config/config.py`, the netplan file, `network.py`, `nftables-vmfw.nft`, `terraform/compute.tf`, comments in `60-lab-ssh.conf`/`chrony-lab.conf`, docs | everything on mgmt |
+| Written 2026-11-24, not yet run: `teardown` (VMs only, keep the platform): `teardown.yml` with `workflow_dispatch`, TMPDIR, `terraform init` + `destroy -auto-approve`; `dispatch(creds, workflow=GITEA_WORKFLOW)`; `cmd_teardown` = `platform_up` then `follow_run(creds, dispatch(creds, GITEA_TEARDOWN_WORKFLOW))`; same concurrency group as deploy.yml | `.gitea/workflows/teardown.yml`, `gitea.py`, `main.py` | runner, tfstate |
+| Done in code 2026-11-24, after the dev VM's `destroy`: rename the mgmt bridge `cloudbr1` → `mgmtbr1` (name confirmed 2026-11-18; do it after B09.4 monitoring, then rebuild in a fresh 4-core / 16 GB VM as the from-zero test; anchor `mgmtbr1-anchor`, netplan `60-lab-mgmtbr1.yaml`). Do it between `destroy` (old code removes cloudbr1) and the fresh `up`, so no migration code is needed. Renaming on a live host would leave two bridges with 10.250.0.1 | `lib/config.py` BRIDGE, `host/config/config.py`, the netplan file, `network.py`, `nftables-vmfw.nft`, `terraform/compute.tf`, comments in `60-lab-ssh.conf`/`chrony-lab.conf`, docs | everything on mgmt |
 | The rehearsal itself | | |
 
 Prerequisite: resolve the B07 Flux/app Secret ordering blocker before the rehearsal. The target VM
@@ -815,7 +815,7 @@ host memory 35 % used with the full stack; about 50 MB more for kube-state-metri
 | B09.6 | DR | Walkthrough only (unseal key loss, tfstate loss) | vault-init.json, tfstate | Deferred |
 | B09.1 | Consoles | `host/trust.py` `up()/down()`: copy `state/pki/ca.pem` to `/usr/local/share/ca-certificates/lab.crt`, `update-ca-certificates`, Firefox `policies.json` (Certificates.Install). Called after `pki.up` | Gitea UI, Vault UI, `virsh console` | Last, likely skipped (2026-11-18) |
 | B09.2 | Host SSH hardening | `host/sshd.py` + `files/sshd-lab.conf` drop-in (no passwords, no root), validate with `sshd -t`, reload | platform_up after network | Last, likely skipped (2026-11-18) |
-| B09.3 | Host firewall (today every VM reaches anything listening on 10.250.0.1 or 0.0.0.0, e.g. sshd 22, rpcbind 111) | `files/nftables-host.nft` table `inet lab_host` (input drop. Allow lo, established, LAN ssh; cloudbr1 to 53, 123, 443, 3128, 8200; LAN to host_ip 53 if LAN clients should resolve app.lab.test, since CoreDNS binds HOST_IP too), loaded by `vmfw.up` or `hostfw.py` next to it | must not break the LAN :443 DNAT | Last, likely skipped (2026-11-18) |
+| B09.3 | Host firewall (today every VM reaches anything listening on 10.250.0.1 or 0.0.0.0, e.g. sshd 22, rpcbind 111) | `files/nftables-host.nft` table `inet lab_host` (input drop. Allow lo, established, LAN ssh; mgmtbr1 to 53, 123, 443, 3128, 8200; LAN to host_ip 53 if LAN clients should resolve app.lab.test, since CoreDNS binds HOST_IP too), loaded by `vmfw.up` or `hostfw.py` next to it | must not break the LAN :443 DNAT | Last, likely skipped (2026-11-18) |
 
 Chart delivery is settled: Flux's helm-controller runs since B09.4 step 4 (k8s-monitoring), and
 B09.5's Traefik uses k3s's built-in Helm controller. For VSO, configure Vault authentication/policy and network access, then
@@ -855,7 +855,7 @@ Left:
 |---|---|
 | `state/pki/{app-root,backend-gw,frontend-client}*` | Leftover local files, gitignored. Delete by hand, or they go with the next destroy |
 | `docs/three-vpc-design.md` | Keep for B08.3/B08.4. Rename vpc-east/hub/west to site-a/site-hub/site-c, and lab_vpc to lab_vmfw |
-| `docs/diagram/**` | Updated in place on 2026-11-18 to the B08.7 build (original layout kept: Podman box vs KVM box). Add monitoring (Prometheus, Loki, Grafana in the Podman box behind Traefik; Alloy on the host and each VM) after B09.4, and rename cloudbr1 → mgmtbr1 with B08.5 |
+| `docs/diagram/**` | Updated in place on 2026-11-18 to the B08.7 build (original layout kept: Podman box vs KVM box). Add monitoring (Prometheus, Loki, Grafana in the Podman box behind Traefik; Alloy on the host and each VM) after B09.4. Bridge renamed to mgmtbr1 in both drawio files and their .md 2026-11-24 |
 | Optional | Simplify `bootstrap.sh` ensure_python to check and die. Keep `LAB_ADMIN` shared: Gitea and Grafana both use it (`RUNNER_UID` removed 2026-11-18) |
 
 ---
@@ -867,7 +867,8 @@ Left:
 | Fresh build waits for healthy database workloads before delivering their required Secret | `ansible/site.yml`, `roles/fluxcd`, `roles/app_secrets`, `roles/app_deployed` | Fixed in code 2026-11-24 (Flux sync → namespace exists → Secret exists → app_deployed wait); confirm in the B08.5 fresh build |
 | Root runs `git add/commit`, so `.git/index` and objects become root-owned and the user's next commit fails | `gitea.commit_changes` | Done 2026-11-17 (B08.5) |
 | `podman.down` wipes all rootful containers on the host | `podman.py` | Accept: the lab owns the host (README) |
-| Any change to the netplan file (even a comment) runs `netplan apply`, which rebuilds `cloudbr1` and leaves the running VMs' `*-mgmt` taps detached (run #9). Workaround: `ip link set <vm>-mgmt master cloudbr1` | `network.up` | Implemented 2026-11-17, not yet run: `network.reattach_taps()` on every `network.up` (after `netplan apply` and on the early return) |
+| `destroy` leaves libvirt's default network bridge `virbr0` (192.168.122.1) up after purging libvirt (seen 2026-11-24) | `kvm.down` | Optional: `virsh net-destroy default` before the purge; gone after a reboot |
+| Any change to the netplan file (even a comment) runs `netplan apply`, which rebuilds `mgmtbr1` and leaves the running VMs' `*-mgmt` taps detached (run #9). Workaround: `ip link set <vm>-mgmt master mgmtbr1` | `network.up` | Implemented 2026-11-17, not yet run: `network.reattach_taps()` on every `network.up` (after `netplan apply` and on the early return) |
 | Runner `VERSION` bump ignored (any existing binary is accepted) | `runner.ensure_binary` | Optional |
 | cloud-init exit 2 with `status: done` passes `vm_ready` | `roles/vm_ready` | Accept: exit 2 means warnings; a failure prints `status: error` |
 | `write_file` does not re-apply the mode when the content is unchanged | `system.py` | Accept |

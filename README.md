@@ -2,7 +2,7 @@
 
 One Ubuntu 24.04 host runs a small private cloud, built and changed through a pipeline:
 
-- **Host platform** (Python, the repo root): management bridge `cloudbr1` (10.250.0.1/24), chrony,
+- **Host platform** (Python, the repo root): management bridge `mgmtbr1` (10.250.0.1/24), chrony,
   Podman, KVM/libvirt, a VM firewall (nftables), CoreDNS (`lab.test`), a cfssl CA,
   Vault, Traefik, Gitea and a Gitea Actions runner.
 - **Tenant infrastructure** (declarative): Terraform (libvirt provider) builds three VMs on

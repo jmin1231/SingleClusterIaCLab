@@ -16,7 +16,7 @@ what reaches it.
 | site-c `10.3.1.0/24` (isolated libvirt network) | eth0 `10.3.1.10` | The "VPC" address. k3s uses it as node-ip, and frontend requests are addressed to `10.3.1.10:8000`. No other VM is on this network. |
 | wan `198.51.100.0/24` | eth1 `198.51.100.13` | The default route. Carries the WireGuard UDP to tun-1 `198.51.100.12:51821`. |
 | WireGuard wg1 `10.99.1.0/24` | `10.99.1.2` | Frontend requests from fe-1 (source `10.1.1.10`) arrive through tun-1. The tun-1 hub filter forwards only `10.1.1.10 → 10.3.1.10` tcp 8000 (new connections plus replies), so fe-1 cannot reach `:5432`, `:22` or `:6443`. |
-| mgmt `10.250.0.0/24` (cloudbr1) | eth2 `10.250.0.112` | Talking to the host at `10.250.0.1`. In: SSH 22 (Ansible). Out: Gitea via Traefik 443 (Flux; the host's `vmfw` lets only be-1 through on 443), Squid `proxy.lab.test:3128` (apt, k3s installer, Flux CLI, container images), and DNS 53. be-1 never talks to Vault. |
+| mgmt `10.250.0.0/24` (mgmtbr1) | eth2 `10.250.0.112` | Talking to the host at `10.250.0.1`. In: SSH 22 (Ansible). Out: Gitea via Traefik 443 (Flux; the host's `vmfw` lets only be-1 through on 443), Squid `proxy.lab.test:3128` (apt, k3s installer, Flux CLI, container images), and DNS 53. be-1 never talks to Vault. |
 
 ## k3s namespaces
 

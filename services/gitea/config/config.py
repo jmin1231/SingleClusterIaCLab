@@ -14,6 +14,7 @@ GITEA_ORG = "lab"
 GITEA_REPO = "lab"
 GITEA_REPO_URL = f"{GITEA_URL}/{GITEA_ORG}/{GITEA_REPO}.git"
 GITEA_WORKFLOW = "deploy.yml"
+GITEA_TEARDOWN_WORKFLOW = "teardown.yml"  # dispatch only; never triggered by a push
 
 RUN_POLL_SECONDS = 10
 RUN_START_TIMEOUT = 60

@@ -159,7 +159,7 @@ resource "libvirt_domain" "vm" {
       { # eth2: mgmt
         model  = { type = "virtio" }
         mac    = { address = each.value.mgmt_mac }
-        source = { bridge = { bridge = "cloudbr1" } }
+        source = { bridge = { bridge = "mgmtbr1" } }
         target = { dev = "${each.key}-mgmt" }
       }
     ]

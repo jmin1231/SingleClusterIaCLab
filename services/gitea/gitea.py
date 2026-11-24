@@ -206,14 +206,23 @@ def main_differs(creds: dict) -> bool:
     return git("rev-parse", "HEAD") != branch.get("commit", {}).get("id")
 
 
-def dispatch(creds: dict) -> int:
-    """Start one deploy.yml run on main without a push (nothing new, e.g. after a reboot); returns its id."""
-    details = gitea_api(
-        creds, "POST",
-        f"repos/{config.GITEA_ORG}/{config.GITEA_REPO}/actions/workflows/{config.GITEA_WORKFLOW}/dispatches?return_run_details=true",
-        {"ref": "main"},
-    )
-    log.info("nothing new to push; started %s on main", config.GITEA_WORKFLOW)
+def dispatch(creds: dict, workflow: str = config.GITEA_WORKFLOW) -> int:
+    """Start one run of workflow as it is on Gitea's main, without a push; returns its id.
+
+    Gitea refuses unless the file is on main and lists workflow_dispatch under on:.
+    """
+    try:
+        details = gitea_api(
+            creds, "POST",
+            f"repos/{config.GITEA_ORG}/{config.GITEA_REPO}/actions/workflows/{workflow}/dispatches?return_run_details=true",
+            {"ref": "main"},
+        )
+    except urllib.error.HTTPError as err:
+        if err.code != 404:
+            raise
+        log.error("%s is not on Gitea's main yet; run update first", workflow)
+        sys.exit(1)
+    log.info("started %s on main", workflow)
     return details["workflow_run_id"]
 
 
@@ -267,6 +276,7 @@ def start_run(creds: dict) -> int:
     """Push the checked-out commit if Gitea's main differs (an empty repo has no main), else dispatch; returns the run id."""
     if main_differs(creds):
         return wait_for_run(creds, push(creds))
+    log.info("nothing new to push")
     return dispatch(creds)
 
 

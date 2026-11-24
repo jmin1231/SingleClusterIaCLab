@@ -4,9 +4,9 @@ from pathlib import Path
 
 FILES = Path(__file__).resolve().parent.parent / "files"
 
-# --- Network (cloudbr1) ---
-BRIDGE_ANCHOR = "cloudbr1-anchor"  # the bridge's always-up port; see the netplan file
-NETPLAN_SRC = FILES / "60-lab-cloudbr1.yaml"
+# --- Network (mgmtbr1) ---
+BRIDGE_ANCHOR = "mgmtbr1-anchor"  # the bridge's always-up port; see the netplan file
+NETPLAN_SRC = FILES / "60-lab-mgmtbr1.yaml"
 NETPLAN_FILE = Path("/etc/netplan") / NETPLAN_SRC.name
 BRIDGE_UP_TIMEOUT = 30  # seconds; NetworkManager activates the bridge after netplan apply returns
 

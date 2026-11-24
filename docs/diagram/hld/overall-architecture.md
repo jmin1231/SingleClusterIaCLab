@@ -17,7 +17,7 @@ What each box in `overall-architecture.drawio` is, in words. Names in *italics*
 One Ubuntu 24.04 machine with KVM (target 4 cores / 16 GB).
 
 - **`HOST_IP`**: the host's LAN address, on the NIC behind the default route.
-- **mgmt (cloudbr1, `10.250.0.0/24`)**: a host-only bridge, so the LAN cannot reach it. The host is `10.250.0.1` on it.
+- **mgmt (mgmtbr1, `10.250.0.0/24`)**: a host-only bridge, so the LAN cannot reach it. The host is `10.250.0.1` on it.
 
 ## Podman
 
@@ -50,7 +50,7 @@ The host's KVM, managed through libvirt. Terraform builds the networks, disks an
 |---|---|
 | libvirt / QEMU | Runs the three VMs. |
 | Storage pool | The Ubuntu cloud image and one disk per VM. |
-| mgmt network | Each VM's management NIC on cloudbr1. Ansible connects over it; the VMs reach DNS and Squid on `10.250.0.1`. |
+| mgmt network | Each VM's management NIC on mgmtbr1. Ansible connects over it; the VMs reach DNS and Squid on `10.250.0.1`. |
 | wan network | `198.51.100.0/24`. Carries the WireGuard tunnels and the HTTPS forwarded to fe-1. |
 
 ## VPC

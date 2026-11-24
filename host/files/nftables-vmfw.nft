@@ -71,9 +71,9 @@ table inet lab_vmfw {
 
         iifname "wan" counter drop
         oifname "wan" counter drop
-        iifname "cloudbr1" ip saddr { 10.250.0.110, 10.250.0.111, 10.250.0.112 } ct original proto-dst 443 ct status dnat accept
-        iifname { "cloudbr1", "site-a", "site-hub", "site-c" } counter drop
-        oifname { "cloudbr1", "site-a", "site-hub", "site-c" } counter drop
+        iifname "mgmtbr1" ip saddr { 10.250.0.110, 10.250.0.111, 10.250.0.112 } ct original proto-dst 443 ct status dnat accept
+        iifname { "mgmtbr1", "site-a", "site-hub", "site-c" } counter drop
+        oifname { "mgmtbr1", "site-a", "site-hub", "site-c" } counter drop
     }
 
     # VMs reach host services only over mgmt, never over the wan.

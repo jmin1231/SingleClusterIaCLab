@@ -17,6 +17,7 @@ from services.squid import squid
 from services.traefik import traefik
 from services.vault import vault
 from services.gitea import gitea
+from services.gitea.config import config as gitea_config
 from services.gitea.runner import runner
 from services.monitoring import monitoring
 
@@ -88,8 +89,13 @@ def cmd_update() -> None:
 
 
 def cmd_teardown() -> None:
-    log.error("teardown is not implemented yet")
-    sys.exit(1)
+    if not INITIALIZED_MARKER.exists():
+        log.error("the lab is not initialized yet; nothing to tear down")
+        sys.exit(1)
+    platform_up()  # after a reboot Vault is sealed and the runner is stopped
+    creds = gitea.gitea_admin(vault.login())
+    gitea.follow_run(creds, gitea.dispatch(creds, gitea_config.GITEA_TEARDOWN_WORKFLOW))
+    log.info("teardown complete: VMs and lab networks removed; update builds them again")
 
 
 def cmd_destroy() -> None:

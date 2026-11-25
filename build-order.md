@@ -311,7 +311,9 @@ stateless `lab_vmfw_l2` on 2026-11-24; the one-time migration that deleted the o
 and host-local requests to HOST_IP:443 to fe-1 198.51.100.11. Its forward chain first drops anything
 routed from wan/mgmtbr1 back to wan/mgmtbr1 (VM to VM through the host, even as a "reply": bridge and
 routed flows share one conntrack table), then permits the three VM management IPs through Traefik's 443
-port mapping, drops other VM forwarding, and drops new host input from wan.
+port mapping, drops other VM forwarding, and drops new host input from wan. Host input from mgmtbr1 allows
+DNS, NTP and Squid on 10.250.0.1 only (2026-11-25, senior review M5): unpinned, root on a VM reached
+aardvark-dns on 10.89.x.1 (recursive, unlogged) and CoreDNS on the LAN IP through eth2.
 Acceptance: `nft list tables` shows both tables, and the marker exists. `up()` first runs `apt_install(VMFW_PACKAGES)` (nftables: preinstalled on Ubuntu, installed if missing, never purged).
 Status: inet `lab_vmfw` Verified, including the three-VM Traefik exception (2026-11-18: fe-1 and tun-1 Alloy push
 through Traefik). bridge `lab_sg` and the hairpin drop Verified 2026-11-24 (commit 388a5c7, run #3): 48/48 in a
@@ -354,6 +356,11 @@ Files: `services/coredns/{dns.py,compose.yaml,conf/Corefile}`
 Records: gitea, vault, proxy, grafana, prometheus and loki point to 10.250.0.1;
 app.lab.test points to {$HOST_IP}, k3s.lab.test to 10.250.0.112.
 Acceptance: `resolvectl query gitea.lab.test` returns 10.250.0.1. Status: Verified.
+No recursion (2026-11-25, senior review H1): the `.` block used to forward every other name to the host's
+resolver, a DNS exfiltration path for every VM and pod around Squid. It now answers REFUSED through
+`template` and logs each query. The VMs need no internet names: apt, k3s and Flux go through Squid, which
+resolves on the host. The host itself only sends `~lab.test` (and its reverse zone) here, so it is unaffected.
+Acceptance: from a VM, `dig example.com @10.250.0.1` is REFUSED and `gitea.lab.test` still resolves. Status: Verified live.
 
 ### B03.2 Certificates
 Files: `lib/pki.py`, `lib/cfssl/ca-csr.json`, `lib/cfssl/ca-config.json` (profile `server` only) (CERTS table in `lib/config.py`)

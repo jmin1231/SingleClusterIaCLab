@@ -1,4 +1,4 @@
-"""CoreDNS: answers lab.test, forwards everything else to the host's upstream DNS."""
+"""CoreDNS: answers lab.test; refuses (and logs) everything else, so the VMs get no internet DNS."""
 
 import logging
 

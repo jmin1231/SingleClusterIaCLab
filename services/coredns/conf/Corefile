@@ -11,12 +11,17 @@ lab.test:53 {
     reload
 }
 
-# everything else: forwarded to systemd-resolved, which sends it to the host's upstream DNS.
-# No loop: resolved only sends lab.test here, and the block above answers lab.test.
+# Everything outside lab.test: refused, and logged. The VMs reach the internet only through Squid,
+# which resolves names itself on the host, so a recursive resolver here would only give a VM or pod
+# a way to send data out in DNS queries (around Squid's allowlist). With no block for a name CoreDNS
+# would refuse it anyway, but silently; this block logs each refused query (journal -> Loki).
 .:53 {
     bind 10.250.0.1 {$HOST_IP}
-    forward . 127.0.0.53
-    cache 30
+
+    template ANY ANY {
+        rcode REFUSED
+    }
+
     errors
     log
 }

@@ -156,9 +156,12 @@ table inet lab_vmfw {
 
     # VMs reach host services only over mgmt, never over the wan, and on mgmt only what they use:
     # DNS (CoreDNS), NTP (chrony) and Squid. Everything else on the host (sshd on 0.0.0.0, anything
-    # added later) is closed to them, on every host address. Traefik's 443 is not here: Podman DNATs
-    # it, so it passes the forward chain above. The established rule lets replies to the host's own
-    # connections into the VMs (ssh, Ansible from the runner) back in.
+    # added later) is closed to them, on every host address. The service rules match 10.250.0.1 only, the
+    # address the VMs are given: the host's other addresses have DNS servers too (CoreDNS on the LAN IP,
+    # Podman's aardvark-dns on 10.89.x.1, which resolves anything and logs nothing), and Linux answers ARP
+    # for all of them on mgmtbr1. Traefik's 443 is not here: Podman DNATs it, so it passes the forward
+    # chain above. The established rule lets replies to the host's own connections into the VMs (ssh,
+    # Ansible from the runner) back in.
     chain input {
         type filter hook input priority filter; policy accept;
 
@@ -166,8 +169,8 @@ table inet lab_vmfw {
         iifname "wan" counter drop
 
         iifname "mgmtbr1" ct state established,related accept
-        iifname "mgmtbr1" udp dport { 53, 123 } accept
-        iifname "mgmtbr1" tcp dport { 53, 3128 } accept
+        iifname "mgmtbr1" ip daddr 10.250.0.1 udp dport { 53, 123 } accept
+        iifname "mgmtbr1" ip daddr 10.250.0.1 tcp dport { 53, 3128 } accept
         iifname "mgmtbr1" icmp type { echo-request, destination-unreachable, time-exceeded } accept
         iifname "mgmtbr1" counter drop
     }

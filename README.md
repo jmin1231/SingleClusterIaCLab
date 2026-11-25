@@ -73,4 +73,3 @@ Web UIs: `https://gitea.lab.test`, `https://grafana.lab.test`, `https://vault.la
 
 - [`docs/three-vpc-design.md`](docs/three-vpc-design.md): the network and WireGuard design.
 - [`docs/diagram/`](docs/diagram/): architecture and traffic diagrams.
-- [`PLAN-enterprise.md`](PLAN-enterprise.md): the original long plan, kept for reference.

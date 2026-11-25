@@ -38,8 +38,8 @@ def up() -> None:
 
 
 def down() -> None:
-    """Remove the lab's tables (and the pre-lab_sg one, if still loaded) and the marker; libvirt's and Podman's stay."""
-    for table in config.VMFW_TABLES + config.VMFW_LEGACY_TABLES:
+    """Remove the lab's tables and the marker; libvirt's and Podman's stay."""
+    for table in config.VMFW_TABLES:
         subprocess.run(["nft", "destroy", "table", *table.split()], check=True)
     config.VMFW_MARKER.unlink(missing_ok=True)
     log.info("VM firewall removed")

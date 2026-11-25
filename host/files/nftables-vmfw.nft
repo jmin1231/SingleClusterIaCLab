@@ -7,14 +7,6 @@
 # are filtered. Bridge and routed traffic share one conntrack table, which is why the source checks
 # run before conntrack and the routed table drops VM -> VM traffic through the host.
 
-# Migration: lab_sg replaced the stateless lab_vmfw_l2. The file loads as one transaction, so the
-# old table goes and lab_sg arrives at the same instant. Bridge conntrack starts empty, though: on
-# that first load a tunnel with traffic in flight loses hub -> spoke packets until the spoke sends
-# again (at most one 25 s keepalive); idle tunnels are unaffected. Remove these two lines and
-# VMFW_LEGACY_TABLES (host/config/config.py) once every host has run up.
-table bridge lab_vmfw_l2
-delete table bridge lab_vmfw_l2
-
 table bridge lab_sg
 delete table bridge lab_sg
 

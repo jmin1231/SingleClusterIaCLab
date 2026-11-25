@@ -13,7 +13,7 @@ sections retain the development history; the call graph below is the current exe
   Traefik, Vault-backed Grafana login, Alloy on all three VMs) are verified on the running lab.
 - Recorded update runs do not prove a fresh build. The Flux/app Secret ordering issue below must be
   fixed before the B08.5 rehearsal.
-- This file replaces the earlier build-order.md, and PLAN-enterprise.md as the working plan.
+- This file replaces the earlier build-order.md, and PLAN-enterprise.md (deleted 2026-11-25; see git history) as the working plan.
 
 | Status | Meaning |
 |---|---|
@@ -296,7 +296,7 @@ Files: `host/vmfw.py`, `host/files/nftables-vmfw.nft`
 |---|---|---|---|
 | `render_rules(network) -> bytes` | Prepend `define lan_card` and `define host_ip` to the .nft file | up | |
 | `up() -> None` | Load `nf_conntrack_bridge`, check, then atomically load both tables. Touch the marker | platform_up / detect_network, render_rules | modprobe, nft, `/run/lab/vmfw.loaded` |
-| `down() -> None` | `nft destroy table` for both tables (and the replaced `lab_vmfw_l2`, if still loaded), remove the marker | platform_down | |
+| `down() -> None` | `nft destroy table` for both tables, remove the marker | platform_down | |
 
 Rules: bridge `lab_sg` is the security-group layer, per VM card: stateful (bridge conntrack; the
 kernel would autoload `nf_conntrack_bridge` with the ct rules, up loads it first) and allow-only. Its
@@ -306,9 +306,8 @@ address (IPv4 source and ARP sender), also for frames to the host. Its forward c
 traffic, checks the destination address, allows ARP only between each spoke and the hub, accepts
 established/related only between the spoke-hub pairs, and group `sg_hub` admits WireGuard from
 `sg_frontend` (udp 51820) and `sg_backend` (udp 51821); everything else is dropped. It replaced the
-stateless `lab_vmfw_l2` on 2026-11-24 (the .nft file deletes the old table; the first load starts bridge
-conntrack empty, so a busy tunnel can drop hub-to-spoke packets until its spoke's next packet, at most
-one 25 s keepalive). inet `lab_vmfw` DNATs LAN requests
+stateless `lab_vmfw_l2` on 2026-11-24; the one-time migration that deleted the old table was removed on
+2026-11-25, after every host had run up. inet `lab_vmfw` DNATs LAN requests
 and host-local requests to HOST_IP:443 to fe-1 198.51.100.11. Its forward chain first drops anything
 routed from wan/mgmtbr1 back to wan/mgmtbr1 (VM to VM through the host, even as a "reply": bridge and
 routed flows share one conntrack table), then permits the three VM management IPs through Traefik's 443
@@ -875,7 +874,7 @@ Done 2026-11-16 evening: removed `lib/cfssl/app-root-csr.json` with APP_ROOT, th
 frontend-client certs and `profiles.client`; removed `STUDY-PLAN.md`, `docs/code-review.md`, the dead
 first `ensure_node`, the unused `GITEA_URL` import, `hostname` in compute.tf, duplicate `.gitignore`
 lines, `cloudstack.lab.test` (Corefile and gateway SANs), stale comments and strings; README rewritten;
-PLAN-enterprise.md marked historical.
+PLAN-enterprise.md marked historical (deleted 2026-11-25).
 
 Left:
 

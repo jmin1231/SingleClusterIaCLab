@@ -1,7 +1,7 @@
 # Three VPCs with one VM each
 
 Status: design for the next implementation, recorded 2026-11-15. This document
-does not change `PLAN-enterprise.md` or claim that the topology is deployed.
+does not claim that the topology is deployed.
 
 ## 1. Decision
 
@@ -326,6 +326,5 @@ filtering prevents guest-to-guest switching, and routed filtering prevents using
 the host as a relay. Guest-only management firewall rules would leave a bypass.
 
 **What happens to the previous plan?**
-`PLAN-enterprise.md` stays untouched. This document records the revised design and
-the implementation differences; older tier addresses and two-NIC descriptions
-remain historical until a separate reconciliation is requested.
+The earlier `PLAN-enterprise.md` was deleted on 2026-11-25 (it is in git history).
+This document records the revised design and the implementation differences.

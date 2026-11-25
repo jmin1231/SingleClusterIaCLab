@@ -250,14 +250,18 @@ Files: `host/network.py`, `host/config/{__init__,config}.py`, `host/files/60-lab
 Acceptance: `ip -4 addr show mgmtbr1` shows 10.250.0.1/24. Status: Verified.
 
 ### B02.3 Time
-Files: `host/ntp.py`, `host/files/chrony-lab.conf`
+Files: `host/ntp.py`, `host/files/chrony-lab.conf`, `host/files/chrony-makestep.conf`
 
 | Function | Purpose | Called by / calls | Touches |
 |---|---|---|---|
-| `up() -> None` | Install chrony and the drop-in. Restart on change | platform_up / apt_install, install_file, systemctl_ok | `/etc/chrony/conf.d/chrony-lab.conf` |
-| `down() -> None` | Remove the drop-in, purge chrony, reinstall systemd-timesyncd | platform_down | |
+| `up() -> None` | Install chrony, the drop-in and the chrony.service makestep drop-in. Restart on change | platform_up / apt_install, install_file, systemctl_ok | `/etc/chrony/conf.d/chrony-lab.conf`, `/etc/systemd/system/chrony.service.d/chrony-makestep.conf` |
+| `down() -> None` | Remove both drop-ins, purge chrony, reinstall systemd-timesyncd | platform_down | |
 
 Acceptance: `chronyc sources` works and port 123 is bound on 10.250.0.1. Status: Verified.
+Makestep (2026-11-25): Ubuntu's chrony.conf reads conf.d first and then sets `makestep 1 3`, so a conf.d makestep
+is overridden; the service drop-in runs `chronyc makestep 1 -1` after every start instead (step on any offset > 1 s).
+Why: the host is a VMware guest; after a suspend it resumed ~13 h slow and chrony would only slew. Acceptance:
+`chronyc tracking` System time < 1 s within minutes of a resume. Status: Implemented.
 
 ### B02.4 Container runtime
 Files: `podman/{podman.py,config/config.py,files/lab-alvistack.list,files/lab-alvistack.pref}`
@@ -600,6 +604,7 @@ Files: `ansible/roles/common/tasks/main.yml`, `ansible/group_vars/all.yml` (`pro
 |---|---|---|
 | apt proxy | `/etc/apt/apt.conf.d/90lab-proxy`: `Acquire::http::Proxy` and `Acquire::https::Proxy` = `{{ proxy_url }}` (Implemented; content tested on fe-1 with `apt-get -c`) | B08.1 |
 | packages | `apt` installs `common_packages` (nftables, wireguard-tools) | proxy |
+| time (2026-11-25) | `/etc/systemd/timesyncd.conf.d/lab.conf`: `NTP={{ ntp_server }}` (10.250.0.1), no fallback, `PollIntervalMaxSec=256`; restart on change; runs first (Implemented) | host chrony (B02.3) |
 
 `site.yml`: the `hosts: all` play gets `become: true` and roles `[ready, common]`.
 Acceptance: `apt-config dump` shows the proxy and `wg --version` works on all three VMs.
@@ -607,8 +612,8 @@ Verified: run #14; on fe-1, tun-1, be-1 the proxy lines are in `apt-config dump`
 wireguard-tools 1.0.20210914 installed. Still to see: a second run reports changed=0.
 
 Considered and skipped (2026-11-17):
-- NTP in the VMs: kvm-clock follows the host, which chrony keeps synced; measured offset under 0.6 s; nothing in a
-  1-2 day lab depends on sub-second time. Production: an NTP client on every VM (CIS baseline).
+- ~~NTP in the VMs~~: reversed 2026-11-25. kvm-clock does not keep wall time in step with the host: after a host
+  suspend the VMs stayed ~13 h slow and apt rejected the package lists (run #4). Now the `time` task above.
 - DNS check task: cloud-init owns DNS and `gitea.lab.test` already resolves on eth2.
 
 ### B08.3 VM firewall inside the guests (Deferred 2026-11-17, plan item 6.1b)

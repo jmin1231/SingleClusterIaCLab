@@ -1,4 +1,5 @@
 # Lab-wide values for every VM (group "all"); roles read them, so a change is made here once.
 
 proxy_url: http://proxy.lab.test:3128
+ntp_server: 10.250.0.1  # host chrony on mgmtbr1 (host/files/chrony-lab.conf)
 common_packages: [nftables, wireguard-tools]

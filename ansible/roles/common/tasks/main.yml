@@ -1,3 +1,32 @@
+# Before apt: a VM clock that is hours off (after a host suspend) makes apt reject the package lists
+- name: timesyncd drop-in directory exists
+  ansible.builtin.file:
+    path: /etc/systemd/timesyncd.conf.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: timesyncd gets the time from the host
+  ansible.builtin.copy:
+    dest: /etc/systemd/timesyncd.conf.d/lab.conf
+    content: |
+      [Time]
+      NTP={{ ntp_server }}
+      FallbackNTP=
+      PollIntervalMaxSec=256
+    owner: root
+    group: root
+    mode: "0644"
+  register: timesyncd_conf
+
+- name: timesyncd uses the new config now
+  ansible.builtin.systemd_service:
+    name: systemd-timesyncd
+    state: restarted
+    enabled: true
+  when: timesyncd_conf is changed
+
 - name: apt uses the lab proxy
   ansible.builtin.copy:
     dest: /etc/apt/apt.conf.d/90lab-proxy

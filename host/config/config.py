@@ -15,6 +15,8 @@ CHRONY_PACKAGES = ["chrony"]  # apt package names
 CHRONY_SERVICE = "chrony"     # systemd unit name
 CHRONY_CONF_SRC = FILES / "chrony-lab.conf"
 CHRONY_CONF_DEST = Path("/etc/chrony/conf.d") / CHRONY_CONF_SRC.name
+CHRONY_DROPIN_SRC = FILES / "chrony-makestep.conf"  # step on any offset > 1 s (after a suspend)
+CHRONY_DROPIN_DEST = Path("/etc/systemd/system/chrony.service.d") / CHRONY_DROPIN_SRC.name
 
 # --- KVM and libvirt ---
 KVM_PACKAGES = ["libvirt-daemon-system", "libvirt-daemon-driver-qemu", "libvirt-clients",

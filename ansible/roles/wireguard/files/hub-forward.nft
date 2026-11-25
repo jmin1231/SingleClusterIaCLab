@@ -1,5 +1,6 @@
 #!/usr/sbin/nft -f
-# Managed by Ansible (roles/wireguard), tun-1 only: the hub forwards just fe-1 -> be-1 tcp 8000 and its replies.
+# Managed by Ansible (roles/wireguard), tun-1 only: the hub forwards just fe-1 -> be-1 tcp 8000 and its replies, and
+# itself answers the spokes only to ping.
 # Addresses must match vpc_ip in terraform/compute.tf and the tunnel interfaces in host_vars/tun-1.yml.
 
 flush ruleset
@@ -11,5 +12,19 @@ table inet lab_hub {
         ct state established,related accept
         iifname "wg0" oifname "wg1" ip saddr 10.1.1.10 ip daddr 10.3.1.10 tcp dport 8000 ct state new accept
         counter comment "dropped forward"
+    }
+
+    # The spokes only pass through the hub. What arrives over a tunnel for tun-1 itself (sshd on 0.0.0.0, anything
+    # added later) is dropped, except ping, on any address: matching the tunnel card, not an address, also covers
+    # 10.2.1.10 (the spokes route 10.2.0.0/16 into the tunnel) and a spoke that edits its own AllowedIPs to send
+    # tun-1's mgmt or wan address through it. Established only, not related: tun-1 starts nothing over the tunnels,
+    # and "related" would also accept an ICMP error a spoke forges about another connection, such as the host's SSH
+    # session to tun-1. Other cards are not affected: WireGuard itself arrives on eth1 (udp 51820/51821, which the
+    # host's lab_sg allows from the spokes), the host's ssh and Ansible on eth2 (mgmt).
+    chain input {
+        type filter hook input priority filter; policy accept;
+        iifname { "wg0", "wg1" } ct state established accept
+        iifname { "wg0", "wg1" } icmp type echo-request accept
+        iifname { "wg0", "wg1" } counter drop comment "spoke to the hub itself"
     }
 }

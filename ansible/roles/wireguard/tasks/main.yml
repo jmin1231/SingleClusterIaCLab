@@ -47,7 +47,7 @@
   when: "'hub' in group_names"
   notify: Apply sysctl
 
-- name: The hub's forward filter is installed
+- name: The hub's filter is installed (forward between the tunnels, input from the spokes)
   ansible.builtin.copy:
     src: hub-forward.nft
     dest: /etc/nftables.conf

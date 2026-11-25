@@ -296,8 +296,9 @@ Files: `host/vmfw.py`, `host/files/nftables-vmfw.nft`
 
 Rules: bridge `lab_sg` is the security-group layer, per VM card: stateful (bridge conntrack; the
 kernel would autoload `nf_conntrack_bridge` with the ct rules, up loads it first) and allow-only. Its
-prerouting chain (priority -300, before conntrack) binds every wan and mgmt tap to its own address
-(IPv4 source and ARP sender), also for frames to the host. Its forward chain drops mgmt tap-to-tap
+prerouting chain (priority -300, before conntrack) drops VLAN-tagged frames from the taps (a VLAN 0 tag
+hid ARP from the ARP check, which matches on the Ethernet type) and binds every wan and mgmt tap to its own
+address (IPv4 source and ARP sender), also for frames to the host. Its forward chain drops mgmt tap-to-tap
 traffic, checks the destination address, allows ARP only between each spoke and the hub, accepts
 established/related only between the spoke-hub pairs, and group `sg_hub` admits WireGuard from
 `sg_frontend` (udp 51820) and `sg_backend` (udp 51821); everything else is dropped. It replaced the
@@ -310,8 +311,13 @@ routed flows share one conntrack table), then permits the three VM management IP
 port mapping, drops other VM forwarding, and drops new host input from wan.
 Acceptance: `nft list tables` shows both tables, and the marker exists. `up()` first runs `apt_install(VMFW_PACKAGES)` (nftables: preinstalled on Ubuntu, installed if missing, never purged).
 Status: inet `lab_vmfw` Verified, including the three-VM Traefik exception (2026-11-18: fe-1 and tun-1 Alloy push
-through Traefik). bridge `lab_sg` written 2026-11-24 and tested in network namespaces on fe-1, not yet applied on
-the host. Down never run.
+through Traefik). bridge `lab_sg` and the hairpin drop Verified 2026-11-24 (commit 388a5c7, run #3): 48/48 in a
+namespace copy of the host bridges on fe-1, then live: tun-1 from udp 51820 to fe-1:9999 no longer arrives, forged
+source (bridged and routed via the host) and forged ICMP errors (naming a tunnel or the host's SSH session) do not
+reach the other VM, controls arrive, isolation probes unchanged, app 200, Flux and CNPG healthy. VLAN-tag drop
+written 2026-11-24 after review: in the namespace copy, without it a VLAN 0 tagged ARP from fe-1 pointed the host's
+ARP entry for be-1's mgmt address at fe-1 (the host's traffic for be-1 went to fe-1; fe-1's tagged replies were
+still dropped as spoofed source); with it 30/30. Not yet applied on the host. Down never run.
 
 ### B02.7 Toolchain for the runner
 Files: `host/toolchain.py`
@@ -621,7 +627,8 @@ Proposed files: `ansible/roles/base/tasks/firewall.yml`, `ansible/roles/base/tem
 Acceptance: from the host, `nc -zv 10.250.0.112 22` works, while any port not in `fw_allow` times out.
 
 Done instead (2026-11-17): only tun-1's forward chain, in the wireguard role (B08.4). Input chains on the VMs and the
-host (B09.3) stay deferred.
+host (B09.3) stay deferred. Added 2026-11-24: tun-1's input chain for the tunnel cards only (B08.4 hub filter), so
+the spokes cannot reach tun-1's sshd through the tunnels; the full guest firewall above stays deferred.
 
 ### B08.4 One data-driven wireguard role (Verified 2026-11-17, run #16 + hub filter run)
 Files: `ansible/host_vars/{fe-1,tun-1,be-1}.yml` (`wg_interfaces`), `ansible/roles/wireguard/{tasks/main.yml,
@@ -634,13 +641,17 @@ Addressing: docs/three-vpc-design.md section 5.
 | key tasks | One key per VM: `wg genkey` into `private.key.tmp` then `mv` to `/etc/wireguard/private.key` (umask 077, `creates:`; a failed genkey leaves no file); `wg pubkey` registered as `wg_public_key` (`changed_when: false`) | peers read `hostvars[peer].wg_public_key.stdout`; all VMs in one play |
 | `wg.conf.j2` | `Address`, `ListenPort` if `listen_port`; `PostUp = wg set %i private-key …` (no PrivateKey line, the key never reaches Ansible); spokes: `PostUp = ip route replace <net> dev %i src {{ vpc_ip }}` per AllowedIPs, `Endpoint = hostvars[peer].wan_ip:endpoint_port`, `PersistentKeepalive = 25` | `notify: Restart wireguard` (restart, not reload: reload skips Address/PostUp) |
 | hub forwarding | `/etc/sysctl.d/90-lab-forward.conf` `net.ipv4.ip_forward = 1`, `when: 'hub' in group_names`, handler `sysctl -p` | |
-| hub filter | `hub-forward.nft` → `/etc/nftables.conf` (`validate: nft -c -f %s`), nftables enabled: forward policy drop, invalid drop, established/related accept, only `wg0→wg1 10.1.1.10 → 10.3.1.10 tcp 8000 ct state new` | handler `Reload nftables` |
+| hub filter | `hub-forward.nft` → `/etc/nftables.conf` (`validate: nft -c -f %s`), nftables enabled: forward policy drop, invalid drop, established/related accept, only `wg0→wg1 10.1.1.10 → 10.3.1.10 tcp 8000 ct state new`; input (added 2026-11-24), only for `wg0`/`wg1`: established (not related) and ping accepted, everything else dropped (counter `spoke to the hub itself`), so neither spoke reaches tun-1's sshd or any other local service on any of its addresses; eth1 and eth2 unchanged | handler `Reload nftables` |
 | service | `wg-quick@<name>` enabled and started per interface | |
 | site.yml | play 2: `hosts: all`, roles `[ready, common, wireguard]` | |
 
 Verified: handshakes on wg0 and wg1; fe-1 `ip route get 10.3.1.10` = `dev wg0 src 10.1.1.10`; ip_forward 1 on tun-1
 only. Hub filter: fe-1 → 10.3.1.10 tcp 8000 connects (temporary listener); tcp 22, tcp 5432 and ping blocked; be-1 →
 fe-1 blocked; drop counter rises; mgmt and wan paths between VMs still blocked. Still to see: changed=0 on a rerun.
+Input chain (2026-11-24): before it, fe-1 opened tun-1 :22 at 10.99.0.1 and 10.2.1.10, be-1 at 10.99.1.1 and
+10.2.1.10. In a namespace copy of tun-1 (old file vs new, 34/34): spokes' tcp 22 on every hub address (also the mgmt
+address forced through the tunnel) and udp 53 dropped, a forged "related" ICMP error naming the host's session to the
+hub dropped; ping, the tcp 8000 path, host ssh over eth2 and the hub's own outbound still work. Not yet applied.
 
 ### B08.5 Teardown, destroy, and a fresh up from zero (Planned after B09.4; includes the bridge rename)
 Done 2026-11-16 evening (Implemented, not yet run): `kvm.remove_lab_vms` before the libvirt purge,

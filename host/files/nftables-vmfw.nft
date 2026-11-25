@@ -58,6 +58,11 @@ table bridge lab_sg {
         type filter hook prerouting priority -300; policy accept;
 
         iifname != @lab_taps return
+        # No VLAN tags from a VM (they use none). Linux strips a VLAN 0 ("priority") tag and handles the frame as
+        # untagged, but the ARP check below matches on the Ethernet type, which a tagged frame reports as the tag's:
+        # a tagged ARP would skip it and could point the host's ARP entry for another VM at the sender (tested
+        # 2026-11-24). The IP check matches on the protocol inside the tag, so it holds either way.
+        ether type { 8021q, 8021ad } counter drop comment "VLAN-tagged"
         iifname . ip saddr != @lab_addrs counter drop comment "spoofed source"
         iifname . arp saddr ip != @lab_addrs counter drop comment "spoofed ARP"
     }

@@ -151,7 +151,8 @@ table inet lab_vmfw {
 
         iifname "wan" counter drop
         oifname "wan" counter drop
-        iifname "mgmtbr1" ip saddr { 10.250.0.110, 10.250.0.111, 10.250.0.112 } ct original proto-dst 443 ct status dnat accept
+        # VMs -> Traefik only: the original destination must be 10.250.0.1:443, not any port mapping on 443
+        iifname "mgmtbr1" ip saddr { 10.250.0.110, 10.250.0.111, 10.250.0.112 } ct original ip daddr 10.250.0.1 ct original proto-dst 443 ct status dnat accept
         iifname { "mgmtbr1", "site-a", "site-hub", "site-c" } counter drop
         oifname { "mgmtbr1", "site-a", "site-hub", "site-c" } counter drop
     }

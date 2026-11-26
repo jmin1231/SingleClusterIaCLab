@@ -311,7 +311,10 @@ stateless `lab_vmfw_l2` on 2026-11-24; the one-time migration that deleted the o
 and host-local requests to HOST_IP:443 to fe-1 198.51.100.11. Its forward chain first drops anything
 routed from wan/mgmtbr1 back to wan/mgmtbr1 (VM to VM through the host, even as a "reply": bridge and
 routed flows share one conntrack table), then permits the three VM management IPs through Traefik's 443
-port mapping, drops other VM forwarding, and drops new host input from wan. Host input from mgmtbr1 allows
+port mapping (Traefik limits the VMs to the push paths and be-1 to the repo: `dynamic/allowlists.yml`, 2026-11-25,
+senior review H2: before, any VM could query Loki/Prometheus, use Loki's delete API and browse Gitea; residual: a VM
+can still push under another VM's labels, no per-VM auth), drops other
+VM forwarding, and drops new host input from wan. Host input from mgmtbr1 allows
 DNS, NTP and Squid on 10.250.0.1 only (2026-11-25, senior review M5): unpinned, root on a VM reached
 aardvark-dns on 10.89.x.1 (recursive, unlogged) and CoreDNS on the LAN IP through eth2.
 Acceptance: `nft list tables` shows both tables, and the marker exists. `up()` first runs `apt_install(VMFW_PACKAGES)` (nftables: preinstalled on Ubuntu, installed if missing, never purged).

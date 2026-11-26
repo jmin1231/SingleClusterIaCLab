@@ -1,0 +1,13 @@
+# Who may use which route (by client IP; lab_sg drops spoofed sources, so a VM can't claim another address).
+# A request from an address not on the list gets 403 from Traefik and never reaches the service.
+http:
+  middlewares:
+    host-only:      # the host only: operator browser, pipeline, health checks
+      ipAllowList:
+        sourceRange: ["10.250.0.1/32"]
+    vms-and-host:   # every VM's Alloy agent (and the host's) pushing telemetry
+      ipAllowList:
+        sourceRange: ["10.250.0.1/32", "10.250.0.110/32", "10.250.0.111/32", "10.250.0.112/32"]
+    flux-and-host:  # be-1's Flux pulling the repo (and the host)
+      ipAllowList:
+        sourceRange: ["10.250.0.1/32", "10.250.0.112/32"]

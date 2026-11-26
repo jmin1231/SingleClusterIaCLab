@@ -1,8 +1,16 @@
 http:
   routers:
-    gitea:
-      rule: "Host(`gitea.lab.test`)"
+    gitea-flux:     # be-1's Flux may only pull the lab repo over git (flux-sync.yaml url)
+      rule: "Host(`gitea.lab.test`) && PathPrefix(`/lab/lab.git/`)"
+      priority: 100 # checked before the catch-all below
       entryPoints: [websecure]
+      middlewares: [flux-and-host]
+      service: gitea
+    gitea:          # everything else (UI, API, runner, push): host only
+      rule: "Host(`gitea.lab.test`)"
+      priority: 1
+      entryPoints: [websecure]
+      middlewares: [host-only]
       service: gitea
 
   services:

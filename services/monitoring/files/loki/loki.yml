@@ -30,6 +30,7 @@ schema_config:
 
 limits_config:
   retention_period: 48h
+  deletion_mode: disabled  # no delete API (retention_enabled would turn it on); logs still expire after 48h
 
 compactor:
   working_directory: /loki/compactor

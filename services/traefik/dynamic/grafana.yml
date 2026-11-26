@@ -1,8 +1,9 @@
 http:
   routers:
-    grafana:
+    grafana:        # the UI: host only (no VM needs Grafana)
       rule: "Host(`grafana.lab.test`)"
       entryPoints: [websecure]
+      middlewares: [host-only]
       service: grafana
 
   services:

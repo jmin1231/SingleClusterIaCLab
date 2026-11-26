@@ -1,8 +1,16 @@
 http:
   routers:
-    prometheus:
-      rule: "Host(`prometheus.lab.test`)"
+    prometheus-write: # VMs may only push metrics (POST to the remote-write path)
+      rule: "Host(`prometheus.lab.test`) && Path(`/api/v1/write`) && Method(`POST`)"
+      priority: 100   # checked before the catch-all below
       entryPoints: [websecure]
+      middlewares: [vms-and-host]
+      service: prometheus
+    prometheus:       # everything else (query, UI, API): host only
+      rule: "Host(`prometheus.lab.test`)"
+      priority: 1
+      entryPoints: [websecure]
+      middlewares: [host-only]
       service: prometheus
 
   services:

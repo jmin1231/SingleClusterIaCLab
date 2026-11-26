@@ -1,8 +1,16 @@
 http:
   routers:
-    loki:
-      rule: "Host(`loki.lab.test`)"
+    loki-push:      # VMs may only push logs (POST to the push path)
+      rule: "Host(`loki.lab.test`) && Path(`/loki/api/v1/push`) && Method(`POST`)"
+      priority: 100 # checked before the catch-all below
       entryPoints: [websecure]
+      middlewares: [vms-and-host]
+      service: loki
+    loki:           # everything else (query, labels, delete): host only
+      rule: "Host(`loki.lab.test`)"
+      priority: 1
+      entryPoints: [websecure]
+      middlewares: [host-only]
       service: loki
 
   services:

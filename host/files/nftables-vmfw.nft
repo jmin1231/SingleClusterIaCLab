@@ -135,6 +135,8 @@ table inet lab_vmfw {
     # Exception: the VMs reach the services behind Traefik (be-1's Flux pulls from Gitea; every VM's Alloy
     # pushes to prometheus.lab.test and loki.lab.test). Traefik's podman port mapping DNATs 10.250.0.1:443
     # into the podman network, so these requests are forwarded, not input; only this one flow passes.
+    # Traefik then narrows it by path (services/traefik/dynamic/allowlists.yml): VMs may only push to
+    # Loki/Prometheus and be-1 may only pull the repo from Gitea; the rest is host-only (403).
     chain forward {
         type filter hook forward priority filter; policy accept;
 
